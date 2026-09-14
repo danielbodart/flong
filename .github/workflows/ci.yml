@@ -18,10 +18,14 @@ jobs:
             experimental-features = nix-command flakes
             system-features = nixos-test benchmark big-parallel kvm
 
-      - uses: DeterminateSystems/magic-nix-cache-action@v9
 
-      # KVM is not available on the standard runner, so the VM test falls back
-      # to software emulation. It is slower but it does run.
+      # No binary cache. The free tier of the Magic Nix Cache was shut down in
+      # February 2025, when GitHub retired the cache API it was built on, and
+      # it now answers 400. Nothing replaces it here because the whole check is
+      # under two minutes; FlakeHub Cache or Cachix are the options if it grows.
+      #
+      # KVM is not available on the standard runner either, so the VM test
+      # falls back to software emulation. Slower, but it does run.
       - name: nix flake check
         run: nix flake check --print-build-logs
 
