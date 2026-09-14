@@ -105,10 +105,10 @@ Declare the container with NixOS's own option, then point a flong at it:
 | option | type | default | |
 |---|---|---|---|
 | `container` | string | attribute name | the `containers.<name>` to drive |
-| `user` `uid` `gid` `home` | | | the identity to drop to; `uid` must match the container's |
+| `user` `uid` `gid` `home` | | | the identity the session runs as; `uid` must match the container's |
 | `workspace` | lines | `git -C "$PWD" rev-parse --show-toplevel` | shell printing the directory to bind in and `cd` to, run as the *invoking* user; non-zero exit aborts |
 | `guard` | lines | `""` | shell run on the host as root, after `workspace`, to refuse if this launcher is not entitled to run |
-| `command` | lines | *required* | shell run as root inside, with the launcher's arguments in `"$@"`; must leave the command to run in `"$@"` |
+| `command` | lines | *required* | shell run as `user` inside, with the launcher's arguments in `"$@"`; must leave the command to run in `"$@"` |
 | `tmpfs` | list of paths | `[ ]` | made container-local and empty |
 | `overlays` | `{ target = lower; }` | `{ }` | lower readable, writes discarded |
 | `launcherInputs` `payloadInputs` | packages | `[ ]` | extra `PATH` for `guard`/`workspace` and for `command` |
@@ -139,10 +139,9 @@ is what `guard` is for.
 
 ### `command`: deciding what runs
 
-`command` runs as root **inside** the container with the launcher's arguments
+`command` runs as `user` **inside** the container with the launcher's arguments
 in `"$@"`. Its job is to decide what to run and leave it in `"$@"`, usually by
-ending in a `set -- …`. Whatever it leaves there is exec'd after privilege is
-dropped to `user`.
+ending in a `set -- …`. Whatever it leaves there is exec'd.
 
 ```nix
 command = ''
@@ -153,6 +152,12 @@ command = ''
   esac
 '';
 ```
+
+**Nothing in a session is privileged.** nspawn drops to `user` before it starts
+pid 1, so tini, this snippet and the payload it chooses all run as `user` —
+there is no moment at which anything inside the container holds root.
+Privilege that a session genuinely needs is arranged by the launcher, on the
+host, before nspawn: a bind mount, a `tmpfs` entry, an `overlays` upper.
 
 ### Carving exceptions out of a bind mount
 
@@ -255,7 +260,8 @@ $ nix flake check
 ```
 
 Boots a VM and exercises every option that changes what the container sees,
-plus the hook ordering, the privilege drop and session cleanup.
+plus the hook ordering, the identity every session process runs as and session
+cleanup.
 
 ## Licence
 

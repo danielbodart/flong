@@ -73,6 +73,10 @@
           isNormalUser = true;
           uid = 1000;
           group = "users";
+          # Declared into a second group, so the subtest below can tell a
+          # session that initialised its supplementary groups from one that
+          # merely arrived with the right uid.
+          extraGroups = [ "audio" ];
           home = "/home/alice";
         };
         users.groups.users.gid = 100;
@@ -170,6 +174,27 @@
           assert "alice" in out, out
           assert "/srv/work" in out, out
           assert "in-the-workspace" in out, out
+
+      with subtest("nothing in the session runs as root"):
+          # pid 1 is tini, and nspawn drops before starting it, so there is no
+          # process in here for a root phase to have belonged to.
+          out = machine.succeed("${launcher} 'id -u; grep ^Uid /proc/1/status'")
+          assert out.split()[0] == "1000", out
+          assert "Uid:\t1000" in out, out
+
+      with subtest("the supplementary groups come with the user"):
+          out = machine.succeed("${launcher} 'id -Gn'")
+          assert "audio" in out, out
+
+      with subtest("the system is reachable at /run/current-system"):
+          # A bind over the mount point rather than a symlink written from
+          # inside, which nothing unprivileged could have written.
+          machine.succeed("${launcher} 'test -x /run/current-system/sw/bin/bash'")
+
+      with subtest("TMPDIR exists and belongs to the payload"):
+          out = machine.succeed("${launcher} 'echo $TMPDIR; stat -c %U:%a \"$TMPDIR\"'")
+          assert "/home/alice/tmp" in out, out
+          assert "alice:700" in out, out
 
       with subtest("a tmpfs masks part of a read-write bind"):
           machine.succeed("test -e /srv/shared/masked/host-only")

@@ -5,38 +5,22 @@ let
 
   mkPayload = name: c: pkgs.writeShellApplication {
     name = "flong-payload-${name}";
-    runtimeInputs = [ pkgs.coreutils pkgs.util-linux ] ++ c.payloadInputs;
+    runtimeInputs = [ pkgs.coreutils ] ++ c.payloadInputs;
     text = ''
       workspace=$1
       shift
       cd "$workspace" || exit 1
 
-      # An inherited TMPDIR names a host path that is absent or root-owned in
-      # here. Passed through env below rather than exported, so it survives the
-      # privilege drop.
-      mkdir -p "${c.home}/tmp"
-      chown ${toString c.uid}:${toString c.gid} "${c.home}/tmp"
-      chmod 0700 "${c.home}/tmp"
-
-      # /run is nspawn's own tmpfs, made fresh at every start, so the symlink
-      # `activate` wrote when the root was prepared is already gone. Every
-      # search path the system exports is relative to it.
-      ln -sfn "''${NIXOS_SYSTEM:?}" /run/current-system
-
       # Leaves the command to run in "$@".
       ${c.command}
 
-      # setpriv EXECs where runuser forks, so the payload becomes this process
+      # EXEC, so the payload becomes this process rather than a child of it,
       # and tini can signal it directly. set-environment is sourced inside a
       # `bash -c` because it expands unset variables, which would abort under
       # the `set -u` this script runs with.
-      exec setpriv --reuid=${toString c.uid} --regid=${toString c.gid} --init-groups -- \
-        env TMPDIR="${c.home}/tmp" HOME="${c.home}" \
-            USER=${c.user} LOGNAME=${c.user} \
-            XDG_RUNTIME_DIR=/run/user/${toString c.uid} \
-        bash -c '. /etc/set-environment
-                 exec "$@"' \
-             flong "$@"
+      exec bash -c '. /etc/set-environment
+                    exec "$@"' \
+           flong "$@"
     '';
   };
 
@@ -218,6 +202,15 @@ let
         machine=${c.container}-$$-''${RANDOM}
         root=${cache}/s-$machine
         cp -a "$prepared" "$root"
+
+        # An inherited TMPDIR names a host path that is absent or root-owned in
+        # there, so the payload gets one of its own. Made out here, in the
+        # session's root, because nothing inside the container is ever root:
+        # the launcher is the only privileged thing in a session, and it is on
+        # this side of nspawn.
+        mkdir -p "$root${c.home}/tmp"
+        chown ${toString c.uid}:${toString c.gid} "$root${c.home}/tmp"
+        chmod 0700 "$root${c.home}/tmp"
         ${mountpointMkdirs}
 
         # NOT exec: that would replace the shell and discard the trap with it.
@@ -234,17 +227,34 @@ let
         # --keep-unit, or nspawn makes a scope of its own and these properties
         # apply to nothing. tini rather than --as-pid2, whose stub reaps
         # orphans but does not forward SIGTERM to the payload.
+        #
+        # --user, so nspawn drops before it starts pid 1: tini, the payload
+        # script and `command` with it all run as `user`, and no process
+        # inside the container is ever root. It resolves the name against the
+        # container's own passwd -- which is what preparing the root produces
+        # -- and initialises the supplementary groups from its group file, so
+        # a user declared into `audio` arrives in it.
+        #
+        # /run is nspawn's own tmpfs, made fresh at every start, so the
+        # symlink `activate` wrote when the root was prepared is already gone,
+        # and every search path the system exports is relative to it. The
+        # closure is bound over the mount point nspawn makes for it rather
+        # than a symlink being written from inside, which nothing unprivileged
+        # could do.
         rc=0
         ${systemdRun} --scope --quiet --unit="$machine" \
           --property=DevicePolicy=closed ${deviceProps} -- \
           ${nspawn} -q --keep-unit --directory="$root" --machine="$machine" \
             --kill-signal=SIGTERM \
             --bind-ro=/nix/store --bind-ro=/nix/var/nix/db \
+            --bind-ro=${closure}:/run/current-system \
             ''${binds[@]+"''${binds[@]}"} \
             --bind="$workspace:$workspace" \
             ${tmpfsFlags} ${overlayFlags} \
+            --user=${c.user} \
             --setenv=PATH=${closure}/sw/bin \
-            --setenv=NIXOS_SYSTEM=${closure} \
+            --setenv=TMPDIR=${c.home}/tmp \
+            --setenv=XDG_RUNTIME_DIR=/run/user/${toString c.uid} \
             ${pkgs.tini}/bin/tini -g -- \
             ${lib.getExe payload} "$workspace" "$@" || rc=$?
         exit "$rc"
@@ -276,7 +286,10 @@ in
 
         user = lib.mkOption {
           type = lib.types.str;
-          description = "User inside the container to drop to before exec.";
+          description = ''
+            User inside the container. nspawn drops to it before it starts
+            pid 1, so everything in the session runs as this user.
+          '';
         };
         uid = lib.mkOption {
           type = lib.types.int;
@@ -342,10 +355,9 @@ in
         command = lib.mkOption {
           type = lib.types.lines;
           description = ''
-            Shell run as root inside the container with the launcher's
+            Shell run as `user` inside the container with the launcher's
             arguments in "$@". Must leave the command to run in "$@", normally
-            by ending in a `set -- ...`. It is exec'd after privilege is
-            dropped to `user`.
+            by ending in a `set -- ...`, which is then exec'd.
           '';
         };
 
