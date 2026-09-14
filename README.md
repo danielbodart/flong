@@ -3,8 +3,8 @@
 # flong
 
 Ephemeral [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/systemd-nspawn.html)
-containers for NixOS that start in about 100ms, run one foreground
-process, and leave nothing behind.
+containers for [NixOS](https://nixos.org/) that start in about 100ms, run one
+foreground process, and leave nothing behind.
 
 > A *flong* is the papier-mâché mould a printer takes from composed type. You
 > make it once, then cast as many identical plates from it as you need, cheaply,
@@ -15,15 +15,18 @@ three milliseconds per session, thrown away when the process exits.
 
 ## What it is for
 
-Running a process inside a real NixOS container when you will do it many times
-a day and care what it costs — per-project toolchains, build sandboxes,
-untrusted code, coding agents. Anything where the boundary is worth having but
-a two-second startup is not.
+Running a process inside a real [NixOS
+container](https://nixos.org/manual/nixos/stable/#ch-containers) when you will
+do it many times a day and care what it costs — per-project toolchains, build
+sandboxes, untrusted code, coding agents. Anything where the boundary is worth
+having but a two-second startup is not.
 
-You declare an ordinary `containers.<name>`, so the whole NixOS module system
-describes it: bind mounts, `allowedDevices`, its own package set, its own
-`/etc`. flong changes only how it is *started*, using the declaration as a
-closure builder and never starting the `container@` unit.
+You declare an ordinary
+[`containers.<name>`](https://search.nixos.org/options?query=containers.%3Cname%3E),
+so the whole NixOS module system describes it: bind mounts, `allowedDevices`,
+its own package set, its own `/etc`. flong changes only how it is *started*,
+using the declaration as a closure builder and never starting the `container@`
+unit.
 
 ## Why it is fast
 
@@ -31,7 +34,7 @@ Measured warm on one machine, timed to first output from the payload:
 
 | approach | time |
 |---|---|
-| `extra-container`, evaluating a config per launch | 4943 ms |
+| [`extra-container`](https://github.com/erikarvstedt/extra-container), evaluating a config per launch | 4943 ms |
 | a declared container, its `.conf` rewritten per launch | 2213 ms |
 | **flong: nspawn against a prepared root** | **117 ms** |
 
@@ -39,7 +42,9 @@ Measured warm on one machine, timed to first output from the payload:
 evaluation. The only value that varies per session is the workspace, and the
 container module already writes every bind mount into
 `/etc/nixos-containers/<name>.conf` as `EXTRA_NSPAWN_FLAGS` — so the closure is
-built once by `nixos-rebuild` and the launcher reads the flags back out.
+built once by
+[`nixos-rebuild`](https://nixos.org/manual/nixos/stable/#sec-changing-config)
+and the launcher reads the flags back out.
 
 **Nothing boots.** systemd inside the container costs 1.23 s across thirty-odd
 units, to run one foreground process. What it buys is the `/etc` boot would
@@ -117,9 +122,12 @@ Declare the container with NixOS's own option, then point a flong at it:
 ### Reaching the launcher
 
 `flong.sandbox.launcher` must run as root, by whatever means you prefer —
-sudo, a root-owned unit, `doas`, `run0`, polkit. Granting a human passwordless
-root over a store path is a decision about your machine, not a consequence of
-declaring a container.
+[sudo](https://www.sudo.ws/), a root-owned unit,
+[`doas`](https://man.openbsd.org/doas),
+[`run0`](https://www.freedesktop.org/software/systemd/man/latest/run0.html),
+[polkit](https://gitlab.freedesktop.org/polkit/polkit). Granting a human
+passwordless root over a store path is a decision about your machine, not a
+consequence of declaring a container.
 
 ```nix
 security.sudo.extraRules = [{
@@ -154,10 +162,11 @@ command = ''
 ```
 
 **Nothing in a session is privileged.** nspawn drops to `user` before it starts
-pid 1, so tini, this snippet and the payload it chooses all run as `user` —
-there is no moment at which anything inside the container holds root.
-Privilege that a session genuinely needs is arranged by the launcher, on the
-host, before nspawn: a bind mount, a `tmpfs` entry, an `overlays` upper.
+pid 1, so [tini](https://github.com/krallin/tini), this snippet and the payload
+it chooses all run as `user` — there is no moment at which anything inside the
+container holds root. Privilege that a session genuinely needs is arranged by
+the launcher, on the host, before nspawn: a bind mount, a `tmpfs` entry, an
+`overlays` upper.
 
 ### Carving exceptions out of a bind mount
 
@@ -185,8 +194,9 @@ owns, or it cannot create files in the result. Mounts nest either way, a
 `tmpfs` hiding part of a bind or a bind reaching back through a `tmpfs`, since
 nspawn orders custom mounts by destination rather than by argument.
 
-**overlayfs reports changing device and inode numbers as a file is written**,
-so never put one over a path holding a sqlite database.
+**[overlayfs](https://docs.kernel.org/filesystems/overlayfs.html) reports
+changing device and inode numbers as a file is written**, so never put one over
+a path holding a [sqlite](https://sqlite.org/) database.
 
 ### `guard` and `workspace`
 
