@@ -97,17 +97,27 @@ let
       inherit name;
       runtimeInputs = [ pkgs.git pkgs.coreutils pkgs.util-linux ] ++ c.launcherInputs;
       text = ''
-        # `guard` decides entitlement, so it stays root. A gate the caller can
-        # ptrace or preload is not a gate, and dropping it would hand the
-        # decision to the process it exists to refuse.
-        ${c.guard}
+        # WORKSPACE FIRST, THEN GUARD.
+        #
+        # The gate has to judge the thing that actually gets mounted. When it
+        # ran first it saw only $PWD, so a `guard` that cared about a
+        # directory had to re-derive it -- duplicating a security-critical
+        # step in every consumer, and agreeing with what got mounted only for
+        # as long as both kept running the same incantation. Override
+        # `workspace` with a monorepo root or a superproject and the two come
+        # apart silently, with nothing to fail.
+        #
+        # So `workspace` is resolved and validated first, and `guard` runs
+        # with $workspace in scope. Guards that only look at $PWD are
+        # unaffected. What this costs is that caller-controlled shell runs
+        # before the gate -- but it runs AS the caller, in their own cwd, so
+        # it buys them nothing they could not have run themselves.
 
-        # `workspace` is the opposite case, and the only place this script
-        # touches attacker-shaped input: it runs a shell -- by default git --
-        # in a directory the caller chose, before any container exists. Its
-        # answer is the caller's to give either way, so there is nothing to
-        # buy by deriving it as root and a whole class of git-in-a-hostile-
-        # checkout escalation to avoid.
+        # `workspace` is the only place this script touches attacker-shaped
+        # input: it runs a shell -- by default git -- in a directory the
+        # caller chose. Its answer is the caller's to give either way, so
+        # there is nothing to buy by deriving it as root and a whole class of
+        # git-in-a-hostile-checkout escalation to avoid.
         #
         # sudo sets SUDO_UID itself, so a caller cannot suppress it to get the
         # root path back; run0 sets it too and pkexec sets PKEXEC_UID. Root is
@@ -120,16 +130,22 @@ let
           # The gid comes from the passwd database rather than from SUDO_GID,
           # which pkexec does not set -- and defaulting it to the uid is only
           # right on a machine where those happen to match.
+          #
+          # `flong "$@"` after the snippet, so it sees the launcher's
+          # arguments exactly as the inline branch below does. Without it the
+          # two branches disagree about $@ depending on whether there was a
+          # caller to drop to, which is not a difference anyone would guess.
           workspace=$(setpriv --reuid="$caller" --regid="$(id -g "$caller")" \
             --init-groups -- ${pkgs.bashNonInteractive}/bin/bash -euo pipefail \
-            -c ${lib.escapeShellArg c.workspace}) || exit 1
+            -c ${lib.escapeShellArg c.workspace} flong "$@") || exit 1
         else
           workspace=$(${c.workspace}) || exit 1
         fi
 
         # Resolved before it is checked, so what gets validated is what gets
-        # mounted: a symlink swapped between here and the launch would
-        # otherwise point somewhere else by the time nspawn followed it.
+        # mounted -- and so that `guard` below judges the same canonical path
+        # nspawn will be handed, rather than whatever spelling the caller
+        # happened to use.
         workspace=$(realpath -e -- "$workspace") || exit 1
         # nspawn splits --bind on ':', and a newline would corrupt the flag
         # string it is spliced into, so a workspace naming either cannot be
@@ -147,6 +163,14 @@ let
           echo "${name}: workspace is not a directory: $workspace" >&2
           exit 1
         }
+
+        # `guard` decides entitlement, so it stays root. A gate the caller can
+        # ptrace or preload is not a gate, and dropping it would hand the
+        # decision to the process it exists to refuse. It reads $workspace --
+        # absolute, resolved, and already refused if it held anything nspawn
+        # cannot express, which makes it the better-sanitised of the two
+        # caller-shaped values in scope here. The other is $PWD.
+        ${c.guard}
 
         # passwd, group and shadow are written by the activation script, not
         # carried in the closure, so a root assembled from the store alone
@@ -272,7 +296,11 @@ in
           default = ''git -C "$PWD" rev-parse --show-toplevel'';
           description = ''
             Shell printing the directory to bind into the container and cd
-            into. Runs on the host before launch; a non-zero exit aborts.
+            into. Runs on the host before launch, with the launcher's
+            arguments in "$@"; a non-zero exit aborts.
+
+            Runs *before* `guard`, so that the gate can judge the directory
+            this resolves to rather than re-deriving one of its own.
 
             Runs as the *invoking* user rather than as root -- it reads a
             directory the caller chose, which is the one piece of
@@ -300,10 +328,14 @@ in
 
             Runs as root, unlike `workspace`, and deliberately: this is the
             gate, and a gate the caller could ptrace or preload would be
-            handing the decision to the process it exists to refuse. Note
-            that it therefore runs before the privilege drop and before the
-            workspace is known -- if it judges a directory, it must resolve
-            that directory itself.
+            handing the decision to the process it exists to refuse.
+
+            Runs *after* `workspace`, with `$workspace` in scope: absolute,
+            symlink-resolved, and already refused if it held anything nspawn
+            cannot express. Judge that rather than re-deriving a directory
+            from `$PWD` -- what `$workspace` holds is exactly what will be
+            bound, where anything a guard works out for itself agrees with
+            the mount only by coincidence.
           '';
         };
 

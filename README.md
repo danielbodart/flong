@@ -274,16 +274,30 @@ guard = ''
 A container that is a strict *subset* of what the caller already reaches needs
 no guard: there is nothing to gain by entering it.
 
-### Who each hook runs as
+### Who each hook runs as, and in what order
 
-`guard` and `workspace` both run on the host before the container exists, and
-they run as different users, because they are doing opposite jobs.
+`guard` and `workspace` both run on the host before the container exists.
+They run in that order — workspace, then guard — and as different users,
+because they are doing opposite jobs.
+
+**`workspace` runs first**, so that the gate can judge the directory it
+resolves to. When the gate went first it saw only `$PWD`, and a guard that
+cared about a directory had to re-derive one — duplicating a
+security-critical step in every consumer, and agreeing with what actually got
+mounted only for as long as both kept running the same incantation. Override
+`workspace` with a monorepo root or a superproject and the two come apart
+silently, with nothing to fail. So `guard` gets `$workspace` in scope, and
+what it judges is exactly what gets bound.
+
+The cost is that caller-controlled shell runs before the gate. It runs *as*
+the caller though, in their own cwd, so it buys them nothing they could not
+have run themselves — and a `guard` with side effects should know that a
+refused caller has already reached `workspace`.
 
 **`guard` runs as root.** It is the gate. A gate the caller could `ptrace`,
 `LD_PRELOAD` or otherwise reach into would be handing its decision to the
 process it exists to refuse, so it keeps the privilege the launcher was
-invoked with. Note the consequence: it runs *before* the workspace is known,
-so a guard that judges a directory has to resolve that directory itself.
+invoked with.
 
 **`workspace` runs as the invoking user** — `SUDO_UID`, or `PKEXEC_UID`,
 falling back to root only when there is no unprivileged caller, as when a unit

@@ -44,6 +44,7 @@
       # alice, or the second caller to come along fails on the file rather
       # than on anything this test is about.
       "f /tmp/workspace-uid 0666 root root -"
+      "f /tmp/workspace-args 0666 root root -"
     ];
 
     containers.demo = {
@@ -92,7 +93,18 @@
       # invoking user when there is one, root only when there is not.
       workspace = ''
         id -u > /tmp/workspace-uid
+        printf '%s\n' "$*" > /tmp/workspace-args
         realpath /srv/work
+      '';
+
+      # Proves the gate sees the resolved workspace rather than having to
+      # work one out from $PWD. Refusing here would fail every subtest below,
+      # which is the point: the value has to be there and has to be right.
+      guard = ''
+        [ "$workspace" = /srv/work ] || {
+          echo "guard saw workspace='$workspace'" >&2
+          exit 1
+        }
       '';
 
       # Masks part of the read-write bind above, and -- at /srv/nested --
@@ -200,6 +212,23 @@
           machine.succeed("${launcher} 'true'")
           uid = machine.succeed("cat /tmp/workspace-uid").strip()
           assert uid == "0", f"workspace ran as uid {uid}, expected root"
+
+      with subtest("guard runs after workspace and sees the resolved path"):
+          # The guard above refuses unless $workspace is already resolved, so
+          # every launch in this file proves the ordering. Assert it directly
+          # too, or a guard silently emptied of its check would still pass.
+          out = machine.succeed("${launcher} 'echo ok'")
+          assert "ok" in out, out
+          err = machine.fail("${badWorkspace} 2>&1")
+          assert "workspace contains" in err, err
+
+      with subtest("workspace sees the launcher's arguments, caller or not"):
+          machine.succeed("sudo -u alice sudo -n ${launcher} 'true'")
+          assert machine.succeed("cat /tmp/workspace-args").strip() == "true"
+          # The root fallback takes a different code path to reach the same
+          # snippet, and used to disagree with it about "$@".
+          machine.succeed("${launcher} 'false || true'")
+          assert machine.succeed("cat /tmp/workspace-args").strip() == "false || true"
 
       with subtest("a workspace naming a colon is refused, not mounted"):
           machine.succeed("test -d '/srv/odd:name'")
