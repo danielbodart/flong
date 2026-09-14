@@ -1,12 +1,16 @@
+<p align="center"><img src="logo.png" alt="Logo" width="600"></p>
+
 # flong
 
 Ephemeral [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/systemd-nspawn.html)
 containers for NixOS that start in well under a second, run one foreground
 process, and leave nothing behind.
 
-A *flong* is the papier-mâché mould a printer takes from composed type. You
-make it once, then cast as many identical plates from it as you need, cheaply,
-and each plate is used and discarded. That is exactly this: one prepared root
+> A *flong* is the papier-mâché mould a printer takes from composed type. You
+> make it once, then cast as many identical plates from it as you need, cheaply,
+> and each plate is used and discarded.
+
+That is exactly this: one prepared root
 per boot, copied in about three milliseconds per session, thrown away when the
 process exits.
 
