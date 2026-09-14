@@ -10,38 +10,24 @@ process, and leave nothing behind.
 > make it once, then cast as many identical plates from it as you need, cheaply,
 > and each plate is used and discarded.
 
-That is exactly this: one prepared root per boot, copied in about three
-milliseconds per session, thrown away when the process exits.
-
-```nix
-flong.build = {
-  user = "alice";
-  uid = 1000;
-  gid = 100;
-  home = "/home/alice";
-  command = ''set -- cargo build --release'';
-};
-```
-
-```console
-$ sudo /nix/store/…-build
-```
+That is the mechanism exactly: one prepared root per boot, copied in about
+three milliseconds per session, thrown away when the process exits.
 
 ## What it is for
 
-Running a process inside a real NixOS container when you will do that many
-times a day and care what it costs. Per-project toolchains, build sandboxes,
-untrusted code, and coding agents — anything where the boundary is worth having
-but a two-second startup is not.
+Running a process inside a real NixOS container when you will do it many times
+a day and care what it costs — per-project toolchains, build sandboxes,
+untrusted code, coding agents. Anything where the boundary is worth having but
+a two-second startup is not.
 
-The container is a genuine `containers.<name>` declaration, so the full NixOS
-module system describes it: bind mounts, `allowedDevices`, its own package set,
-its own `/etc`. What flong changes is how it is *started*.
+You declare an ordinary `containers.<name>`, so the whole NixOS module system
+describes it: bind mounts, `allowedDevices`, its own package set, its own
+`/etc`. flong changes only how it is *started*, using the declaration as a
+closure builder and never starting the `container@` unit.
 
 ## Why it is fast
 
-Three designs, measured warm on the same machine, timed to first output from
-the payload:
+Measured warm on one machine, timed to first output from the payload:
 
 | approach | time |
 |---|---|
@@ -49,60 +35,30 @@ the payload:
 | a declared container, its `.conf` rewritten per launch | 2213 ms |
 | **flong: nspawn against a prepared root** | **673 ms** |
 
-Where that time goes:
+**Nothing is evaluated at launch.** Around 2.5 s of the slow cases is Nix
+evaluation. The only value that varies per session is the workspace, and the
+container module already writes every bind mount into
+`/etc/nixos-containers/<name>.conf` as `EXTRA_NSPAWN_FLAGS` — so the closure is
+built once by `nixos-rebuild` and the launcher reads the flags back out.
 
-| | |
-|---|---|
-| Nix evaluation of the container config | ~2500 ms |
-| `systemctl start` — nspawn plus systemd booting inside | 1453 ms |
-| `systemd-nspawn` with no boot at all | 70 ms |
-| `activate` into a prepared root (once per boot) | 176 ms |
-| copying that prepared root for a session | 3 ms |
-| a transient systemd scope | 40 ms |
-| the payload itself, no container at all | 537 ms |
-
-Three things account for the difference.
-
-**Nothing is evaluated at launch.** The only value that varies per session is
-the workspace, and the NixOS container module already writes every bind mount
-into `/etc/nixos-containers/<name>.conf` as `EXTRA_NSPAWN_FLAGS`. So the
-closure is built once by `nixos-rebuild` and the launcher reads the flags back
-out. The `container@` unit that the declaration also installs is never started;
-the declaration is used purely as a closure builder.
-
-**Nothing boots.** Starting systemd inside the container costs 1.23 s of
-userspace across thirty-odd units — to run a single foreground process. Skipping
-it is most of the remaining win, and the price is the `/etc` that boot would
-have produced.
+**Nothing boots.** systemd inside the container costs 1.23 s across thirty-odd
+units, to run one foreground process. What it buys is the `/etc` boot would
+have produced: `passwd`, `group` and `shadow` come from the activation script,
+not the closure, so a root assembled from the store alone cannot resolve a
+username. flong pays that once instead — `activate` runs into a prepared root
+under `/run`, keyed by the closure hash, and each session gets a `cp -a` of it
+in 3 ms.
 
 **The store is shared, not copied.** `/nix/store` is bind-mounted read-only, so
-a container's package set costs nothing to "ship" — it is already on the
-machine. This is the part a Docker-shaped tool cannot do.
-
-## What a skipped boot costs, and how it is paid
-
-The closure carries a complete `/etc` — `nsswitch.conf`, `os-release`,
-`profile`, CA certificates — but **not** `passwd`, `group` or `shadow`. Those
-are written by the activation script, which is why a root assembled from the
-store alone cannot resolve a username.
-
-So `activate` is run once into a prepared root, under `/run`, keyed by the
-closure hash. Every session then gets a `cp -a` of that. Keying by the hash
-means a rebuilt container gets a *different* cache rather than a stale one, and
-living under `/run` means it dies with the boot rather than becoming state.
-
-Nothing of the host leaks into it: it is the container's own closure running
-its own `activate`. The only host-derived file is `resolv.conf`, which nspawn
-copies in — and which is deleted from the prepared root, so a snapshot of one
-network's DNS does not follow a laptop to the next one.
+a package set costs nothing to ship — it is already on the machine, which is
+the part a Docker-shaped tool cannot do. It also means every container can read
+every package on the host.
 
 ## Usage
 
 ```nix
 {
   inputs.flong.url = "github:danielbodart/flong";
-
-  # …
 
   imports = [ inputs.flong.nixosModules.default ];
 }
@@ -115,7 +71,6 @@ Declare the container with NixOS's own option, then point a flong at it:
   containers.sandbox = {
     ephemeral = true;
     autoStart = false;          # flong starts it, not systemd
-    privateNetwork = false;
 
     bindMounts."/home/alice/.cargo" = {
       hostPath = "/home/alice/.cargo";
@@ -131,7 +86,7 @@ Declare the container with NixOS's own option, then point a flong at it:
         home = "/home/alice";
       };
       users.groups.users.gid = 100;
-      environment.systemPackages = with pkgs; [ cargo rustc coreutils ];
+      environment.systemPackages = with pkgs; [ cargo rustc ];
     };
   };
 
@@ -145,15 +100,26 @@ Declare the container with NixOS's own option, then point a flong at it:
 }
 ```
 
+### Options
+
+| option | type | default | |
+|---|---|---|---|
+| `container` | string | attribute name | the `containers.<name>` to drive |
+| `user` `uid` `gid` `home` | | | the identity to drop to; `uid` must match the container's |
+| `workspace` | lines | `git -C "$PWD" rev-parse --show-toplevel` | shell printing the directory to bind in and `cd` to, run as the *invoking* user; non-zero exit aborts |
+| `guard` | lines | `""` | shell run on the host as root, after `workspace`, to refuse if this launcher is not entitled to run |
+| `command` | lines | *required* | shell run as root inside, with the launcher's arguments in `"$@"`; must leave the command to run in `"$@"` |
+| `tmpfs` | list of paths | `[ ]` | made container-local and empty |
+| `overlays` | `{ target = lower; }` | `{ }` | lower readable, writes discarded |
+| `launcherInputs` `payloadInputs` | packages | `[ ]` | extra `PATH` for `guard`/`workspace` and for `command` |
+| `launcher` | package | *read-only* | the generated launcher; run it as root |
+
 ### Reaching the launcher
 
-`flong.sandbox.launcher` is the resulting package, and it must run as root.
-How you arrange that is deliberately left to you: granting a human passwordless
+`flong.sandbox.launcher` must run as root, by whatever means you prefer —
+sudo, a root-owned unit, `doas`, `run0`, polkit. Granting a human passwordless
 root over a store path is a decision about your machine, not a consequence of
-declaring a container, and sudo is only one of the ways to do it — a root-owned
-systemd unit, `doas`, `run0` or polkit are all reasonable.
-
-The common case is a NOPASSWD sudo rule plus a thin wrapper on `PATH`:
+declaring a container.
 
 ```nix
 security.sudo.extraRules = [{
@@ -164,39 +130,19 @@ security.sudo.extraRules = [{
     options = [ "NOPASSWD" ];
   }];
 }];
-
-environment.systemPackages = [
-  (pkgs.writeShellScriptBin "sandbox-cargo" ''
-    exec /run/wrappers/bin/sudo ${lib.getExe config.flong.sandbox.launcher} "$@"
-  '')
-];
 ```
 
-Grant the **store path**, never the wrapper or a command name: that way the
-thing the rule permits is fixed at build time and changes only when you rebuild.
-NOPASSWD is reasonable exactly when the container is a subset of what the user
-already reaches. When it is not, see `guard` below.
+Grant the **store path**, never a wrapper or a command name, so what the rule
+permits changes only when you rebuild. NOPASSWD is reasonable exactly when the
+container is a subset of what the caller already reaches; when it is not, that
+is what `guard` is for.
 
-### Options
+### `command`: deciding what runs
 
-| option | type | default | |
-|---|---|---|---|
-| `container` | string | attribute name | the `containers.<name>` to drive |
-| `user` `uid` `gid` `home` | | | the identity to drop to; `uid` must match the container's |
-| `workspace` | lines | `git -C "$PWD" rev-parse --show-toplevel` | shell printing the directory to bind in and `cd` to, run as the *invoking* user; non-zero exit aborts |
-| `guard` | lines | `""` | shell run on the host as root before launch, to refuse if this launcher is not entitled to run |
-| `command` | lines | *required* | shell run as root inside, with the launcher's arguments in `"$@"`; must leave the command to run in `"$@"` |
-| `tmpfs` | list of paths | `[ ]` | made container-local and empty |
-| `overlays` | `{ target = lower; }` | `{ }` | lower readable, writes discarded |
-| `launcherInputs` `payloadInputs` | packages | `[ ]` | extra `PATH` for `guard`/`workspace` and for `command` |
-| `launcher` | package | *read-only* | the generated launcher; run it as root |
-
-### `command` and the `"$@"` contract
-
-`command` runs **as root, inside the container**, with the launcher's arguments
-in `"$@"`. Its job is to decide what to run and leave it in `"$@"` — usually by
+`command` runs as root **inside** the container with the launcher's arguments
+in `"$@"`. Its job is to decide what to run and leave it in `"$@"`, usually by
 ending in a `set -- …`. Whatever it leaves there is exec'd after privilege is
-dropped.
+dropped to `user`.
 
 ```nix
 command = ''
@@ -208,63 +154,45 @@ command = ''
 '';
 ```
 
-It sits outside the privilege drop rather than inside it for two reasons:
-`writeShellApplication` runs shellcheck over it there, and the inner shell is
-single-quoted, so a snippet containing a quote would break the launch rather
-than fail to lint.
-
 ### Carving exceptions out of a bind mount
 
-A bind mount is all-or-nothing, and `bindMounts` can only emit `--bind`.
-Because flong drives nspawn directly, two more options are available, both
-applied *after* the container's own mounts — so they carve a subdirectory out
-of one:
+A bind mount is all-or-nothing and `bindMounts` can only emit `--bind`. Because
+flong drives nspawn directly, two more options are available, applied after the
+container's own mounts so they carve a subdirectory out of one:
 
 ```nix
-# Container-local and empty. The host's contents are invisible; nothing
-# written survives. For caches, scratch, and state captured on the host that
-# would be wrong in here.
+# Container-local and empty: host contents invisible, nothing written survives.
 tmpfs = [ "/home/alice/.cache" ];
 
-# The lower directory is readable and every write goes to an upper layer that
-# dies with the container. "Read-only with a layer on top", which a plain bind
-# cannot express.
+# Lower readable, every write to an upper layer that dies with the container.
 overlays."/home/alice/.state" = "/home/alice/.state";
 ```
 
-Both are mounted so that `user` can actually write to them, which is less
-obvious than it sounds:
+Both are mounted so `user` can write to them. A bare `--tmpfs` is root-owned
+0755, which an unprivileged payload cannot write to and fails *quietly* on,
+most programs treating an unwritable cache as a missing one; flong mounts each
+entry `mode=0755,uid=<uid>,gid=<gid>` instead. Append your own options to
+override: `"/home/alice/.cache:mode=0700,uid=1000"`.
 
-* A bare `--tmpfs` mounts **root-owned, 0755**, so an unprivileged payload
-  cannot write to it at all — and fails quietly, because most programs treat an
-  unwritable cache as a missing one. flong therefore mounts each `tmpfs` entry
-  `mode=0755,uid=<uid>,gid=<gid>`. To choose your own, append options to the
-  path and they are passed through untouched: `"/home/alice/.cache:mode=0700,uid=1000"`.
-
-* An overlay's upper layer is chowned to the same user, so writes land
-  somewhere it owns. **The merged directory still takes its ownership from the
-  lower one**, though, and that part is not flong's to fix: overlaying a
-  root-owned directory gives you a root-owned merged directory that `user`
-  cannot create files in. Overlay directories the user already owns.
-
-The overlay's upper layer is created inside the session root, so the cleanup
-that already exists removes it. nspawn's own empty-string form
-(`--overlay=lower::dest`) is deliberately not used: it puts the upper under the
-host's `/var/tmp` and leaks it if the session is killed.
+An overlay's upper layer is chowned to `user`, but **the merged directory takes
+its ownership from the lower one** — so overlay directories the user already
+owns, or it cannot create files in the result. Mounts nest either way, a
+`tmpfs` hiding part of a bind or a bind reaching back through a `tmpfs`, since
+nspawn orders custom mounts by destination rather than by argument.
 
 **overlayfs reports changing device and inode numbers as a file is written**,
 so never put one over a path holding a sqlite database.
 
-### `guard` is load-bearing
+### `guard` and `workspace`
 
-However you arrange to run the launcher, it is reachable directly by anyone who
-can run it — so a wrapper in front of it is a convenience and not a gate. If a
-container grants more than its caller already had (devices, credentials,
-another user's sockets), the launcher must establish its own entitlement:
+The launcher is reachable directly by anyone who can run it, so a wrapper in
+front of it is a convenience and not a gate. If the container grants more than
+its caller already had — devices, credentials, another user's sockets — the
+launcher must establish its own entitlement:
 
 ```nix
 guard = ''
-  if [ "$(project-tier "$PWD")" != trusted ]; then
+  if [ "$(project-tier "$workspace")" != trusted ]; then
     echo "refusing: this checkout is not trusted" >&2
     exit 1
   fi
@@ -274,156 +202,60 @@ guard = ''
 A container that is a strict *subset* of what the caller already reaches needs
 no guard: there is nothing to gain by entering it.
 
-### Who each hook runs as, and in what order
+Both hooks run on the host before the container exists, in this order:
 
-`guard` and `workspace` both run on the host before the container exists.
-They run in that order — workspace, then guard — and as different users,
-because they are doing opposite jobs.
+**`workspace` first, as the invoking user** — `SUDO_UID` or `PKEXEC_UID`,
+falling back to root only when nothing unprivileged invoked it. It runs `git`
+in a directory the caller chose, and git reads configuration out of whatever
+repository it is pointed at, so it derives a caller's answer without a caller's
+privilege. What it prints is resolved with `realpath`, then refused if it names
+a `:` or a newline, neither of which `--bind` can express.
 
-**`workspace` runs first**, so that the gate can judge the directory it
-resolves to. When the gate went first it saw only `$PWD`, and a guard that
-cared about a directory had to re-derive one — duplicating a
-security-critical step in every consumer, and agreeing with what actually got
-mounted only for as long as both kept running the same incantation. Override
-`workspace` with a monorepo root or a superproject and the two come apart
-silently, with nothing to fail. So `guard` gets `$workspace` in scope, and
-what it judges is exactly what gets bound.
-
-The cost is that caller-controlled shell runs before the gate. It runs *as*
-the caller though, in their own cwd, so it buys them nothing they could not
-have run themselves — and a `guard` with side effects should know that a
-refused caller has already reached `workspace`.
-
-**`guard` runs as root.** It is the gate. A gate the caller could `ptrace`,
-`LD_PRELOAD` or otherwise reach into would be handing its decision to the
-process it exists to refuse, so it keeps the privilege the launcher was
-invoked with.
-
-**`workspace` runs as the invoking user** — `SUDO_UID`, or `PKEXEC_UID`,
-falling back to root only when there is no unprivileged caller, as when a unit
-starts the launcher directly. It is the one place the launcher handles input
-shaped by whoever called it: by default it runs `git` inside a directory the
-caller chose, and git reads configuration out of the repository it is pointed
-at. Running that as root buys nothing — the answer is the caller's to give
-either way — and costs the whole class of escalation where a crafted checkout
-turns a launcher grant into host root.
-
-What `workspace` prints is then resolved with `realpath`, so what gets checked
-is what gets mounted, and refused if it names a `:` or a newline — neither is
-expressible in nspawn's `--bind`, and a path containing one would otherwise be
-silently mounted somewhere other than where it said. *Which* directory is
-allowed is still `guard`'s business, not this check's.
-
-## Design notes
-
-**tini, not `--as-pid2`.** nspawn's stub init reaps orphans, which is half of
-what is needed and is documented as if it were all of it. It does not deliver
-SIGTERM to the payload — a trap in pid 2 never fires and the stub simply halts
-the container. tini forwards, with `-g` so a payload that shells out takes its
-children with it. `--kill-signal` is set to SIGTERM explicitly, because nspawn
-defaults it to SIGKILL whenever `--boot` is not used.
-
-**A transient scope.** Driving nspawn from a script means there is no unit, and
-none of the cgroup confinement `container@.service` provides.
-`systemd-run --scope` restores it — `DevicePolicy=closed` plus the container's
-own `allowedDevices`, translated from the declaration — and transient units
-need no daemon-reload, so it costs ~40 ms rather than the ~5 s a drop-in would.
-nspawn is given `--keep-unit`, or it creates a scope of its own and those
-properties apply to nothing.
-
-**setpriv, not runuser.** runuser forks and stays alive as the parent, so a
-SIGTERM aimed at the container lands on it and the payload never hears about
-it. setpriv execs, so the payload becomes the process tini can signal.
-
-**Unique machine names.** One per invocation rather than per workspace, so two
-sessions in the same directory do not collide. It costs nothing, because there
-is no unit to install — which is what makes concurrent sessions possible at
-all.
-
-**Residue is swept on the way in.** A clean exit leaks nothing; a SIGKILL
-leaves nspawn's unix-export mount behind, and the next run with the same name
-refuses to start. No trap survives SIGKILL, so each launch sweeps first.
-Liveness is decided by the owning pid, which is encoded in the session name and
-alive from before the directory exists — asking `machinectl` looks more correct
-and is racy, because a session that has copied its root but not yet started
-nspawn is not registered yet, and a concurrent launch would delete it.
+**`guard` second, as root**, with `$workspace` in scope, so it judges the
+directory that actually gets mounted rather than re-deriving one from `$PWD`.
+It stays root because a gate the caller could `ptrace` is not a gate. Note that
+a refused caller has already reached `workspace`, which matters only if yours
+has side effects.
 
 ## Limitations
 
-**NixOS only.** It is built on `containers.<name>` and the NixOS activation
-script. There is no portable version of this.
+**NixOS only.** Built on `containers.<name>` and the NixOS activation script.
+There is no portable version of this.
 
 **It reads a generated file.** Bind mounts are recovered by parsing
-`EXTRA_NSPAWN_FLAGS` out of `/etc/nixos-containers/<name>.conf`. That file is
-an implementation detail of the NixOS container module, not a stable interface.
-It has been stable for a long time, but nothing upstream promises it, and the
-VM test in `tests/` exists mostly to catch the day it changes.
-
-That file is written unescaped, so a bind mount path containing whitespace or
-a `:` does not fail the parse — it splits into two flags that are each valid
-and neither correct, and the container quietly gets mounts nobody declared.
-There is no way to notice that at runtime, so such a path is refused at
-evaluation instead, by an assertion over the driven container's `bindMounts`.
+`EXTRA_NSPAWN_FLAGS` out of `/etc/nixos-containers/<name>.conf`, an
+implementation detail nothing upstream promises; the VM test exists mostly to
+catch the day it changes. It is written unescaped, so a path containing
+whitespace or a `:` would split into two flags each valid and neither correct;
+undetectable at runtime, so such a path is refused at evaluation.
 
 **No uid namespace.** `privateUsers = "pick"` is not usable here: a
 bind-mounted file owned by the host uid maps to an unmapped uid inside, so
 reads fail with `Permission denied`, and `--private-users-ownership=map` does
-not change the outcome on a 6.18 kernel. What a flong isolates is the
-filesystem, the device set and the process tree — not a container escape.
+not change that on a 6.18 kernel. A flong isolates the filesystem, the device
+set and the process tree — not a container escape.
 
-**The store is shared.** `/nix/store` is bind-mounted read-only into every
-container. That is the source of the speed, and it means the container can read
-every package on the host. Secrets do not belong in the store anyway, but it is
-worth saying out loud.
-
-**One process.** There is no init, no logging, no restart, no dependency
-ordering. If you want a service, declare a service.
+**One process.** No init, no logging, no restart, no dependency ordering. If
+you want a service, declare a service.
 
 ## Versions
 
-Every push to `trunk` that passes `nix flake check` is released, tagged and
-published automatically. There is no manual step and no tag to cut by hand.
+Every push to `trunk` that passes `nix flake check` is tagged and released
+automatically. The version is derived from the repository rather than stored in
+it: `./VERSION` is the major, the commit count the minor, the CI run number (or
+a UTC timestamp locally) the patch — so releases are unique and monotonic.
 
-The version is **derived from the repository rather than stored in it**:
-
-| part | from | |
-|---|---|---|
-| major | `./VERSION` | the one deliberate decision; `0` says the option interface is still moving |
-| minor | `git rev-list --count HEAD` | only ever rises, and names exactly one commit |
-| patch | `GITHUB_RUN_NUMBER`, else a UTC timestamp | separates two builds of the same commit, and sorts a local build after CI's |
-
-```console
-$ ./scripts/version.sh
-0.42.20260914102120      # built locally
-0.42.317                 # the same commit, built by CI run 317
-```
-
-So every release is unique and monotonic, two pushes cannot collide on a tag,
-and a re-run of the same commit gets its own. Release notes are the commits
-since the previous tag.
-
-Pin it like any flake. `flake.lock` records the exact revision, which is a
-stronger statement than the tag:
-
-```console
-$ nix flake update flong
-```
-
-Bump `VERSION` when the option interface breaks — removing an option, or
-changing what an existing one means.
+Pin it like any flake; `flake.lock` records the exact revision, a stronger
+statement than the tag. Bump `VERSION` when the option interface breaks.
 
 ## Development
 
 ```console
-$ nix flake check          # the VM test, and shellcheck over the version script
-$ nix build .#checks.x86_64-linux.basic
+$ nix flake check
 ```
 
-The test boots a VM and exercises every option that changes what the container
-sees: the workspace override, a read-write bind, a tmpfs masking part of that
-bind, an overlay whose writes must not reach the lower directory, the privilege
-drop, the NOPASSWD grant, exit-status propagation, session cleanup, and reuse
-of the prepared root.
+Boots a VM and exercises every option that changes what the container sees,
+plus the hook ordering, the privilege drop and session cleanup.
 
 ## Licence
 
