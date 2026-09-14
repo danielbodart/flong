@@ -24,3 +24,43 @@ jobs:
       # to software emulation. It is slower but it does run.
       - name: nix flake check
         run: nix flake check --print-build-logs
+
+  # CONTINUOUS RELEASE. Trunk-based: every push to trunk that passes the check
+  # above is published, with no manual step and no tag to cut by hand. Gated on
+  # a direct push to trunk (never a pull request) and on the check having
+  # succeeded, so a red commit never ships.
+  #
+  # The derived version (major.commit-count.run-number, scripts/version.sh)
+  # makes every build a unique, monotonic release, so two pushes cannot collide
+  # on a tag and a re-run of the same commit does not either.
+  release:
+    needs: [check]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/trunk' && needs.check.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # fetch-depth: 0 because the minor is the commit count and the script
+      # REFUSES a shallow clone; fetch-tags so the previous tag resolves when
+      # the notes are generated below.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Notes from the COMMITS since the last release. Trunk-based means direct
+      # pushes and no pull requests, so GitHub's PR-based --generate-notes
+      # would come out empty. On the first release there is no prior tag, so
+      # fall back to the head commit rather than dumping the whole history.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="$(./scripts/version.sh)"
+          PREV="$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)"
+          if [ -n "$PREV" ] && git rev-parse -q --verify "refs/tags/$PREV" >/dev/null; then
+            git log "$PREV..HEAD" --pretty='- %s (%h)' > notes.md
+          else
+            { echo 'First automated release.'; echo; git log -1 --pretty='- %s (%h)'; } > notes.md
+          fi
+          gh release create "v$V" --title "v$V" --notes-file notes.md --target "$GITHUB_SHA"

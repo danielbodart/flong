@@ -330,10 +330,43 @@ worth saying out loud.
 **One process.** There is no init, no logging, no restart, no dependency
 ordering. If you want a service, declare a service.
 
+## Versions
+
+Every push to `trunk` that passes `nix flake check` is released, tagged and
+published automatically. There is no manual step and no tag to cut by hand.
+
+The version is **derived from the repository rather than stored in it**:
+
+| part | from | |
+|---|---|---|
+| major | `./VERSION` | the one deliberate decision; `0` says the option interface is still moving |
+| minor | `git rev-list --count HEAD` | only ever rises, and names exactly one commit |
+| patch | `GITHUB_RUN_NUMBER`, else a UTC timestamp | separates two builds of the same commit, and sorts a local build after CI's |
+
+```console
+$ ./scripts/version.sh
+0.42.20260914102120      # built locally
+0.42.317                 # the same commit, built by CI run 317
+```
+
+So every release is unique and monotonic, two pushes cannot collide on a tag,
+and a re-run of the same commit gets its own. Release notes are the commits
+since the previous tag.
+
+Pin it like any flake. `flake.lock` records the exact revision, which is a
+stronger statement than the tag:
+
+```console
+$ nix flake update flong
+```
+
+Bump `VERSION` when the option interface breaks — removing an option, or
+changing what an existing one means.
+
 ## Development
 
 ```console
-$ nix flake check          # builds the module and runs the VM test
+$ nix flake check          # the VM test, and shellcheck over the version script
 $ nix build .#checks.x86_64-linux.basic
 ```
 
