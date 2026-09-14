@@ -28,6 +28,22 @@
       "f /srv/shared/masked/host-only 0644 root root - should-not-be-visible"
       "d /srv/lower 0755 alice users -"
       "f /srv/lower/seed 0644 alice users - from-the-lower-layer"
+
+      # A bind mount nested inside a flong tmpfs: the tmpfs hides the host's
+      # /srv/nested, and the bind reaches through it to /srv/keep.
+      "d /srv/nested 0755 root root -"
+      "f /srv/nested/hidden 0644 root root - masked-by-the-tmpfs"
+      "d /srv/keep 0755 root root -"
+      "f /srv/keep/marker 0644 root root - through-the-tmpfs"
+
+      # Exists, and names a character nspawn's --bind cannot express.
+      "d /srv/odd:name 0755 root root -"
+
+      # Written by whoever evaluates `workspace`, which is the point of the
+      # subtest that reads it -- so it has to be writable by root AND by
+      # alice, or the second caller to come along fails on the file rather
+      # than on anything this test is about.
+      "f /tmp/workspace-uid 0666 root root -"
     ];
 
     containers.demo = {
@@ -37,6 +53,15 @@
 
       bindMounts."/srv/shared" = {
         hostPath = "/srv/shared";
+        isReadOnly = false;
+      };
+
+      # Nested inside the tmpfs declared below. nspawn sorts custom mounts by
+      # destination rather than honouring argument order, so the tmpfs lands
+      # first and this reaches through it -- which is how a single socket is
+      # carved out of a runtime directory that must otherwise stay hidden.
+      bindMounts."/srv/nested/keep" = {
+        hostPath = "/srv/keep";
         isReadOnly = false;
       };
 
@@ -62,15 +87,49 @@
 
       # Not a git checkout, which is the point: the default asks git, and a
       # fast container is not obliged to be a repository.
-      workspace = ''realpath /srv/work'';
+      #
+      # The uid is recorded so the test can assert WHO evaluated this: the
+      # invoking user when there is one, root only when there is not.
+      workspace = ''
+        id -u > /tmp/workspace-uid
+        realpath /srv/work
+      '';
 
-      # Masks part of the read-write bind above.
-      tmpfs = [ "/srv/shared/masked" ];
+      # Masks part of the read-write bind above, and -- at /srv/nested --
+      # hides a host directory that a nested bind then reaches through.
+      tmpfs = [ "/srv/shared/masked" "/srv/nested" ];
 
       # Readable from the lower directory; writes must not reach it.
       overlays."/opt/layered" = "/srv/lower";
 
       command = ''set -- bash -c "$1"'';
+    };
+
+    # A second launcher over the SAME container, differing only in what its
+    # workspace resolves to. The directory exists, so this is the colon being
+    # refused rather than a missing path.
+    flong.badworkspace = {
+      container = "demo";
+      user = "alice";
+      uid = 1000;
+      gid = 100;
+      home = "/home/alice";
+      workspace = ''realpath "/srv/odd:name"'';
+      command = ''set -- true'';
+    };
+
+    # A third over the same container, taking the DEFAULT workspace. It exists
+    # so that the default snippet is built -- and therefore shellchecked --
+    # rather than only the overrides the other two declare, which is how a
+    # `$PWD` inside it once reached a release unlinted. It also covers the
+    # documented contract that a non-zero exit from `workspace` aborts.
+    flong.defaultworkspace = {
+      container = "demo";
+      user = "alice";
+      uid = 1000;
+      gid = 100;
+      home = "/home/alice";
+      command = ''set -- true'';
     };
 
     # Reaching the launcher is the consumer's business, not the module's.
@@ -88,6 +147,8 @@
   testScript = { nodes, ... }:
     let
       launcher = lib.getExe nodes.machine.flong.demo.launcher;
+      badWorkspace = lib.getExe nodes.machine.flong.badworkspace.launcher;
+      defaultWorkspace = lib.getExe nodes.machine.flong.defaultworkspace.launcher;
     in
     ''
       machine.wait_for_unit("multi-user.target")
@@ -127,6 +188,35 @@
       with subtest("an unprivileged user can be granted the launcher"):
           out = machine.succeed("sudo -u alice sudo -n ${launcher} 'id -un'")
           assert "alice" in out, out
+
+      with subtest("workspace is evaluated as the invoking user, not as root"):
+          # The line above went through sudo, so the caller was alice.
+          uid = machine.succeed("cat /tmp/workspace-uid").strip()
+          assert uid == "1000", f"workspace ran as uid {uid}, expected alice"
+
+      with subtest("workspace falls back to root when there is no caller"):
+          # Invoked straight from the test's root shell: no SUDO_UID to drop
+          # to, so root is the only identity available and the launch stands.
+          machine.succeed("${launcher} 'true'")
+          uid = machine.succeed("cat /tmp/workspace-uid").strip()
+          assert uid == "0", f"workspace ran as uid {uid}, expected root"
+
+      with subtest("a workspace naming a colon is refused, not mounted"):
+          machine.succeed("test -d '/srv/odd:name'")
+          err = machine.fail("${badWorkspace} 2>&1")
+          assert "workspace contains" in err, err
+
+      with subtest("the default workspace aborts outside a git checkout"):
+          machine.fail("cd /srv && ${defaultWorkspace}")
+
+      with subtest("a bind mount nested inside a tmpfs reaches through it"):
+          # The tmpfs hides the host's /srv/nested ...
+          out = machine.succeed("${launcher} 'ls -A /srv/nested'")
+          assert "hidden" not in out, out
+          # ... and the bind beneath it is still mounted, because nspawn
+          # orders custom mounts by destination rather than by argument.
+          out = machine.succeed("${launcher} 'cat /srv/nested/keep/marker'")
+          assert "through-the-tmpfs" in out, out
 
       with subtest("nothing is left behind"):
           machine.succeed("test -z \"$(find /run/flong -maxdepth 2 -name 's-*' 2>/dev/null)\"")

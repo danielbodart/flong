@@ -183,8 +183,8 @@ already reaches. When it is not, see `guard` below.
 |---|---|---|---|
 | `container` | string | attribute name | the `containers.<name>` to drive |
 | `user` `uid` `gid` `home` | | | the identity to drop to; `uid` must match the container's |
-| `workspace` | lines | `git -C "$PWD" rev-parse --show-toplevel` | shell printing the directory to bind in and `cd` to; non-zero exit aborts |
-| `guard` | lines | `""` | shell run on the host before launch, to refuse if this launcher is not entitled to run |
+| `workspace` | lines | `git -C "$PWD" rev-parse --show-toplevel` | shell printing the directory to bind in and `cd` to, run as the *invoking* user; non-zero exit aborts |
+| `guard` | lines | `""` | shell run on the host as root before launch, to refuse if this launcher is not entitled to run |
 | `command` | lines | *required* | shell run as root inside, with the launcher's arguments in `"$@"`; must leave the command to run in `"$@"` |
 | `tmpfs` | list of paths | `[ ]` | made container-local and empty |
 | `overlays` | `{ target = lower; }` | `{ }` | lower readable, writes discarded |
@@ -274,6 +274,32 @@ guard = ''
 A container that is a strict *subset* of what the caller already reaches needs
 no guard: there is nothing to gain by entering it.
 
+### Who each hook runs as
+
+`guard` and `workspace` both run on the host before the container exists, and
+they run as different users, because they are doing opposite jobs.
+
+**`guard` runs as root.** It is the gate. A gate the caller could `ptrace`,
+`LD_PRELOAD` or otherwise reach into would be handing its decision to the
+process it exists to refuse, so it keeps the privilege the launcher was
+invoked with. Note the consequence: it runs *before* the workspace is known,
+so a guard that judges a directory has to resolve that directory itself.
+
+**`workspace` runs as the invoking user** — `SUDO_UID`, or `PKEXEC_UID`,
+falling back to root only when there is no unprivileged caller, as when a unit
+starts the launcher directly. It is the one place the launcher handles input
+shaped by whoever called it: by default it runs `git` inside a directory the
+caller chose, and git reads configuration out of the repository it is pointed
+at. Running that as root buys nothing — the answer is the caller's to give
+either way — and costs the whole class of escalation where a crafted checkout
+turns a launcher grant into host root.
+
+What `workspace` prints is then resolved with `realpath`, so what gets checked
+is what gets mounted, and refused if it names a `:` or a newline — neither is
+expressible in nspawn's `--bind`, and a path containing one would otherwise be
+silently mounted somewhere other than where it said. *Which* directory is
+allowed is still `guard`'s business, not this check's.
+
 ## Design notes
 
 **tini, not `--as-pid2`.** nspawn's stub init reaps orphans, which is half of
@@ -318,6 +344,12 @@ script. There is no portable version of this.
 an implementation detail of the NixOS container module, not a stable interface.
 It has been stable for a long time, but nothing upstream promises it, and the
 VM test in `tests/` exists mostly to catch the day it changes.
+
+That file is written unescaped, so a bind mount path containing whitespace or
+a `:` does not fail the parse — it splits into two flags that are each valid
+and neither correct, and the container quietly gets mounts nobody declared.
+There is no way to notice that at runtime, so such a path is refused at
+evaluation instead, by an assertion over the driven container's `bindMounts`.
 
 **No uid namespace.** `privateUsers = "pick"` is not usable here: a
 bind-mounted file owned by the host uid maps to an unmapped uid inside, so

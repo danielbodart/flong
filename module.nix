@@ -97,8 +97,56 @@ let
       inherit name;
       runtimeInputs = [ pkgs.git pkgs.coreutils pkgs.util-linux ] ++ c.launcherInputs;
       text = ''
+        # `guard` decides entitlement, so it stays root. A gate the caller can
+        # ptrace or preload is not a gate, and dropping it would hand the
+        # decision to the process it exists to refuse.
         ${c.guard}
-        workspace=$(${c.workspace}) || exit 1
+
+        # `workspace` is the opposite case, and the only place this script
+        # touches attacker-shaped input: it runs a shell -- by default git --
+        # in a directory the caller chose, before any container exists. Its
+        # answer is the caller's to give either way, so there is nothing to
+        # buy by deriving it as root and a whole class of git-in-a-hostile-
+        # checkout escalation to avoid.
+        #
+        # sudo sets SUDO_UID itself, so a caller cannot suppress it to get the
+        # root path back; run0 sets it too and pkexec sets PKEXEC_UID. Root is
+        # the fallback for a launcher started from a unit, where there is no
+        # unprivileged caller to drop to.
+        caller=''${SUDO_UID:-''${PKEXEC_UID:-}}
+        if [ -n "$caller" ]; then
+          # shellcheck disable=SC2016  # the snippet is data for `bash -c`,
+          # so it is quoted to survive THIS shell rather than to run in it.
+          # The gid comes from the passwd database rather than from SUDO_GID,
+          # which pkexec does not set -- and defaulting it to the uid is only
+          # right on a machine where those happen to match.
+          workspace=$(setpriv --reuid="$caller" --regid="$(id -g "$caller")" \
+            --init-groups -- ${pkgs.bashNonInteractive}/bin/bash -euo pipefail \
+            -c ${lib.escapeShellArg c.workspace}) || exit 1
+        else
+          workspace=$(${c.workspace}) || exit 1
+        fi
+
+        # Resolved before it is checked, so what gets validated is what gets
+        # mounted: a symlink swapped between here and the launch would
+        # otherwise point somewhere else by the time nspawn followed it.
+        workspace=$(realpath -e -- "$workspace") || exit 1
+        # nspawn splits --bind on ':', and a newline would corrupt the flag
+        # string it is spliced into, so a workspace naming either cannot be
+        # expressed as a mount and is refused rather than mounted wrongly.
+        # WHICH directory is allowed remains `guard`'s business, not this.
+        nl='
+'
+        case $workspace in
+          *:* | *"$nl"*)
+            echo "${name}: workspace contains ':' or a newline: $workspace" >&2
+            exit 1
+            ;;
+        esac
+        [ -d "$workspace" ] || {
+          echo "${name}: workspace is not a directory: $workspace" >&2
+          exit 1
+        }
 
         # passwd, group and shadow are written by the activation script, not
         # carried in the closure, so a root assembled from the store alone
@@ -225,6 +273,18 @@ in
           description = ''
             Shell printing the directory to bind into the container and cd
             into. Runs on the host before launch; a non-zero exit aborts.
+
+            Runs as the *invoking* user rather than as root -- it reads a
+            directory the caller chose, which is the one piece of
+            attacker-shaped input the launcher handles, and its answer is the
+            caller's to give either way. Root only when there is no
+            unprivileged caller to drop to, as when a unit starts the
+            launcher directly.
+
+            What it prints is resolved with `realpath` and then refused if it
+            names a `:` or a newline, neither of which nspawn's `--bind` can
+            express. Deciding *which* directory is allowed is `guard`'s job,
+            not this one's.
           '';
         };
 
@@ -237,6 +297,13 @@ in
             more than its caller already had: the launcher runs as root, and
             whatever you put in front of it is reachable directly by anyone
             who can run it, so a wrapper is a convenience rather than a gate.
+
+            Runs as root, unlike `workspace`, and deliberately: this is the
+            gate, and a gate the caller could ptrace or preload would be
+            handing the decision to the process it exists to refuse. Note
+            that it therefore runs before the privilege drop and before the
+            workspace is known -- if it judges a directory, it must resolve
+            that directory itself.
           '';
         };
 
@@ -305,5 +372,26 @@ in
   # no containers.<name> to drive.
   config = lib.mkIf (cfg != { }) {
     boot.enableContainers = true;
+
+    # Bind mounts are recovered by word-splitting EXTRA_NSPAWN_FLAGS, which the
+    # NixOS container module writes unescaped. A path holding whitespace does
+    # not fail that parse -- it splits into two flags that are each valid and
+    # neither correct, so the container silently gets mounts nobody declared.
+    # A colon is the same story one level down, inside --bind's own SRC:DEST.
+    # Refused at eval, because there is no way to notice it at runtime.
+    assertions = lib.concatMap
+      (c: lib.concatMap
+        (m: map
+          (p: {
+            assertion = ! lib.any (bad: lib.hasInfix bad p) [ " " "\t" "\n" ":" ];
+            message = ''
+              flong: containers.${c.container} has a bind mount path that
+              cannot survive EXTRA_NSPAWN_FLAGS: "${p}". Whitespace and ':'
+              are not expressible there; rename the path.
+            '';
+          })
+          [ m.hostPath m.mountPoint ])
+        (lib.attrValues config.containers.${c.container}.bindMounts))
+      (lib.attrValues cfg);
   };
 }
