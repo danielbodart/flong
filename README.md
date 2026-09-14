@@ -3,7 +3,7 @@
 # flong
 
 Ephemeral [systemd-nspawn](https://www.freedesktop.org/software/systemd/man/systemd-nspawn.html)
-containers for NixOS that start in about a tenth of a second, run one foreground
+containers for NixOS that start in about 100ms, run one foreground
 process, and leave nothing behind.
 
 > A *flong* is the papier-mâché mould a printer takes from composed type. You
