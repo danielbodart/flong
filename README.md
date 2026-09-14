@@ -1,4 +1,4 @@
-<p align="center"><img src="logo.png" alt="Logo" width="600"></p>
+<p align="center"><img src="logo.png" alt="flong" width="600"></p>
 
 # flong
 
@@ -10,9 +10,8 @@ process, and leave nothing behind.
 > make it once, then cast as many identical plates from it as you need, cheaply,
 > and each plate is used and discarded.
 
-That is exactly this: one prepared root
-per boot, copied in about three milliseconds per session, thrown away when the
-process exits.
+That is exactly this: one prepared root per boot, copied in about three
+milliseconds per session, thrown away when the process exits.
 
 ```nix
 flong.build = {
