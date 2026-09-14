@@ -234,8 +234,9 @@ in
           description = ''
             Shell run on the host before launch, to establish that this
             launcher is entitled to run. Needed whenever the container grants
-            more than its caller already had, because `sudoUsers` is NOPASSWD
-            and so any wrapper in front of it is a convenience, not a gate.
+            more than its caller already had: the launcher runs as root, and
+            whatever you put in front of it is reachable directly by anyone
+            who can run it, so a wrapper is a convenience rather than a gate.
           '';
         };
 
@@ -285,19 +286,14 @@ in
           description = "Extra packages on PATH for `command`.";
         };
 
-        sudoUsers = lib.mkOption {
-          type = lib.types.listOf lib.types.str;
-          default = [ ];
-          description = ''
-            Users granted NOPASSWD sudo on this launcher, by store path rather
-            than command name, so what runs is fixed at build time.
-          '';
-        };
-
         launcher = lib.mkOption {
           type = lib.types.package;
           readOnly = true;
-          description = "The generated launcher. Run it with sudo.";
+          description = ''
+            The generated launcher. Must be run as root; how you arrange that
+            -- sudo, doas, run0, a systemd unit -- is deliberately not this
+            module's business.
+          '';
         };
       };
 
@@ -305,14 +301,9 @@ in
     }));
   };
 
+  # Required rather than chosen: without the NixOS container machinery there is
+  # no containers.<name> to drive.
   config = lib.mkIf (cfg != { }) {
     boot.enableContainers = true;
-
-    security.sudo.extraRules = lib.concatMap
-      (c: lib.optional (c.sudoUsers != [ ]) {
-        users = c.sudoUsers;
-        commands = [{ command = lib.getExe c.launcher; options = [ "NOPASSWD" ]; }];
-      })
-      (lib.attrValues cfg);
   };
 }

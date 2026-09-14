@@ -16,7 +16,6 @@ flong.build = {
   uid = 1000;
   gid = 100;
   home = "/home/alice";
-  sudoUsers = [ "alice" ];
   command = ''set -- cargo build --release'';
 };
 ```
@@ -138,23 +137,42 @@ Declare the container with NixOS's own option, then point a flong at it:
     uid = 1000;              # must match the container's
     gid = 100;
     home = "/home/alice";
-    sudoUsers = [ "alice" ];
     command = ''set -- cargo "$@"'';
   };
 }
 ```
 
-`flong.sandbox.launcher` is the resulting package. Run it with `sudo` — the
-module has already granted `sudoUsers` NOPASSWD on that exact store path. A
-thin wrapper on `PATH` is the usual way to reach it:
+### Reaching the launcher
+
+`flong.sandbox.launcher` is the resulting package, and it must run as root.
+How you arrange that is deliberately left to you: granting a human passwordless
+root over a store path is a decision about your machine, not a consequence of
+declaring a container, and sudo is only one of the ways to do it — a root-owned
+systemd unit, `doas`, `run0` or polkit are all reasonable.
+
+The common case is a NOPASSWD sudo rule plus a thin wrapper on `PATH`:
 
 ```nix
+security.sudo.extraRules = [{
+  users = [ "alice" ];
+  commands = [{
+    # A store path, not a command name, so what runs is fixed at build time.
+    command = lib.getExe config.flong.sandbox.launcher;
+    options = [ "NOPASSWD" ];
+  }];
+}];
+
 environment.systemPackages = [
   (pkgs.writeShellScriptBin "sandbox-cargo" ''
     exec /run/wrappers/bin/sudo ${lib.getExe config.flong.sandbox.launcher} "$@"
   '')
 ];
 ```
+
+Grant the **store path**, never the wrapper or a command name: that way the
+thing the rule permits is fixed at build time and changes only when you rebuild.
+NOPASSWD is reasonable exactly when the container is a subset of what the user
+already reaches. When it is not, see `guard` below.
 
 ### Options
 
@@ -168,8 +186,7 @@ environment.systemPackages = [
 | `tmpfs` | list of paths | `[ ]` | made container-local and empty |
 | `overlays` | `{ target = lower; }` | `{ }` | lower readable, writes discarded |
 | `launcherInputs` `payloadInputs` | packages | `[ ]` | extra `PATH` for `guard`/`workspace` and for `command` |
-| `sudoUsers` | list of users | `[ ]` | NOPASSWD grant on the launcher's store path |
-| `launcher` | package | *read-only* | the generated launcher |
+| `launcher` | package | *read-only* | the generated launcher; run it as root |
 
 ### `command` and the `"$@"` contract
 
@@ -237,11 +254,10 @@ so never put one over a path holding a sqlite database.
 
 ### `guard` is load-bearing
 
-`sudoUsers` is NOPASSWD, so any wrapper you put in front of the launcher is a
-convenience and not a gate — anything running as that user can invoke the
-launcher directly. If a container grants more than its caller already had
-(devices, credentials, another user's sockets), the launcher must establish its
-own entitlement:
+However you arrange to run the launcher, it is reachable directly by anyone who
+can run it — so a wrapper in front of it is a convenience and not a gate. If a
+container grants more than its caller already had (devices, credentials,
+another user's sockets), the launcher must establish its own entitlement:
 
 ```nix
 guard = ''

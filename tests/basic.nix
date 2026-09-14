@@ -6,7 +6,7 @@
 {
   name = "flong-basic";
 
-  nodes.machine = { pkgs, ... }: {
+  nodes.machine = { config, pkgs, ... }: {
     imports = [ ../module.nix ];
 
     virtualisation.memorySize = 3072;
@@ -59,7 +59,6 @@
       uid = 1000;
       gid = 100;
       home = "/home/alice";
-      sudoUsers = [ "alice" ];
 
       # Not a git checkout, which is the point: the default asks git, and a
       # fast container is not obliged to be a repository.
@@ -73,6 +72,17 @@
 
       command = ''set -- bash -c "$1"'';
     };
+
+    # Reaching the launcher is the consumer's business, not the module's.
+    # This is the pattern the README documents, so the test covers that rather
+    # than a module feature.
+    security.sudo.extraRules = [{
+      users = [ "alice" ];
+      commands = [{
+        command = lib.getExe config.flong.demo.launcher;
+        options = [ "NOPASSWD" ];
+      }];
+    }];
   };
 
   testScript = { nodes, ... }:
@@ -114,7 +124,7 @@
           machine.succeed("${launcher} 'exit 0'")
           machine.fail("${launcher} 'exit 3'")
 
-      with subtest("sudoUsers grants NOPASSWD on the launcher"):
+      with subtest("an unprivileged user can be granted the launcher"):
           out = machine.succeed("sudo -u alice sudo -n ${launcher} 'id -un'")
           assert "alice" in out, out
 
