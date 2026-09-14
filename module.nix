@@ -108,23 +108,37 @@ let
         # the fallback for a launcher started from a unit, where there is no
         # unprivileged caller to drop to.
         caller=''${SUDO_UID:-''${PKEXEC_UID:-}}
-        if [ -n "$caller" ]; then
-          # shellcheck disable=SC2016  # the snippet is data for `bash -c`,
-          # so it is quoted to survive THIS shell rather than to run in it.
-          # The gid comes from the passwd database rather than from SUDO_GID,
-          # which pkexec does not set -- and defaulting it to the uid is only
-          # right on a machine where those happen to match.
-          #
-          # `flong "$@"` after the snippet, so it sees the launcher's
-          # arguments exactly as the inline branch below does. Without it the
-          # two branches disagree about $@ depending on whether there was a
-          # caller to drop to, which is not a difference anyone would guess.
-          workspace=$(setpriv --reuid="$caller" --regid="$(id -g "$caller")" \
-            --init-groups -- ${pkgs.bashNonInteractive}/bin/bash -euo pipefail \
-            -c ${lib.escapeShellArg c.workspace} flong "$@") || exit 1
-        else
-          workspace=$(${c.workspace}) || exit 1
-        fi
+
+        # Captured because "$@" inside a function is the function's own
+        # arguments, and every snippet must see the launcher's.
+        launcher_args=("$@")
+
+        # One way to run a consumer's snippet, shared by `workspace` and the
+        # two bind lists, so they cannot drift in how much privilege they get.
+        #
+        # The gid comes from the passwd database rather than from SUDO_GID,
+        # which pkexec does not set -- and defaulting it to the uid is only
+        # right on a machine where those happen to match.
+        #
+        # `flong "$@"` after the snippet, so it sees the launcher's arguments
+        # in both branches. Without it the two disagree about $@ depending on
+        # whether there was a caller to drop to, which is not a difference
+        # anyone would guess.
+        run_as_caller() {
+          if [ -n "$caller" ]; then
+            setpriv --reuid="$caller" --regid="$(id -g "$caller")" \
+              --init-groups -- ${pkgs.bashNonInteractive}/bin/bash -euo pipefail \
+              -c "$1" flong ''${launcher_args[@]+"''${launcher_args[@]}"}
+          else
+            ${pkgs.bashNonInteractive}/bin/bash -euo pipefail \
+              -c "$1" flong ''${launcher_args[@]+"''${launcher_args[@]}"}
+          fi
+        }
+
+        # shellcheck disable=SC2016  # a snippet is data for `bash -c`, so it
+        # is quoted to survive THIS shell rather than to run in it. Applies to
+        # all three call sites.
+        workspace=$(run_as_caller ${lib.escapeShellArg c.workspace}) || exit 1
 
         # Resolved before it is checked, so what gets validated is what gets
         # mounted -- and so that `guard` below judges the same canonical path
@@ -148,12 +162,58 @@ let
           exit 1
         }
 
+        # The extra binds, resolved with $workspace already in scope so a
+        # snippet can answer "what travels with THIS directory" -- which is
+        # the question a consumer pairing repositories is actually asking.
+        # Exported rather than passed, because the snippet runs in a bash of
+        # its own under setpriv and would not otherwise inherit it.
+        export workspace
+
+        # Same treatment $workspace gets, for the same reasons, applied to
+        # every line: resolved first so what is validated is what is mounted,
+        # then refused if it names anything --bind cannot express. Deciding
+        # WHICH directories are allowed remains `guard`'s business.
+        #
+        # `exit 1` inside the function lands in the command substitution's
+        # subshell, so every caller needs its own `|| exit 1` -- a failure
+        # here must abort the launch, not mount a shorter list.
+        resolve_binds() {
+          local raw=$1 p out=""
+          while IFS= read -r p; do
+            [ -n "$p" ] || continue
+            p=$(realpath -e -- "$p") || exit 1
+            case $p in
+              *:* | *"$nl"*)
+                echo "${name}: extra bind names ':' or a newline: $p" >&2
+                exit 1
+                ;;
+            esac
+            [ -d "$p" ] || {
+              echo "${name}: extra bind is not a directory: $p" >&2
+              exit 1
+            }
+            out=$out$p$nl
+          done <<< "$raw"
+          printf '%s' "$out"
+        }
+
+        # shellcheck disable=SC2016
+        extra_binds=$(resolve_binds "$(run_as_caller ${lib.escapeShellArg c.extraBinds})") || exit 1
+        # shellcheck disable=SC2016
+        extra_binds_ro=$(resolve_binds "$(run_as_caller ${lib.escapeShellArg c.extraBindsRo})") || exit 1
+
         # `guard` decides entitlement, so it stays root. A gate the caller can
         # ptrace or preload is not a gate, and dropping it would hand the
         # decision to the process it exists to refuse. It reads $workspace --
         # absolute, resolved, and already refused if it held anything nspawn
         # cannot express, which makes it the better-sanitised of the two
         # caller-shaped values in scope here. The other is $PWD.
+        #
+        # $extra_binds and $extra_binds_ro are in scope too, newline
+        # separated and resolved the same way. A container that grants more
+        # than its caller had must judge THOSE as well: they are mounts the
+        # caller named, and a gate that reads only $workspace would let a
+        # second directory in unexamined.
         ${c.guard}
 
         # passwd, group and shadow are written by the activation script, not
@@ -224,6 +284,33 @@ let
         # Deliberately word-split: it is a flag string.
         read -ra binds < <(sed -n 's/^EXTRA_NSPAWN_FLAGS="\(.*\)"$/\1/p' ${declaredConf})
 
+        # An array rather than a string, unlike the line above: these are
+        # runtime values, and word-splitting a path is how a directory with a
+        # space in it becomes two broken mounts.
+        extra_flags=()
+        while IFS= read -r b; do
+          [ -n "$b" ] || continue
+          extra_flags+=("--bind=$b:$b")
+        done <<< "$extra_binds"
+        while IFS= read -r b; do
+          [ -n "$b" ] || continue
+          extra_flags+=("--bind-ro=$b:$b")
+        done <<< "$extra_binds_ro"
+
+        # Handed to `command` too, so a consumer can tell whatever it starts
+        # about the directories -- both agents this was built for take an
+        # --add-dir, and a mount the process does not know about is only half
+        # of what the caller asked for. ':' separated, which is unambiguous
+        # precisely because a path naming one was refused above.
+        joined() {
+          local out="" b
+          while IFS= read -r b; do
+            [ -n "$b" ] || continue
+            out=''${out:+$out:}$b
+          done <<< "$1"
+          printf '%s' "$out"
+        }
+
         # --keep-unit, or nspawn makes a scope of its own and these properties
         # apply to nothing. tini rather than --as-pid2, whose stub reaps
         # orphans but does not forward SIGTERM to the payload.
@@ -250,11 +337,14 @@ let
             --bind-ro=${closure}:/run/current-system \
             ''${binds[@]+"''${binds[@]}"} \
             --bind="$workspace:$workspace" \
+            ''${extra_flags[@]+"''${extra_flags[@]}"} \
             ${tmpfsFlags} ${overlayFlags} \
             --user=${c.user} \
             --setenv=PATH=${closure}/sw/bin \
             --setenv=TMPDIR=${c.home}/tmp \
             --setenv=XDG_RUNTIME_DIR=/run/user/${toString c.uid} \
+            --setenv=FLONG_EXTRA_BINDS="$(joined "$extra_binds")" \
+            --setenv=FLONG_EXTRA_BINDS_RO="$(joined "$extra_binds_ro")" \
             ${pkgs.tini}/bin/tini -g -- \
             ${lib.getExe payload} "$workspace" "$@" || rc=$?
         exit "$rc"
@@ -326,6 +416,43 @@ in
             names a `:` or a newline, neither of which nspawn's `--bind` can
             express. Deciding *which* directory is allowed is `guard`'s job,
             not this one's.
+          '';
+        };
+
+        extraBinds = lib.mkOption {
+          type = lib.types.lines;
+          default = "";
+          example = ''printf '%s\n' "$HOME/Projects/finance-api"'';
+          description = ''
+            Shell printing further directories to bind read-write, one per
+            line, each at its own path inside the container. Empty output
+            binds nothing, which is the default.
+
+            Runs after `workspace`, with `$workspace` exported, so it can
+            answer "what travels with THIS directory" rather than having to
+            name a fixed set -- which is the question a consumer pairing
+            repositories is actually asking.
+
+            Runs as the invoking user and sees the launcher's arguments in
+            "$@", exactly as `workspace` does, and every line it prints is
+            resolved with `realpath` and then refused if it names a `:` or a
+            newline. Deciding *which* directories are allowed is `guard`'s
+            job: it receives them in `$extra_binds`, newline separated.
+
+            Also reaches `command` as `$FLONG_EXTRA_BINDS`, `:` separated.
+          '';
+        };
+
+        extraBindsRo = lib.mkOption {
+          type = lib.types.lines;
+          default = "";
+          description = ''
+            As `extraBinds`, but bound read-only, reaching `guard` as
+            `$extra_binds_ro` and `command` as `$FLONG_EXTRA_BINDS_RO`.
+
+            Read-only is not a boundary on its own -- it stops writes, not
+            execution -- so this is for directories a session should read
+            rather than edit, not for making an untrusted one safe.
           '';
         };
 

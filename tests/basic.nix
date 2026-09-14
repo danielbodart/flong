@@ -1,6 +1,7 @@
 # Exercises every option that changes what the container sees: the workspace
 # override, a read-write bind, a tmpfs mask over part of that bind, an overlay,
-# the privilege drop, the NOPASSWD grant and the session cleanup.
+# the extra binds in both modes, the privilege drop, the NOPASSWD grant and the
+# session cleanup.
 { lib, ... }:
 
 {
@@ -38,6 +39,18 @@
 
       # Exists, and names a character nspawn's --bind cannot express.
       "d /srv/odd:name 0755 root root -"
+
+      # Travels with the workspace, read-write: the pairing case. Owned by
+      # alice, or a session could not write to it for reasons that have
+      # nothing to do with the mount being read-write.
+      "d /srv/companion 0755 alice users -"
+      "f /srv/companion/marker 0644 alice users - in-the-companion"
+
+      # Reference material, read-only. Root-owned, so a write failing proves
+      # the mount rather than the ownership -- the mode is what is under test,
+      # and it is asserted from inside a session that CAN write to /srv/work.
+      "d /srv/reference 0755 root root -"
+      "f /srv/reference/marker 0644 root root - read-only-reference"
 
       # Written by whoever evaluates `workspace`, which is the point of the
       # subtest that reads it -- so it has to be writable by root AND by
@@ -109,7 +122,23 @@
           echo "guard saw workspace='$workspace'" >&2
           exit 1
         }
+        # The gate has to see the extra mounts too, or a second directory
+        # gets in unexamined -- which is the whole reason they are resolved
+        # before this runs rather than spliced in afterwards.
+        [ "$extra_binds" = /srv/companion ] || {
+          echo "guard saw extra_binds='$extra_binds'" >&2
+          exit 1
+        }
+        [ "$extra_binds_ro" = /srv/reference ] || {
+          echo "guard saw extra_binds_ro='$extra_binds_ro'" >&2
+          exit 1
+        }
       '';
+
+      # Resolved with $workspace in scope, which is what lets a consumer pair
+      # directories rather than name a fixed set.
+      extraBinds = ''[ "$workspace" = /srv/work ] && printf '%s\n' /srv/companion'';
+      extraBindsRo = ''printf '%s\n' /srv/reference'';
 
       # Masks part of the read-write bind above, and -- at /srv/nested --
       # hides a host directory that a nested bind then reaches through.
@@ -131,6 +160,20 @@
       gid = 100;
       home = "/home/alice";
       workspace = ''realpath "/srv/odd:name"'';
+      command = ''set -- true'';
+    };
+
+    # A fourth, whose extra bind names the colon nspawn cannot express. The
+    # workspace is fine, so this is the extra list getting the same refusal
+    # the workspace gets rather than sharing its code by accident.
+    flong.badextrabind = {
+      container = "demo";
+      user = "alice";
+      uid = 1000;
+      gid = 100;
+      home = "/home/alice";
+      workspace = ''realpath /srv/work'';
+      extraBinds = ''realpath "/srv/odd:name"'';
       command = ''set -- true'';
     };
 
@@ -165,6 +208,7 @@
       launcher = lib.getExe nodes.machine.flong.demo.launcher;
       badWorkspace = lib.getExe nodes.machine.flong.badworkspace.launcher;
       defaultWorkspace = lib.getExe nodes.machine.flong.defaultworkspace.launcher;
+      badExtraBind = lib.getExe nodes.machine.flong.badextrabind.launcher;
     in
     ''
       machine.wait_for_unit("multi-user.target")
@@ -217,6 +261,29 @@
           machine.succeed("${launcher} 'echo scratch > /opt/layered/new; test -e /opt/layered/new'")
           machine.fail("test -e /srv/lower/new")
           machine.succeed("test -e /srv/lower/seed")
+
+      with subtest("extra binds are mounted at their own paths"):
+          out = machine.succeed("${launcher} 'cat /srv/companion/marker; cat /srv/reference/marker'")
+          assert "in-the-companion" in out, out
+          assert "read-only-reference" in out, out
+
+      with subtest("a read-write extra bind takes writes and a read-only one refuses"):
+          machine.succeed("${launcher} 'echo written > /srv/companion/from-session'")
+          machine.succeed("grep -q written /srv/companion/from-session")
+          machine.fail("${launcher} 'echo nope > /srv/reference/from-session'")
+          machine.fail("test -e /srv/reference/from-session")
+
+      with subtest("the command is told about the extra binds"):
+          # A mount the process does not know about is half of what the
+          # caller asked for, so the paths reach it in the environment.
+          out = machine.succeed("${launcher} 'echo $FLONG_EXTRA_BINDS'")
+          assert out.strip() == "/srv/companion", out
+          out = machine.succeed("${launcher} 'echo $FLONG_EXTRA_BINDS_RO'")
+          assert out.strip() == "/srv/reference", out
+
+      with subtest("an extra bind naming ':' is refused, like a workspace"):
+          err = machine.fail("${badExtraBind} 2>&1")
+          assert "extra bind names" in err, err
 
       with subtest("the exit status of the command is the exit status of the launcher"):
           machine.succeed("${launcher} 'exit 0'")

@@ -114,6 +114,8 @@ Declare the container with NixOS's own option, then point a flong at it:
 | `workspace` | lines | `git -C "$PWD" rev-parse --show-toplevel` | shell printing the directory to bind in and `cd` to, run as the *invoking* user; non-zero exit aborts |
 | `guard` | lines | `""` | shell run on the host as root, after `workspace`, to refuse if this launcher is not entitled to run |
 | `command` | lines | *required* | shell run as `user` inside, with the launcher's arguments in `"$@"`; must leave the command to run in `"$@"` |
+| `extraBinds` | lines | `""` | shell printing further directories to bind read-write, one per line, run after `workspace` with `$workspace` exported |
+| `extraBindsRo` | lines | `""` | as `extraBinds`, bound read-only |
 | `tmpfs` | list of paths | `[ ]` | made container-local and empty |
 | `overlays` | `{ target = lower; }` | `{ }` | lower readable, writes discarded |
 | `launcherInputs` `payloadInputs` | packages | `[ ]` | extra `PATH` for `guard`/`workspace` and for `command` |
@@ -167,6 +169,42 @@ it chooses all run as `user` — there is no moment at which anything inside the
 container holds root. Privilege that a session genuinely needs is arranged by
 the launcher, on the host, before nspawn: a bind mount, a `tmpfs` entry, an
 `overlays` upper.
+
+### Taking more than one directory in
+
+`workspace` names the one directory a session is *about*. `extraBinds` names
+the others it needs beside it, one path per line:
+
+```nix
+# Whatever travels with this checkout, read-write.
+extraBinds = ''
+  case $workspace in
+    */data-lab) printf '%s\n' "$HOME/Projects/finance-api" ;;
+  esac
+'';
+
+# Reference material: readable, not editable.
+extraBindsRo = ''printf '%s\n' "$HOME/src/upstream"'';
+```
+
+Both run after `workspace`, with `$workspace` exported, so a snippet can
+answer "what travels with *this* directory" instead of naming a fixed set.
+Both run as the invoking user and see the launcher's arguments, exactly as
+`workspace` does, and every line is resolved with `realpath` and then refused
+if it names a `:` or a newline.
+
+`guard` receives them as `$extra_binds` and `$extra_binds_ro`, newline
+separated. **A guard that reads only `$workspace` lets a second directory in
+unexamined** — if your container grants more than its caller already had,
+judge these too.
+
+`command` receives them as `$FLONG_EXTRA_BINDS` and `$FLONG_EXTRA_BINDS_RO`,
+`:` separated, because a mount the process does not know about is half of what
+the caller asked for.
+
+Read-only is not a boundary on its own: it stops writes, not execution. Use it
+for directories a session should read rather than edit, not to make an
+untrusted one safe.
 
 ### Carving exceptions out of a bind mount
 
