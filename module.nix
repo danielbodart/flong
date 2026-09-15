@@ -229,10 +229,38 @@ let
           chmod 0755 "$staging"
           mkdir -p "$staging"/{etc,proc,sys,dev,run,tmp,var/lib,usr/lib,nix/store}
           mkdir -p "$staging/${lib.removePrefix "/" c.home}"
+          # activate, then tmpfiles, because the second half is not optional
+          # and nothing else here will ever do it. A container config's
+          # `systemd.tmpfiles.rules` are applied by a unit at boot, and a
+          # session never boots: the payload runs under tini, so the
+          # container's systemd is never pid 1 and no unit starts. Without
+          # this the rules are declared, carried in the closure, and silently
+          # do nothing -- which is how programs.nix-ld comes to install its
+          # libraries and leave /lib64/ld-linux-x86-64.so.2 absent, so a
+          # binary built for generic Linux is present, readable and refuses to
+          # start with "cannot execute: required file not found".
+          #
+          # Here rather than at launch because it needs root, and a session
+          # has none after nspawn drops. It also means it is paid once per
+          # closure: this root is cached and copied per session.
+          #
+          # --exclude-prefix=/dev deliberately. The rules a distribution ships
+          # for device nodes adjust ownership and mode on things like /dev/kvm
+          # and /dev/snd, and which of those a container may see is decided by
+          # `allowedDevices`, not by a prepare step reaching into nspawn's
+          # private /dev.
+          #
+          # No --boot, equally deliberately. Boot-only rules assume a boot
+          # sequence that will undo them: systemd-nologin writes the
+          # /run/nologin that systemd-user-sessions later removes, and the R!
+          # rules delete state on the same assumption. A prepared root is an
+          # image, not a boot.
           ${nspawn} -q --directory="$staging" --as-pid2 \
             --bind-ro=/nix/store --bind-ro=/nix/var/nix/db \
             --setenv=PATH=${closure}/sw/bin \
-            ${closure}/sw/bin/bash -c ${closure}/activate >/dev/null 2>&1
+            ${closure}/sw/bin/bash -c \
+            '${closure}/activate && systemd-tmpfiles --create --exclude-prefix=/dev' \
+            >/dev/null 2>&1
           # Would otherwise pin this moment's DNS for the life of the boot.
           rm -f "$staging/etc/resolv.conf"
           # Atomic, and the race resolution: a loser discards its copy.

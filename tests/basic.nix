@@ -94,6 +94,18 @@
         };
         users.groups.users.gid = 100;
         environment.systemPackages = [ pkgs.coreutils ];
+
+        # Declared by the container and applied by nobody unless the prepare
+        # step runs tmpfiles: a session never boots, so the unit that would
+        # normally do it never starts. The symlink is the case that matters
+        # in practice -- programs.nix-ld installs its libraries through the
+        # closure and creates /lib64/ld-linux-x86-64.so.2 this way, and
+        # without it every binary built for generic Linux refuses to start.
+        systemd.tmpfiles.rules = [
+          "d /srv/by-tmpfiles 0755 root root -"
+          "f /srv/by-tmpfiles/marker 0644 root root - made-by-tmpfiles"
+          "L+ /srv/by-tmpfiles/link - - - - /srv/by-tmpfiles/marker"
+        ];
       };
     };
 
@@ -229,6 +241,11 @@
       with subtest("the supplementary groups come with the user"):
           out = machine.succeed("${launcher} 'id -Gn'")
           assert "audio" in out, out
+
+      with subtest("the container's tmpfiles rules are applied to the root"):
+          out = machine.succeed("${launcher} 'cat /srv/by-tmpfiles/marker; readlink /srv/by-tmpfiles/link'")
+          assert "made-by-tmpfiles" in out, out
+          assert "/srv/by-tmpfiles/marker" in out, out
 
       with subtest("the system is reachable at /run/current-system"):
           # A bind over the mount point rather than a symlink written from
