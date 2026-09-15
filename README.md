@@ -127,7 +127,10 @@ flong drives the declaration rather than reimplementing it, so most of
 `containers.<name>` still means what it means. What it cannot mean is anything
 that needed the container's own init: nspawn drops to `user` before pid 1, so
 there is no privileged moment inside a session to bring an interface up or grant
-a capability to.
+a capability to. Some of that is structural — nothing in a session will ever
+hold a capability — and some of it is only unwritten, because the launcher is
+root on the host and can build out there what a container's init would have
+built inside.
 
 | declared | under flong |
 |---|---|
@@ -138,22 +141,27 @@ a capability to.
 | `privateNetwork` | a network namespace holding loopback and nothing else |
 | `networkNamespace` | the session joins that namespace |
 | `ephemeral` `autoStart` `restartIfChanged` `timeoutStartSec` | inert — they describe the `container@` unit, which is never started. `autoStart = true` warns, because it boots the container you were avoiding |
-| `flake` `privateUsers` `additionalCapabilities` `enableTun` | **refused at evaluation** |
-| `hostBridge` `hostAddress*` `localAddress*` `localMacAddress` `forwardPorts` `interfaces` `macvlans` `extraVeths` | **refused at evaluation** — each leaves an interface for an init to address |
+| `flake` `privateUsers` `additionalCapabilities` `enableTun` | **refused at evaluation** — none of these can work here |
+| `hostBridge` `hostAddress*` `localAddress*` `localMacAddress` `forwardPorts` `interfaces` `macvlans` `extraVeths` | **refused at evaluation** — *not built yet*, see `PLAN.md` |
 
-The refusals are the point rather than an omission. Every one of them declares
-*less* than the default — a uid namespace, a smaller capability set, a network
-of its own — and a container that silently is not the one you declared is worse
-than one that will not build. Where a capability really is wanted for a
-file-capability binary in the closure, ask for it deliberately with
-`extraFlags = [ "--capability=CAP_NET_ADMIN" ]`, which flong passes through
-untouched.
+A refusal is not the same as an omission. Every one of these declares *less*
+than the default — a uid namespace, a smaller capability set, a network of its
+own — so a container that silently is not the one you declared is worse than one
+that will not build. The two groups differ in why: the first cannot work here at
+all, while the second is simply not written, and the assertion says which.
+Where a capability really is wanted for a file-capability binary in the closure,
+ask for it deliberately with `extraFlags = [ "--capability=CAP_NET_ADMIN" ]`,
+which flong passes through untouched.
 
 Network isolation is the one worth knowing about, because the default is none:
 a session shares the host's network namespace, so it can reach anything on
 loopback and bind any port. `privateNetwork = true` takes that away entirely.
-Anything in between — NAT, a VPN, an allowlisting proxy — is a namespace you
-build on the host, with a unit or `ip netns`, and point `networkNamespace` at.
+Anything in between — NAT, a VPN, an allowlisting proxy — is for now a namespace
+you build on the host yourself, with a unit or `ip netns`, and point
+`networkNamespace` at. Teaching the launcher to build one from the declaration
+is the next thing on `PLAN.md`; the interface for it is already in
+`containers.<name>`, which is why those options are refused loudly rather than
+quietly dropped.
 
 ### Reaching the launcher
 

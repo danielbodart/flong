@@ -792,10 +792,13 @@ in
             assertion = declared.additionalCapabilities == [ ] && ! declared.enableTun;
             message = ''
               flong.${n} drives containers.${c.container}, which grants
-              capabilities. Nothing in a session holds any: nspawn drops to
-              ${c.user} before it starts pid 1, so there is no process for a
-              capability to belong to, and enableTun's /dev/net/tun is useless
-              without CAP_NET_ADMIN to create an interface with.
+              capabilities. Nothing in a session holds any, and that one is
+              structural rather than unwritten: nspawn drops to ${c.user} before
+              it starts pid 1, so there is no process for a capability to belong
+              to. enableTun's /dev/net/tun follows from it -- there is no
+              CAP_NET_ADMIN in there to create an interface with, and a tun that
+              a session should have is one the launcher makes on the host and
+              moves in.
 
               If a file-capability binary in the closure genuinely needs one in
               the bounding set, ask for it deliberately with
@@ -808,15 +811,20 @@ in
             message = ''
               flong.${n} drives containers.${c.container}, which declares a
               veth, a bridge, a macvlan, a moved interface or a forwarded port.
-              Each of those leaves an interface for the container's own init to
-              bring up and address, and a session has no privileged moment
-              inside it to do that -- nspawn drops to ${c.user} before pid 1.
+              flong does not build those yet. It refuses them rather than
+              dropping them, because a declaration that quietly does not happen
+              is worse than a build that stops.
 
-              What flong can do is give a session a namespace of its own
-              (`privateNetwork`, loopback and nothing else) or put it in one
-              something else already built (`networkNamespace`). Arrange the
-              addressing on the host and point `networkNamespace` at the
-              result.
+              Not impossible, only unwritten, and by a different mechanism than
+              the container module uses: each of these leaves an interface for
+              the container's own init to bring up, and a session has none --
+              but the launcher is root on the host, and a namespace can be
+              built, addressed and routed out there before nspawn is called.
+              See PLAN.md.
+
+              What works today is `privateNetwork` (loopback and nothing else)
+              or `networkNamespace`, pointed at a namespace something else
+              already built.
             '';
           }
         ]
