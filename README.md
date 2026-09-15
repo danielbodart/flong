@@ -232,10 +232,6 @@ owns, or it cannot create files in the result. Mounts nest either way, a
 `tmpfs` hiding part of a bind or a bind reaching back through a `tmpfs`, since
 nspawn orders custom mounts by destination rather than by argument.
 
-**[overlayfs](https://docs.kernel.org/filesystems/overlayfs.html) reports
-changing device and inode numbers as a file is written**, so never put one over
-a path holding a [sqlite](https://sqlite.org/) database.
-
 ### `guard` and `workspace`
 
 The launcher is reachable directly by anyone who can run it, so a wrapper in
