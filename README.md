@@ -95,10 +95,7 @@ Declare the container with NixOS's own option, then point a flong at it:
   };
 
   flong.sandbox = {
-    user = "alice";
-    uid = 1000;              # must match the container's
-    gid = 100;
-    home = "/home/alice";
+    user = "alice";          # the uid, gid and home come from the container
     command = ''set -- cargo "$@"'';
   };
 }
@@ -109,7 +106,7 @@ Declare the container with NixOS's own option, then point a flong at it:
 | option | type | default | |
 |---|---|---|---|
 | `container` | string | attribute name | the `containers.<name>` to drive |
-| `user` `uid` `gid` `home` | | | the identity the session runs as; checked against the container's own `passwd` at launch |
+| `user` | string | *required* | which account in the container to be; its uid, gid and home are read from the container's own `passwd` |
 | `workspace` | lines | `git -C "$PWD" rev-parse --show-toplevel` | shell printing the directory to bind in and `cd` to, run as the *invoking* user; non-zero exit aborts |
 | `guard` | lines | `""` | shell run on the host as root, after `workspace`, to refuse if this launcher is not entitled to run |
 | `command` | lines | *required* | shell run as `user` inside, with the launcher's arguments in `"$@"`; must leave the command to run in `"$@"` |
@@ -120,6 +117,16 @@ Declare the container with NixOS's own option, then point a flong at it:
 | `properties` | `{ NAME = value; }` | `{ }` | systemd properties for the session's scope, e.g. `MemoryMax` |
 | `launcherInputs` `payloadInputs` | packages | `[ ]` | extra `PATH` for `guard`/`workspace` and for `command` |
 | `launcher` | package | *read-only* | the generated launcher; run it as root |
+
+Only `user` is declared, and deliberately so: which account to be is a choice,
+while that account's uid, gid and home are facts the container already carries —
+in the `passwd` its own activation script wrote, which is the file nspawn
+resolves `--user` against. flong reads them from the prepared root at launch, so
+there is no second copy to keep in step, nothing for an assertion to compare,
+and no failure where the launcher owns `TMPDIR` to one uid while the session
+runs as another. It also reaches what evaluation cannot see: a container
+declared by `path` has no configuration to read, and a `users.users.<name>.uid`
+left unset is allocated during activation.
 
 ### What it takes from the declaration
 
@@ -268,7 +275,8 @@ most programs treating an unwritable cache as a missing one; flong mounts each
 entry `mode=0755,uid=<uid>,gid=<gid>` instead. Append your own options to
 override: `"/home/alice/.cache:mode=0700,uid=1000"`.
 
-`/run/user/<uid>` is one of these whether you ask or not, at `mode=0700`, since
+`/run/user/<uid>` is one of these whether you ask or not, at `mode=0700` and
+owned by the session's user, since
 `XDG_RUNTIME_DIR` names it and `/run` is nspawn's own tmpfs — nothing inside a
 session could create it. Name it in `tmpfs` yourself to change the options, or
 bind a socket at a path beneath it to let exactly one thing through from the

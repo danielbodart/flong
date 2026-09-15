@@ -73,25 +73,14 @@ let
       # rejected by the things that look at one -- and failing that way is
       # quiet, which is how a session ends up with no keyring, no user bus and
       # no explanation.
-      tmpfsEntries =
-        let
-          fromContainer = lib.filter
-            (p: ! lib.elem (tmpfsPath p) (map tmpfsPath c.tmpfs))
-            declared.tmpfs;
-          entries = c.tmpfs ++ fromContainer;
-          runtimeDir = "/run/user/${toString c.uid}";
-        in
-        entries ++ lib.optional (! lib.elem runtimeDir (map tmpfsPath entries))
-          "${runtimeDir}:mode=0700,uid=${toString c.uid},gid=${toString c.gid}";
+      #
+      # The list is settled here and turned into flags in the launcher, because
+      # the uid and gid they are owned by come out of the prepared root's passwd
+      # and are not known until then.
+      tmpfsEntries = c.tmpfs ++ lib.filter
+        (p: ! lib.elem (tmpfsPath p) (map tmpfsPath c.tmpfs))
+        declared.tmpfs;
 
-      # A bare --tmpfs mounts root-owned 0755, which the unprivileged payload
-      # cannot write to. Default it to the container's user; an entry that
-      # names its own options (PATH:opts) is passed through untouched.
-      tmpfsFlags = lib.concatMapStringsSep " "
-        (p:
-          if lib.hasInfix ":" p then "--tmpfs=${p}"
-          else "--tmpfs=${p}:mode=0755,uid=${toString c.uid},gid=${toString c.gid}")
-        tmpfsEntries;
       # An explicit upper inside the session root, not nspawn's empty-string
       # form, which puts it under the host's /var/tmp and leaks it on SIGKILL.
       overlayFlags = lib.concatMapStringsSep " "
@@ -99,7 +88,9 @@ let
         (lib.attrNames c.overlays);
       # nspawn creates mount points for --bind but not for --overlay or
       # --tmpfs, so a target whose parent does not exist in the root fails the
-      # launch. Made here, along with each overlay's upper layer.
+      # launch. Made here, along with each overlay's upper layer; the tmpfs
+      # mount points are made by the loop that builds their flags, since both
+      # halves need the identity.
       mountpointMkdirs = lib.concatStringsSep "\n        " (
         lib.concatMap
           (p: [
@@ -107,10 +98,9 @@ let
             # The upper layer receives the payload's writes, so it belongs to
             # the payload's user. Note the MERGED directory still takes its
             # ownership from the lower one.
-            ''chown ${toString c.uid}:${toString c.gid} "$root"/${overlayDir p}''
+            ''chown "$uid:$gid" "$root"/${overlayDir p}''
           ])
           (lib.attrNames c.overlays)
-        ++ map (p: ''mkdir -p "$root"${tmpfsPath p}'') tmpfsEntries
       );
 
       # By absolute path: sudo resets PATH to secure_path, and a copy from pkgs
@@ -119,6 +109,43 @@ let
       systemdRun = "/run/current-system/sw/bin/systemd-run";
       machinectl = "/run/current-system/sw/bin/machinectl";
 
+      # WHO A SESSION RUNS AS IS READ, NOT DECLARED.
+      #
+      # `user` is the only half a consumer can usefully state: which account in
+      # the container to be. The uid, the gid and the home are facts about that
+      # account, and the container already carries them -- in the passwd its own
+      # activation script wrote, which is the very file nspawn resolves --user
+      # against. Read them from there and there is nothing for a declaration to
+      # disagree with.
+      #
+      # Declaring them meant keeping two copies in step, and a mismatch was an
+      # error nowhere: nspawn resolved --user in there while the launcher chowned
+      # TMPDIR, the tmpfs entries and the overlay uppers to the other number,
+      # leaving a session that could not write to its own home. Reading also
+      # reaches where an assertion could not look -- a container declared by
+      # `path` has no configuration to read, and a uid left unset in
+      # `users.users.<name>` is allocated during activation, so evaluation never
+      # knows it either.
+      identityFrom = ''
+        # Sets uid, gid and home from $1/etc/passwd. Deliberately not a
+        # subshell: the exits below have to end the launch.
+        read_identity() {
+          local entry
+          entry=$(grep "^${c.user}:" "$1/etc/passwd") || {
+            echo "${name}: ${c.user} is not a user in containers.${c.container}" >&2
+            exit 1
+          }
+          IFS=: read -ra passwd_field <<< "$entry"
+          uid=''${passwd_field[2]}
+          gid=''${passwd_field[3]}
+          home=''${passwd_field[5]}
+          [ -n "$uid" ] && [ -n "$gid" ] && [ -n "$home" ] || {
+            echo "${name}: ${c.user} has no uid, gid or home in containers.${c.container}" >&2
+            exit 1
+          }
+        }
+      '';
+
       # Everything that shapes a prepared root, as one string. Deliberately
       # excludes the lines that name the cache itself, which would be circular.
       prepareSteps = ''
@@ -126,7 +153,6 @@ let
         # user cannot traverse cannot reach /nix/store either.
         chmod 0755 "$staging"
         mkdir -p "$staging"/{etc,proc,sys,dev,run,tmp,var/lib,usr/lib,nix/store}
-        mkdir -p "$staging/${lib.removePrefix "/" c.home}"
 
         # activate, then tmpfiles, because the second half is not optional and
         # nothing else here will ever do it. A container config's
@@ -176,6 +202,15 @@ let
         # root is not, so this must not be the step that stops one existing.
         ${closure}/sw/bin/systemd-machine-id-setup --root="$staging" \
           >/dev/null 2>&1 || true
+
+        # Now that activate has written the passwd, the home can be made for the
+        # account that will own it. Ordinarily activate has already done both --
+        # update-users-groups creates a home and chowns it -- but not for a user
+        # declared with createHome = false, who would otherwise arrive in a
+        # directory that is not there.
+        read_identity "$staging"
+        mkdir -p "$staging$home"
+        chown "$uid:$gid" "$staging$home"
       '';
 
       # Named for the closure AND for the steps above, because a root prepared
@@ -185,9 +220,14 @@ let
       # do nothing, because the container's closure had not moved. Both hashes
       # rather than one over the pair, so a directory can still be matched to
       # its closure by eye.
+      #
+      # The identity reader is hashed in too, though it is not spliced into the
+      # prepare block: the prepare steps call it to make the home, so a change
+      # to how it reads passwd changes the root it produces.
       cache = "/run/flong/${c.container}-"
         + builtins.substring 0 8 (builtins.baseNameOf closure) + "-"
-        + builtins.substring 0 8 (builtins.hashString "sha256" prepareSteps);
+        + builtins.substring 0 8
+          (builtins.hashString "sha256" (identityFrom + prepareSteps));
 
       payload = mkPayload name c;
     in
@@ -195,6 +235,7 @@ let
       inherit name;
       runtimeInputs = [ pkgs.git pkgs.coreutils pkgs.util-linux pkgs.e2fsprogs ] ++ c.launcherInputs;
       text = ''
+        ${identityFrom}
         # WORKSPACE FIRST, THEN GUARD.
         #
         # The gate has to judge the thing that actually gets mounted. When it
@@ -353,29 +394,11 @@ let
           }
         fi
 
-        # The identity this launcher was declared with has to be the identity
-        # the container's own passwd gives that name, because the two halves are
-        # used in different places: nspawn resolves --user in there, while
-        # TMPDIR, every tmpfs entry and every overlay upper are created out here
-        # from the declared uid and gid. A mismatch is an error nowhere -- the
-        # session simply cannot write to its own home or its own cache, which
-        # reads like a broken program rather than a wrong number in a config.
-        #
-        # Checked against the prepared root rather than asserted at evaluation,
-        # because a container declared by `path` has no configuration for an
-        # assertion to read, and this is the file nspawn will actually consult.
-        entry=$(grep "^${c.user}:" "$prepared/etc/passwd") || {
-          echo "${name}: ${c.user} is not a user in containers.${c.container}" >&2
-          exit 1
-        }
-        IFS=: read -ra field <<< "$entry"
-        if [ "''${field[2]}" != ${toString c.uid} ] ||
-           [ "''${field[3]}" != ${toString c.gid} ] ||
-           [ "''${field[5]}" != ${lib.escapeShellArg c.home} ]; then
-          echo "${name}: declared ${toString c.uid}:${toString c.gid} ${c.home} for ${c.user}," \
-               "but containers.${c.container} says ''${field[2]}:''${field[3]} ''${field[5]}" >&2
-          exit 1
-        fi
+        # Who this session runs as, out of the root nspawn is about to resolve
+        # --user against. Everything the launcher creates for the payload out
+        # here -- TMPDIR, the tmpfs entries, the overlay uppers -- is owned from
+        # these, so they cannot disagree with what the container thinks.
+        read_identity "$prepared"
 
         # nspawn removes its own unix-export mount on a clean exit; a SIGKILL
         # leaves it and the next run refuses to start. No trap survives
@@ -406,10 +429,42 @@ let
         # session's root, because nothing inside the container is ever root:
         # the launcher is the only privileged thing in a session, and it is on
         # this side of nspawn.
-        mkdir -p "$root${c.home}/tmp"
-        chown ${toString c.uid}:${toString c.gid} "$root${c.home}/tmp"
-        chmod 0700 "$root${c.home}/tmp"
+        mkdir -p "$root$home/tmp"
+        chown "$uid:$gid" "$root$home/tmp"
+        chmod 0700 "$root$home/tmp"
         ${mountpointMkdirs}
+
+        # A bare --tmpfs mounts root-owned 0755, which the unprivileged payload
+        # cannot write to -- and fails quietly on, most programs treating an
+        # unwritable cache as a missing one. So each entry is given the payload's
+        # ownership unless it names options of its own as PATH:opts.
+        #
+        # /run/user/$uid is one of these whether it was asked for or not:
+        # XDG_RUNTIME_DIR names it, /run is nspawn's own tmpfs made fresh at
+        # every start, and nothing inside a session can create a directory in
+        # it. Skipped if an entry already names that path, so the options remain
+        # a consumer's to override.
+        #
+        # nspawn creates the mount point for a --tmpfs, but a mkdir here as well
+        # keeps a nested bind -- a socket carved out of a masked runtime
+        # directory -- from depending on which of the two nspawn makes first.
+        tmpfs_entries=(${lib.escapeShellArgs tmpfsEntries})
+        tmpfs_flags=()
+        runtime_dir=/run/user/$uid
+        want_runtime_dir=1
+        for entry in ''${tmpfs_entries[@]+"''${tmpfs_entries[@]}"}; do
+          path=''${entry%%:*}
+          [ "$path" = "$runtime_dir" ] && want_runtime_dir=0
+          case $entry in
+            *:*) tmpfs_flags+=("--tmpfs=$entry") ;;
+            *)   tmpfs_flags+=("--tmpfs=$entry:mode=0755,uid=$uid,gid=$gid") ;;
+          esac
+          mkdir -p "$root$path"
+        done
+        if [ "$want_runtime_dir" = 1 ]; then
+          tmpfs_flags+=("--tmpfs=$runtime_dir:mode=0700,uid=$uid,gid=$gid")
+          mkdir -p "$root$runtime_dir"
+        fi
 
         # NOT exec: that would replace the shell and discard the trap with it.
         # shellcheck disable=SC2329  # invoked by the trap, not by name.
@@ -501,11 +556,11 @@ let
             ''${binds[@]+"''${binds[@]}"} \
             --bind="$workspace:$workspace" \
             ''${extra_flags[@]+"''${extra_flags[@]}"} \
-            ${tmpfsFlags} ${overlayFlags} \
+            ''${tmpfs_flags[@]+"''${tmpfs_flags[@]}"} ${overlayFlags} \
             --user=${c.user} \
             --setenv=PATH=${closure}/sw/bin \
-            --setenv=TMPDIR=${c.home}/tmp \
-            --setenv=XDG_RUNTIME_DIR=/run/user/${toString c.uid} \
+            --setenv=TMPDIR="$home/tmp" \
+            --setenv=XDG_RUNTIME_DIR="$runtime_dir" \
             --setenv=FLONG_EXTRA_BINDS="$(joined "$extra_binds")" \
             --setenv=FLONG_EXTRA_BINDS_RO="$(joined "$extra_binds_ro")" \
             ${pkgs.tini}/bin/tini -g -- \
@@ -542,19 +597,14 @@ in
           description = ''
             User inside the container. nspawn drops to it before it starts
             pid 1, so everything in the session runs as this user.
+
+            The only half of the identity worth declaring: the uid, the gid and
+            the home are facts about that account, and are read at launch out of
+            the container's own `/etc/passwd` -- the file nspawn resolves this
+            name against. So there is nothing to keep in step, and nothing an
+            unset `users.users.<name>.uid` or a container declared by `path`
+            could hide from an assertion.
           '';
-        };
-        uid = lib.mkOption {
-          type = lib.types.int;
-          description = "That user's uid, which must match the container's.";
-        };
-        gid = lib.mkOption {
-          type = lib.types.int;
-          description = "That user's primary gid.";
-        };
-        home = lib.mkOption {
-          type = lib.types.str;
-          description = "That user's home inside the container.";
         };
 
         workspace = lib.mkOption {

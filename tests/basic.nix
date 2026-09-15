@@ -140,18 +140,12 @@
 
     flong.netless = {
       user = "alice";
-      uid = 1000;
-      gid = 100;
-      home = "/home/alice";
       workspace = ''realpath /srv/work'';
       command = ''set -- bash -c "$1"'';
     };
 
     flong.demo = {
       user = "alice";
-      uid = 1000;
-      gid = 100;
-      home = "/home/alice";
 
       # Applied to the session's scope. A limit rather than a nicety: the
       # session root, TMPDIR and every overlay upper are in /run, which is RAM.
@@ -210,9 +204,6 @@
     flong.badworkspace = {
       container = "demo";
       user = "alice";
-      uid = 1000;
-      gid = 100;
-      home = "/home/alice";
       workspace = ''realpath "/srv/odd:name"'';
       command = ''set -- true'';
     };
@@ -223,24 +214,19 @@
     flong.badextrabind = {
       container = "demo";
       user = "alice";
-      uid = 1000;
-      gid = 100;
-      home = "/home/alice";
       workspace = ''realpath /srv/work'';
       extraBinds = ''realpath "/srv/odd:name"'';
       command = ''set -- true'';
     };
 
-    # Declares an identity the container does not have. The uid is the half
-    # that matters: nspawn would resolve `alice` to 1000 in there while the
-    # launcher chowned TMPDIR, the tmpfs entries and the overlay uppers to
-    # 1001, and nothing would report it.
-    flong.badidentity = {
+    # Names a user the container does not have. Since the uid, gid and home are
+    # read out of the container's passwd rather than declared, this is the whole
+    # of what can now go wrong with an identity -- and it has to be caught out
+    # here, because nspawn's own failure for an unknown --user arrives after a
+    # root has been prepared and copied.
+    flong.badusername = {
       container = "demo";
-      user = "alice";
-      uid = 1001;
-      gid = 100;
-      home = "/home/alice";
+      user = "absent";
       workspace = ''realpath /srv/work'';
       command = ''set -- true'';
     };
@@ -253,9 +239,6 @@
     flong.defaultworkspace = {
       container = "demo";
       user = "alice";
-      uid = 1000;
-      gid = 100;
-      home = "/home/alice";
       command = ''set -- true'';
     };
 
@@ -277,7 +260,7 @@
       badWorkspace = lib.getExe nodes.machine.flong.badworkspace.launcher;
       defaultWorkspace = lib.getExe nodes.machine.flong.defaultworkspace.launcher;
       badExtraBind = lib.getExe nodes.machine.flong.badextrabind.launcher;
-      badIdentity = lib.getExe nodes.machine.flong.badidentity.launcher;
+      badUsername = lib.getExe nodes.machine.flong.badusername.launcher;
       netless = lib.getExe nodes.machine.flong.netless.launcher;
     in
     ''
@@ -367,9 +350,19 @@
           # this one assume.
           machine.wait_until_succeeds("test -z \"$(find /run/flong -maxdepth 2 -name 's-*')\"")
 
-      with subtest("an identity the container does not have is refused"):
-          err = machine.fail("${badIdentity} 2>&1")
-          assert "but containers.demo says" in err, err
+      with subtest("a user the container does not have is refused"):
+          err = machine.fail("${badUsername} 2>&1")
+          assert "absent is not a user in containers.demo" in err, err
+
+      with subtest("the identity comes from the container, not from the module"):
+          # Nothing declares 1000, 100 or /home/alice to flong: they are read
+          # out of the prepared root's passwd, so this proves the read rather
+          # than an agreement between two copies of the same number.
+          out = machine.succeed("${launcher} 'id -u; id -g; echo $HOME; stat -c %u:%g \"$TMPDIR\"'")
+          uid, gid, home, tmpdir = out.split()
+          assert (uid, gid) == ("1000", "100"), out
+          assert home == "/home/alice", out
+          assert tmpdir == "1000:100", out
 
       with subtest("a tmpfs masks part of a read-write bind"):
           machine.succeed("test -e /srv/shared/masked/host-only")
