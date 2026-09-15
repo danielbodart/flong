@@ -418,6 +418,26 @@ let
           rm -rf "$d" "/run/systemd/nspawn/unix-export/$stale"
         done
 
+        # Tell the terminal what it is looking at, the way toolbox and distrobox
+        # do. VTE keeps vte.container.name, .runtime and .uid as termprops, so a
+        # terminal that reads them can say "container" in its own chrome instead
+        # of inferring it from a command line it happens to recognise -- which is
+        # how a session that reached root through sudo gets coloured "privileged"
+        # instead, a different and less accurate statement about where the typing
+        # is going.
+        #
+        # ST-terminated, not BEL: OSC 666 is a vte-only sequence and rejects the
+        # BEL form outright, silently. Written \033\134 rather than \033\\ only
+        # because shellcheck reads the latter as an escaped quote.
+        #
+        # Only when stdout is a terminal: otherwise these bytes land in whatever
+        # the caller redirected to. Reset in the trap below, so a launch that
+        # fails does not leave a terminal claiming a container that is not there.
+        if [ -t 1 ]; then
+          printf '\033]666;vte.container.name=%s;vte.container.runtime=systemd-nspawn;vte.container.uid=%s\033\134' \
+            ${lib.escapeShellArg c.container} "$uid"
+        fi
+
         # Unique per invocation, not per workspace, so two sessions in one
         # directory do not collide either.
         machine=${c.container}-$$-''${RANDOM}
@@ -469,6 +489,9 @@ let
         # NOT exec: that would replace the shell and discard the trap with it.
         # shellcheck disable=SC2329  # invoked by the trap, not by name.
         cleanup() {
+          if [ -t 1 ]; then
+            printf '\033]666;vte.container.\033\134'
+          fi
           umount "/run/systemd/nspawn/unix-export/$machine" 2>/dev/null || true
           rm -rf "$root" "/run/systemd/nspawn/unix-export/$machine"
         }
