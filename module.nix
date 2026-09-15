@@ -132,7 +132,7 @@ let
     in
     pkgs.writeShellApplication {
       inherit name;
-      runtimeInputs = [ pkgs.git pkgs.coreutils pkgs.util-linux ] ++ c.launcherInputs;
+      runtimeInputs = [ pkgs.git pkgs.coreutils pkgs.util-linux pkgs.e2fsprogs ] ++ c.launcherInputs;
       text = ''
         # WORKSPACE FIRST, THEN GUARD.
         #
@@ -279,7 +279,17 @@ let
           staging=$(mktemp -d "${cache}/.prepare.XXXXXX")
           ${prepareSteps}
           # Atomic, and the race resolution: a loser discards its copy.
-          mv -T "$staging" "$prepared" 2>/dev/null || rm -rf "$staging"
+          #
+          # chattr first, because tmpfiles above has made part of this root
+          # undeletable: NixOS declares `h /var/empty - - - - +i`, and a
+          # directory carrying the immutable attribute refuses rm even as
+          # root. Only here -- a session root is `cp -a`'d from this one, and
+          # cp does not carry inode flags, so the two sweeps below face an
+          # ordinary directory tree.
+          mv -T "$staging" "$prepared" 2>/dev/null || {
+            chattr -R -i "$staging" 2>/dev/null || true
+            rm -rf "$staging"
+          }
         fi
 
         # nspawn removes its own unix-export mount on a clean exit; a SIGKILL
