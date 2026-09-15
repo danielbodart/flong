@@ -365,5 +365,15 @@
           machine.succeed("${launcher} 'true'")
           after = machine.succeed("stat -c %Y /run/flong/demo-*/prepared").strip()
           assert before == after, f"prepared root was rebuilt: {before} -> {after}"
+
+      with subtest("the cache is named for the prepare steps as well as the closure"):
+          # A root prepared by an older flong is not a root this one would
+          # build, so the directory has to stop matching when prepare changes.
+          # Nothing in one VM run can change prepare and look again, so what is
+          # checked is that the name carries a second hash at all -- which is
+          # what a revert to keying on the closure alone would lose.
+          import re
+          name = machine.succeed("basename $(dirname /run/flong/demo-*/prepared)").strip()
+          assert re.fullmatch(r"demo-[a-z0-9]{8}-[a-z0-9]{8}", name), name
     '';
 }

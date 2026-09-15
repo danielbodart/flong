@@ -72,8 +72,61 @@ let
       systemdRun = "/run/current-system/sw/bin/systemd-run";
       machinectl = "/run/current-system/sw/bin/machinectl";
 
+      # Everything that shapes a prepared root, as one string. Deliberately
+      # excludes the lines that name the cache itself, which would be circular.
+      prepareSteps = ''
+        # mktemp gives 0700, and this becomes the container's "/". A root the
+        # user cannot traverse cannot reach /nix/store either.
+        chmod 0755 "$staging"
+        mkdir -p "$staging"/{etc,proc,sys,dev,run,tmp,var/lib,usr/lib,nix/store}
+        mkdir -p "$staging/${lib.removePrefix "/" c.home}"
+
+        # activate, then tmpfiles, because the second half is not optional and
+        # nothing else here will ever do it. A container config's
+        # `systemd.tmpfiles.rules` are applied by a unit at boot, and a session
+        # never boots: the payload runs under tini, so the container's systemd
+        # is never pid 1 and no unit starts. Without this the rules are
+        # declared, carried in the closure, and silently do nothing -- which is
+        # how programs.nix-ld comes to install its libraries and leave
+        # /lib64/ld-linux-x86-64.so.2 absent, so a binary built for generic
+        # Linux is present, readable and refuses to start with "cannot execute:
+        # required file not found".
+        #
+        # Here rather than at launch because it needs root, and a session has
+        # none after nspawn drops. It also means it is paid once per prepared
+        # root, which is cached and copied per session.
+        #
+        # --exclude-prefix=/dev deliberately. The rules a distribution ships for
+        # device nodes adjust ownership and mode on things like /dev/kvm and
+        # /dev/snd, and which of those a container may see is decided by
+        # `allowedDevices`, not by a prepare step reaching into nspawn's private
+        # /dev.
+        #
+        # No --boot, equally deliberately. Boot-only rules assume a boot
+        # sequence that will undo them: systemd-nologin writes the /run/nologin
+        # that systemd-user-sessions later removes, and the R! rules delete
+        # state on the same assumption. A prepared root is an image, not a boot.
+        ${nspawn} -q --directory="$staging" --as-pid2 \
+          --bind-ro=/nix/store --bind-ro=/nix/var/nix/db \
+          --setenv=PATH=${closure}/sw/bin \
+          ${closure}/sw/bin/bash -c \
+          '${closure}/activate && systemd-tmpfiles --create --exclude-prefix=/dev' \
+          >/dev/null 2>&1
+
+        # Would otherwise pin this moment's DNS for the life of the boot.
+        rm -f "$staging/etc/resolv.conf"
+      '';
+
+      # Named for the closure AND for the steps above, because a root prepared
+      # by an older flong is not a root this one would build. Keying on the
+      # closure alone meant a change to prepare was silently ignored wherever a
+      # cache was already warm -- found by fixing tmpfiles and watching the fix
+      # do nothing, because the container's closure had not moved. Both hashes
+      # rather than one over the pair, so a directory can still be matched to
+      # its closure by eye.
       cache = "/run/flong/${c.container}-"
-        + builtins.substring 0 8 (builtins.baseNameOf closure);
+        + builtins.substring 0 8 (builtins.baseNameOf closure) + "-"
+        + builtins.substring 0 8 (builtins.hashString "sha256" prepareSteps);
 
       payload = mkPayload name c;
     in
@@ -224,45 +277,7 @@ let
         if [ ! -e "$prepared/etc/passwd" ]; then
           mkdir -p ${cache}
           staging=$(mktemp -d "${cache}/.prepare.XXXXXX")
-          # mktemp gives 0700, and this becomes the container's "/". A root the
-          # user cannot traverse cannot reach /nix/store either.
-          chmod 0755 "$staging"
-          mkdir -p "$staging"/{etc,proc,sys,dev,run,tmp,var/lib,usr/lib,nix/store}
-          mkdir -p "$staging/${lib.removePrefix "/" c.home}"
-          # activate, then tmpfiles, because the second half is not optional
-          # and nothing else here will ever do it. A container config's
-          # `systemd.tmpfiles.rules` are applied by a unit at boot, and a
-          # session never boots: the payload runs under tini, so the
-          # container's systemd is never pid 1 and no unit starts. Without
-          # this the rules are declared, carried in the closure, and silently
-          # do nothing -- which is how programs.nix-ld comes to install its
-          # libraries and leave /lib64/ld-linux-x86-64.so.2 absent, so a
-          # binary built for generic Linux is present, readable and refuses to
-          # start with "cannot execute: required file not found".
-          #
-          # Here rather than at launch because it needs root, and a session
-          # has none after nspawn drops. It also means it is paid once per
-          # closure: this root is cached and copied per session.
-          #
-          # --exclude-prefix=/dev deliberately. The rules a distribution ships
-          # for device nodes adjust ownership and mode on things like /dev/kvm
-          # and /dev/snd, and which of those a container may see is decided by
-          # `allowedDevices`, not by a prepare step reaching into nspawn's
-          # private /dev.
-          #
-          # No --boot, equally deliberately. Boot-only rules assume a boot
-          # sequence that will undo them: systemd-nologin writes the
-          # /run/nologin that systemd-user-sessions later removes, and the R!
-          # rules delete state on the same assumption. A prepared root is an
-          # image, not a boot.
-          ${nspawn} -q --directory="$staging" --as-pid2 \
-            --bind-ro=/nix/store --bind-ro=/nix/var/nix/db \
-            --setenv=PATH=${closure}/sw/bin \
-            ${closure}/sw/bin/bash -c \
-            '${closure}/activate && systemd-tmpfiles --create --exclude-prefix=/dev' \
-            >/dev/null 2>&1
-          # Would otherwise pin this moment's DNS for the life of the boot.
-          rm -f "$staging/etc/resolv.conf"
+          ${prepareSteps}
           # Atomic, and the race resolution: a loser discards its copy.
           mv -T "$staging" "$prepared" 2>/dev/null || rm -rf "$staging"
         fi
