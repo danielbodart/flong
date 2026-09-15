@@ -74,7 +74,6 @@ Declare the container with NixOS's own option, then point a flong at it:
 ```nix
 {
   containers.sandbox = {
-    ephemeral = true;
     autoStart = false;          # flong starts it, not systemd
 
     bindMounts."/home/alice/.cargo" = {
@@ -110,16 +109,51 @@ Declare the container with NixOS's own option, then point a flong at it:
 | option | type | default | |
 |---|---|---|---|
 | `container` | string | attribute name | the `containers.<name>` to drive |
-| `user` `uid` `gid` `home` | | | the identity the session runs as; `uid` must match the container's |
+| `user` `uid` `gid` `home` | | | the identity the session runs as; checked against the container's own `passwd` at launch |
 | `workspace` | lines | `git -C "$PWD" rev-parse --show-toplevel` | shell printing the directory to bind in and `cd` to, run as the *invoking* user; non-zero exit aborts |
 | `guard` | lines | `""` | shell run on the host as root, after `workspace`, to refuse if this launcher is not entitled to run |
 | `command` | lines | *required* | shell run as `user` inside, with the launcher's arguments in `"$@"`; must leave the command to run in `"$@"` |
 | `extraBinds` | lines | `""` | shell printing further directories to bind read-write, one per line, run after `workspace` with `$workspace` exported |
 | `extraBindsRo` | lines | `""` | as `extraBinds`, bound read-only |
-| `tmpfs` | list of paths | `[ ]` | made container-local and empty |
+| `tmpfs` | list of paths | `[ ]` | made container-local and empty; merged with the container's own `tmpfs` |
 | `overlays` | `{ target = lower; }` | `{ }` | lower readable, writes discarded |
+| `properties` | `{ NAME = value; }` | `{ }` | systemd properties for the session's scope, e.g. `MemoryMax` |
 | `launcherInputs` `payloadInputs` | packages | `[ ]` | extra `PATH` for `guard`/`workspace` and for `command` |
 | `launcher` | package | *read-only* | the generated launcher; run it as root |
+
+### What it takes from the declaration
+
+flong drives the declaration rather than reimplementing it, so most of
+`containers.<name>` still means what it means. What it cannot mean is anything
+that needed the container's own init: nspawn drops to `user` before pid 1, so
+there is no privileged moment inside a session to bring an interface up or grant
+a capability to.
+
+| declared | under flong |
+|---|---|
+| `config` `path` `nixpkgs` `specialArgs` | the closure, which is the only thing flong wants from it |
+| `bindMounts` `extraFlags` | passed to nspawn, read back out of the generated `.conf` |
+| `allowedDevices` | `DeviceAllow=` on the session's scope, behind the same `DevicePolicy=closed` the unit uses |
+| `tmpfs` | merged with `flong.<name>.tmpfs`, and given the payload's ownership |
+| `privateNetwork` | a network namespace holding loopback and nothing else |
+| `networkNamespace` | the session joins that namespace |
+| `ephemeral` `autoStart` `restartIfChanged` `timeoutStartSec` | inert — they describe the `container@` unit, which is never started. `autoStart = true` warns, because it boots the container you were avoiding |
+| `flake` `privateUsers` `additionalCapabilities` `enableTun` | **refused at evaluation** |
+| `hostBridge` `hostAddress*` `localAddress*` `localMacAddress` `forwardPorts` `interfaces` `macvlans` `extraVeths` | **refused at evaluation** — each leaves an interface for an init to address |
+
+The refusals are the point rather than an omission. Every one of them declares
+*less* than the default — a uid namespace, a smaller capability set, a network
+of its own — and a container that silently is not the one you declared is worse
+than one that will not build. Where a capability really is wanted for a
+file-capability binary in the closure, ask for it deliberately with
+`extraFlags = [ "--capability=CAP_NET_ADMIN" ]`, which flong passes through
+untouched.
+
+Network isolation is the one worth knowing about, because the default is none:
+a session shares the host's network namespace, so it can reach anything on
+loopback and bind any port. `privateNetwork = true` takes that away entirely.
+Anything in between — NAT, a VPN, an allowlisting proxy — is a namespace you
+build on the host, with a unit or `ip netns`, and point `networkNamespace` at.
 
 ### Reaching the launcher
 
@@ -226,6 +260,12 @@ most programs treating an unwritable cache as a missing one; flong mounts each
 entry `mode=0755,uid=<uid>,gid=<gid>` instead. Append your own options to
 override: `"/home/alice/.cache:mode=0700,uid=1000"`.
 
+`/run/user/<uid>` is one of these whether you ask or not, at `mode=0700`, since
+`XDG_RUNTIME_DIR` names it and `/run` is nspawn's own tmpfs — nothing inside a
+session could create it. Name it in `tmpfs` yourself to change the options, or
+bind a socket at a path beneath it to let exactly one thing through from the
+host's session.
+
 An overlay's upper layer is chowned to `user`, but **the merged directory takes
 its ownership from the lower one** — so overlay directories the user already
 owns, or it cannot create files in the result. Mounts nest either way, a
@@ -282,10 +322,42 @@ undetectable at runtime, so such a path is refused at evaluation.
 bind-mounted file owned by the host uid maps to an unmapped uid inside, so
 reads fail with `Permission denied`, and `--private-users-ownership=map` does
 not change that on a 6.18 kernel. A flong isolates the filesystem, the device
-set and the process tree — not a container escape.
+set, the process tree and — if you ask for it — the network. Not a container
+escape.
 
 **One process.** No init, no logging, no restart, no dependency ordering. If
 you want a service, declare a service.
+
+**Nothing that lives in `/run`.** nspawn makes `/run` fresh at every start, so
+anything a NixOS option installs there at boot is declared, carried in the
+closure, and absent from a session. `systemd.tmpfiles.rules` is the exception,
+because flong applies them while preparing the root — everything else is not:
+
+- **No setuid wrappers.** `security.wrappers` is a unit plus a mount, so
+  `/run/wrappers/bin` stays on `PATH` and stays empty: no `sudo`, no `ping`, no
+  `fusermount` inside. That is a property and not a bug — setuid root in a
+  container with no uid namespace is root over the host's uids, holding
+  `CAP_SYS_ADMIN` from nspawn's default set.
+- **No bus.** `services.dbus` never starts, so dbus clients fail, and with them
+  every `systemd.user` service and anything socket-activated.
+- **No PAM session**, so `security.pam.loginLimits` never applies.
+
+**No Nix.** `/nix/store` is bind-mounted read-only and the daemon socket is not,
+so `nix build` and `nix develop` do not work in a session. Deliberate for now:
+that socket builds arbitrary derivations, reaches the network through a
+fixed-output one, and — for a `trusted-user` — sets sandbox options, which is
+host-equivalent. See `PLAN.md`.
+
+**A session lives in RAM.** The root is copied under `/run`, and so are
+`TMPDIR` and every overlay upper, so a payload that writes ten gigabytes of
+build output to `$TMPDIR` spends the host's memory on it. That is what
+`properties.MemoryMax` is for.
+
+**Getting into a live session is `nsenter`.** A session registers with machined,
+so `machinectl list` shows one and `machinectl status` gives you its leader pid —
+but `machinectl shell` asks the container's own systemd to start a unit, and
+there isn't one, so a shell is `nsenter --target <leader> --all` as root.
+`nixos-container login` and `journalctl -M` want the unit that never starts.
 
 ## Versions
 

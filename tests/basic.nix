@@ -27,6 +27,11 @@
       "d /srv/shared 0777 root root -"
       "d /srv/shared/masked 0755 root root -"
       "f /srv/shared/masked/host-only 0644 root root - should-not-be-visible"
+
+      # Masked by the CONTAINER's own tmpfs list rather than flong's, which the
+      # container module would have passed to nspawn and flong used to drop.
+      "d /srv/shared/declared 0755 root root -"
+      "f /srv/shared/declared/host-only 0644 root root - should-not-be-visible"
       "d /srv/lower 0755 alice users -"
       "f /srv/lower/seed 0644 alice users - from-the-lower-layer"
 
@@ -61,9 +66,13 @@
     ];
 
     containers.demo = {
-      ephemeral = true;
       autoStart = false;
       privateNetwork = false;
+
+      # Declared here rather than in `flong.demo.tmpfs`: the two lists mean the
+      # same thing, so flong merges them, and this is the half that used to be
+      # dropped.
+      tmpfs = [ "/srv/shared/declared" ];
 
       bindMounts."/srv/shared" = {
         hostPath = "/srv/shared";
@@ -109,11 +118,44 @@
       };
     };
 
+    # The one network isolation a session can have: a namespace with loopback
+    # in it and nothing else. Separate from demo because every other subtest
+    # wants the host's network, and because what is under test is that the
+    # declaration reaches nspawn at all.
+    containers.netless = {
+      autoStart = false;
+      privateNetwork = true;
+
+      config = {
+        system.stateVersion = "24.05";
+        users.users.alice = {
+          isNormalUser = true;
+          uid = 1000;
+          group = "users";
+          home = "/home/alice";
+        };
+        users.groups.users.gid = 100;
+      };
+    };
+
+    flong.netless = {
+      user = "alice";
+      uid = 1000;
+      gid = 100;
+      home = "/home/alice";
+      workspace = ''realpath /srv/work'';
+      command = ''set -- bash -c "$1"'';
+    };
+
     flong.demo = {
       user = "alice";
       uid = 1000;
       gid = 100;
       home = "/home/alice";
+
+      # Applied to the session's scope. A limit rather than a nicety: the
+      # session root, TMPDIR and every overlay upper are in /run, which is RAM.
+      properties.MemoryMax = "1G";
 
       # Not a git checkout, which is the point: the default asks git, and a
       # fast container is not obliged to be a repository.
@@ -189,6 +231,20 @@
       command = ''set -- true'';
     };
 
+    # Declares an identity the container does not have. The uid is the half
+    # that matters: nspawn would resolve `alice` to 1000 in there while the
+    # launcher chowned TMPDIR, the tmpfs entries and the overlay uppers to
+    # 1001, and nothing would report it.
+    flong.badidentity = {
+      container = "demo";
+      user = "alice";
+      uid = 1001;
+      gid = 100;
+      home = "/home/alice";
+      workspace = ''realpath /srv/work'';
+      command = ''set -- true'';
+    };
+
     # A third over the same container, taking the DEFAULT workspace. It exists
     # so that the default snippet is built -- and therefore shellchecked --
     # rather than only the overrides the other two declare, which is how a
@@ -221,6 +277,8 @@
       badWorkspace = lib.getExe nodes.machine.flong.badworkspace.launcher;
       defaultWorkspace = lib.getExe nodes.machine.flong.defaultworkspace.launcher;
       badExtraBind = lib.getExe nodes.machine.flong.badextrabind.launcher;
+      badIdentity = lib.getExe nodes.machine.flong.badidentity.launcher;
+      netless = lib.getExe nodes.machine.flong.netless.launcher;
     in
     ''
       machine.wait_for_unit("multi-user.target")
@@ -256,6 +314,62 @@
           out = machine.succeed("${launcher} 'echo $TMPDIR; stat -c %U:%a \"$TMPDIR\"'")
           assert "/home/alice/tmp" in out, out
           assert "alice:700" in out, out
+
+      with subtest("stdin reaches the payload when the launcher is not on a tty"):
+          # nspawn's console default is read-only off a terminal: output
+          # propagates and input is never read, so this arrived empty and
+          # nothing said so.
+          out = machine.succeed("echo from-the-pipe | ${launcher} 'cat'")
+          assert "from-the-pipe" in out, out
+
+      with subtest("the hostname is the container's, not the session's"):
+          # The machine name carries a pid and a random number to keep
+          # concurrent sessions apart, and nspawn would use it as the hostname.
+          out = machine.succeed("${launcher} 'cat /proc/sys/kernel/hostname'")
+          assert out.strip() == "demo", out
+
+      with subtest("XDG_RUNTIME_DIR exists and belongs to the payload"):
+          # /run is nspawn's own tmpfs, made fresh at every start, and nothing
+          # inside a session can create a directory in it -- so the variable
+          # named a directory that was not there.
+          out = machine.succeed("${launcher} 'echo $XDG_RUNTIME_DIR; stat -c %U:%a \"$XDG_RUNTIME_DIR\"'")
+          assert "/run/user/1000" in out, out
+          assert "alice:700" in out, out
+
+      with subtest("the root carries a machine id"):
+          # Written by a container's init from the uuid nspawn hands it, and a
+          # session has no init -- so this was absent and every reader got
+          # ENOENT.
+          out = machine.succeed("${launcher} 'cat /etc/machine-id'")
+          assert len(out.strip()) == 32, out
+
+      with subtest("the container's own tmpfs list is honoured too"):
+          machine.succeed("test -e /srv/shared/declared/host-only")
+          out = machine.succeed("${launcher} 'ls -A /srv/shared/declared | wc -l'")
+          assert out.strip().endswith("0"), out
+
+      with subtest("privateNetwork gives the session loopback and nothing else"):
+          # sysfs is per-namespace, so this needs no tools in the container.
+          out = machine.succeed("${launcher} 'ls /sys/class/net'")
+          assert "eth0" in out, out
+          out = machine.succeed("${netless} 'ls /sys/class/net'")
+          assert out.split() == ["lo"], out
+
+      with subtest("the scope is in machine.slice and carries its properties"):
+          # Both facts in one read, and from the host deliberately: the session
+          # has a cgroup namespace of its own, so from inside it the limit is on
+          # an ancestor it cannot see and /sys/fs/cgroup/memory.max says "max".
+          machine.succeed("${launcher} 'sleep 5' >/dev/null 2>&1 &")
+          limit = machine.wait_until_succeeds(
+              "cat /sys/fs/cgroup/machine.slice/demo-*.scope/memory.max").strip()
+          assert limit == str(1024 * 1024 * 1024), limit
+          # And nothing of that session survives it, which the subtests after
+          # this one assume.
+          machine.wait_until_succeeds("test -z \"$(find /run/flong -maxdepth 2 -name 's-*')\"")
+
+      with subtest("an identity the container does not have is refused"):
+          err = machine.fail("${badIdentity} 2>&1")
+          assert "but containers.demo says" in err, err
 
       with subtest("a tmpfs masks part of a read-write bind"):
           machine.succeed("test -e /srv/shared/masked/host-only")

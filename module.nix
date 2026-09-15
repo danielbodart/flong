@@ -26,16 +26,63 @@ let
 
   mkLauncher = name: c:
     let
-      closure = config.containers.${c.container}.path;
+      declared = config.containers.${c.container};
+      closure = declared.path;
       declaredConf = config.environment.etc."nixos-containers/${c.container}.conf".source;
 
       # allowedDevices is a unit property rather than an nspawn flag, so it is
       # not in that file and is translated here.
       deviceProps = lib.concatMapStringsSep " "
         (d: "--property=DeviceAllow=${lib.escapeShellArg "${d.node} ${d.modifier}"}")
-        config.containers.${c.container}.allowedDevices;
+        declared.allowedDevices;
+
+      # The resource control the container module leaves to machine.slice.
+      # Worth having per session because a session writes its root, its TMPDIR
+      # and every overlay upper into /run -- which is RAM, so a payload that
+      # fills one is the host's problem rather than its own.
+      resourceProps = lib.concatMapStringsSep " "
+        (k: "--property=${lib.escapeShellArg "${k}=${c.properties.${k}}"}")
+        (lib.attrNames c.properties);
+
+      # The two kinds of network isolation that need nothing configured inside
+      # the container, which is the only kind a session can have: nspawn drops
+      # to `user` before pid 1, so there is no privileged moment in there to
+      # bring an interface up or address it. A veth, a bridge, a macvlan or a
+      # moved interface needs exactly that, and is refused at evaluation.
+      networkFlags =
+        lib.optionalString declared.privateNetwork "--private-network "
+        + lib.optionalString (declared.networkNamespace != null)
+          "--network-namespace-path=${lib.escapeShellArg declared.networkNamespace}";
 
       overlayDir = p: ".overlay/" + lib.replaceStrings [ "/" ] [ "_" ] (lib.removePrefix "/" p);
+
+      # An entry may name its own options as PATH:opts, so the path is the head.
+      tmpfsPath = p: lib.head (lib.splitString ":" p);
+
+      # The container's own `tmpfs` list means what flong's means -- the
+      # container module passes it to nspawn as --tmpfs, and flong is the thing
+      # calling nspawn -- so it is merged in rather than silently dropped.
+      # flong's entry wins where both name a path, which is how a consumer adds
+      # options to something the container asked for.
+      #
+      # XDG_RUNTIME_DIR is exported unconditionally, so the directory it names
+      # has to exist, and only the launcher can arrange that: /run is nspawn's
+      # own tmpfs, made fresh at every start, and nothing inside a session is
+      # privileged enough to create a directory in it. It gets the payload's
+      # ownership and 0700 because a root-owned 0755 runtime directory is
+      # rejected by the things that look at one -- and failing that way is
+      # quiet, which is how a session ends up with no keyring, no user bus and
+      # no explanation.
+      tmpfsEntries =
+        let
+          fromContainer = lib.filter
+            (p: ! lib.elem (tmpfsPath p) (map tmpfsPath c.tmpfs))
+            declared.tmpfs;
+          entries = c.tmpfs ++ fromContainer;
+          runtimeDir = "/run/user/${toString c.uid}";
+        in
+        entries ++ lib.optional (! lib.elem runtimeDir (map tmpfsPath entries))
+          "${runtimeDir}:mode=0700,uid=${toString c.uid},gid=${toString c.gid}";
 
       # A bare --tmpfs mounts root-owned 0755, which the unprivileged payload
       # cannot write to. Default it to the container's user; an entry that
@@ -44,7 +91,7 @@ let
         (p:
           if lib.hasInfix ":" p then "--tmpfs=${p}"
           else "--tmpfs=${p}:mode=0755,uid=${toString c.uid},gid=${toString c.gid}")
-        c.tmpfs;
+        tmpfsEntries;
       # An explicit upper inside the session root, not nspawn's empty-string
       # form, which puts it under the host's /var/tmp and leaks it on SIGKILL.
       overlayFlags = lib.concatMapStringsSep " "
@@ -63,7 +110,7 @@ let
             ''chown ${toString c.uid}:${toString c.gid} "$root"/${overlayDir p}''
           ])
           (lib.attrNames c.overlays)
-        ++ map (p: ''mkdir -p "$root"${lib.head (lib.splitString ":" p)}'') c.tmpfs
+        ++ map (p: ''mkdir -p "$root"${tmpfsPath p}'') tmpfsEntries
       );
 
       # By absolute path: sudo resets PATH to secure_path, and a copy from pkgs
@@ -114,7 +161,21 @@ let
           >/dev/null 2>&1
 
         # Would otherwise pin this moment's DNS for the life of the boot.
+        # nspawn binds a fresh one in per session instead, since --resolv-conf
+        # defaults to auto and a session shares the host's network.
         rm -f "$staging/etc/resolv.conf"
+
+        # A container's machine id is written by its init from the uuid nspawn
+        # hands it, and a session has no init -- so without this the file is
+        # absent and everything that reads one gets ENOENT. Per prepared root,
+        # which is once per boot per closure: as stable as anything else here,
+        # and it does not follow a session between boots the way a declared
+        # container's would.
+        #
+        # Tolerated if it fails, deliberately: an id is a nicety and a prepared
+        # root is not, so this must not be the step that stops one existing.
+        ${closure}/sw/bin/systemd-machine-id-setup --root="$staging" \
+          >/dev/null 2>&1 || true
       '';
 
       # Named for the closure AND for the steps above, because a root prepared
@@ -292,6 +353,30 @@ let
           }
         fi
 
+        # The identity this launcher was declared with has to be the identity
+        # the container's own passwd gives that name, because the two halves are
+        # used in different places: nspawn resolves --user in there, while
+        # TMPDIR, every tmpfs entry and every overlay upper are created out here
+        # from the declared uid and gid. A mismatch is an error nowhere -- the
+        # session simply cannot write to its own home or its own cache, which
+        # reads like a broken program rather than a wrong number in a config.
+        #
+        # Checked against the prepared root rather than asserted at evaluation,
+        # because a container declared by `path` has no configuration for an
+        # assertion to read, and this is the file nspawn will actually consult.
+        entry=$(grep "^${c.user}:" "$prepared/etc/passwd") || {
+          echo "${name}: ${c.user} is not a user in containers.${c.container}" >&2
+          exit 1
+        }
+        IFS=: read -ra field <<< "$entry"
+        if [ "''${field[2]}" != ${toString c.uid} ] ||
+           [ "''${field[3]}" != ${toString c.gid} ] ||
+           [ "''${field[5]}" != ${lib.escapeShellArg c.home} ]; then
+          echo "${name}: declared ${toString c.uid}:${toString c.gid} ${c.home} for ${c.user}," \
+               "but containers.${c.container} says ''${field[2]}:''${field[3]} ''${field[5]}" >&2
+          exit 1
+        fi
+
         # nspawn removes its own unix-export mount on a clean exit; a SIGKILL
         # leaves it and the next run refuses to start. No trap survives
         # SIGKILL, so this is swept on the way in instead.
@@ -381,10 +466,35 @@ let
         # closure is bound over the mount point nspawn makes for it rather
         # than a symlink being written from inside, which nothing unprivileged
         # could do.
+        #
+        # machine.slice, where the container@ unit would have put it, so a
+        # limit set on the slice reaches every session and `systemd-cgls
+        # machine.slice` shows what is running. --slice on nspawn itself is
+        # ignored under --keep-unit, so it belongs on the scope.
+        #
+        # --console=autopipe, because the default is `interactive` from a
+        # terminal and `read-only` otherwise -- and read-only propagates output
+        # while never reading input, so a launcher in a pipeline or a script
+        # gets an empty stdin and no indication of it. autopipe keeps the pty
+        # whenever there is a terminal on stdin to keep it for, and otherwise
+        # passes the descriptors straight through, which is what makes `echo
+        # prompt | launcher` mean what it says. The cost is that in the second
+        # case the payload holds the caller's own stdout and stderr rather than
+        # a pty, so a session can write escape sequences at a terminal it is
+        # sharing -- no more than any program the caller runs themselves, and
+        # the price of a pipeline working at all.
+        #
+        # --hostname, because the machine name carries a pid and a random
+        # number to keep concurrent sessions apart, and nspawn would otherwise
+        # use it as the hostname -- so a session would see a different hostname
+        # every time, where a declared container sees networking.hostName.
         rc=0
-        ${systemdRun} --scope --quiet --unit="$machine" \
-          --property=DevicePolicy=closed ${deviceProps} -- \
+        ${systemdRun} --scope --quiet --unit="$machine" --slice=machine.slice \
+          --property=DevicePolicy=closed ${deviceProps} ${resourceProps} -- \
           ${nspawn} -q --keep-unit --directory="$root" --machine="$machine" \
+            --hostname=${lib.escapeShellArg c.container} \
+            --console=autopipe \
+            ${networkFlags} \
             --kill-signal=SIGTERM \
             --bind-ro=/nix/store --bind-ro=/nix/var/nix/db \
             --bind-ro=${closure}:/run/current-system \
@@ -566,6 +676,22 @@ in
           '';
         };
 
+        properties = lib.mkOption {
+          type = lib.types.attrsOf lib.types.str;
+          default = { };
+          example = { MemoryMax = "8G"; CPUQuota = "400%"; };
+          description = ''
+            systemd properties applied to the session's scope, as
+            `--property=NAME=VALUE`. See
+            {manpage}`systemd.resource-control(5)`.
+
+            Worth setting because a session's root, its TMPDIR and every
+            overlay upper live under /run, which is RAM: `MemoryMax` is what
+            makes a payload that fills one the session's problem rather than
+            the host's.
+          '';
+        };
+
         launcherInputs = lib.mkOption {
           type = lib.types.listOf lib.types.package;
           default = [ ];
@@ -597,25 +723,124 @@ in
   config = lib.mkIf (cfg != { }) {
     boot.enableContainers = true;
 
-    # Bind mounts are recovered by word-splitting EXTRA_NSPAWN_FLAGS, which the
-    # NixOS container module writes unescaped. A path holding whitespace does
-    # not fail that parse -- it splits into two flags that are each valid and
-    # neither correct, so the container silently gets mounts nobody declared.
-    # A colon is the same story one level down, inside --bind's own SRC:DEST.
-    # Refused at eval, because there is no way to notice it at runtime.
-    assertions = lib.concatMap
-      (c: lib.concatMap
-        (m: map
-          (p: {
-            assertion = ! lib.any (bad: lib.hasInfix bad p) [ " " "\t" "\n" ":" ];
+    warnings = lib.concatLists (lib.mapAttrsToList
+      (n: c:
+        let declared = config.containers.${c.container} or null; in
+        lib.optional (declared != null && declared.autoStart) ''
+          flong.${n} drives containers.${c.container}, which has autoStart
+          enabled: systemd boots that container at every host boot, which is
+          the second and a bit a flong exists in order not to pay, and it holds
+          the declaration's state directory for as long as it runs. Set
+          autoStart = false unless you want the long-running container too.
+        '')
+      cfg);
+
+    # Everything the container module would honour and flong cannot, refused
+    # here rather than dropped quietly. Most of these declare LESS privilege
+    # than the default, and a container that is silently not the one you
+    # declared is worse than one that refuses to build.
+    assertions = lib.concatLists (lib.mapAttrsToList
+      (n: c:
+        let
+          declared = config.containers.${c.container} or null;
+          # Only meaningful with a network namespace to configure, and each one
+          # needs an interface brought up and addressed from inside the
+          # container -- which a session has no privileged moment to do.
+          needsInside = [
+            (declared.hostBridge != null)
+            (declared.forwardPorts != [ ])
+            (declared.interfaces != [ ])
+            (declared.macvlans != [ ])
+            (declared.extraVeths != { })
+            (declared.hostAddress != null)
+            (declared.hostAddress6 != null)
+            (declared.localAddress != null)
+            (declared.localAddress6 != null)
+            (declared.localMacAddress != null)
+          ];
+        in
+        [{
+          assertion = declared != null;
+          message = ''
+            flong.${n}.container names containers.${c.container}, which is not
+            declared.
+          '';
+        }]
+        ++ lib.optionals (declared != null) ([
+          {
+            assertion = declared.flake == null;
             message = ''
-              flong: containers.${c.container} has a bind mount path that
-              cannot survive EXTRA_NSPAWN_FLAGS: "${p}". Whitespace and ':'
-              are not expressible there; rename the path.
+              flong.${n} drives containers.${c.container}, which is declared by
+              `flake`. Such a container reports a per-container profile as its
+              path, and only the container@ unit's start script ever creates
+              one -- so there would be nothing to prepare a root from, and
+              nothing is evaluated at launch to fix that. Declare it with
+              `config`.
             '';
-          })
-          [ m.hostPath m.mountPoint ])
-        (lib.attrValues config.containers.${c.container}.bindMounts))
-      (lib.attrValues cfg);
+          }
+          {
+            assertion = declared.privateUsers == "no";
+            message = ''
+              flong.${n} drives containers.${c.container}, which asks for a uid
+              namespace. flong cannot give it one: a bind-mounted file owned by
+              a host uid maps to an unmapped uid inside, so the session cannot
+              read the workspace it was started for. Leaving the option set
+              would declare an isolation the session does not get.
+            '';
+          }
+          {
+            assertion = declared.additionalCapabilities == [ ] && ! declared.enableTun;
+            message = ''
+              flong.${n} drives containers.${c.container}, which grants
+              capabilities. Nothing in a session holds any: nspawn drops to
+              ${c.user} before it starts pid 1, so there is no process for a
+              capability to belong to, and enableTun's /dev/net/tun is useless
+              without CAP_NET_ADMIN to create an interface with.
+
+              If a file-capability binary in the closure genuinely needs one in
+              the bounding set, ask for it deliberately with
+              containers.${c.container}.extraFlags = [ "--capability=..." ],
+              which flong passes through.
+            '';
+          }
+          {
+            assertion = ! lib.any (x: x) needsInside;
+            message = ''
+              flong.${n} drives containers.${c.container}, which declares a
+              veth, a bridge, a macvlan, a moved interface or a forwarded port.
+              Each of those leaves an interface for the container's own init to
+              bring up and address, and a session has no privileged moment
+              inside it to do that -- nspawn drops to ${c.user} before pid 1.
+
+              What flong can do is give a session a namespace of its own
+              (`privateNetwork`, loopback and nothing else) or put it in one
+              something else already built (`networkNamespace`). Arrange the
+              addressing on the host and point `networkNamespace` at the
+              result.
+            '';
+          }
+        ]
+        # Bind mounts are recovered by word-splitting EXTRA_NSPAWN_FLAGS, which
+        # the NixOS container module writes unescaped. A path holding whitespace
+        # does not fail that parse -- it splits into two flags that are each
+        # valid and neither correct, so the container silently gets mounts
+        # nobody declared. A colon is the same story one level down, inside
+        # --bind's own SRC:DEST. Refused at eval, because there is no way to
+        # notice it at runtime.
+        ++ lib.concatMap
+          (m: map
+            # hostPath is null when the mount takes the container's own path on
+            # both sides, and then there is only the one path to judge.
+            (p: {
+              assertion = ! lib.any (bad: lib.hasInfix bad p) [ " " "\t" "\n" ":" ];
+              message = ''
+                flong: containers.${c.container} has a bind mount path that
+                cannot survive EXTRA_NSPAWN_FLAGS: "${p}". Whitespace and ':'
+                are not expressible there; rename the path.
+              '';
+            })
+            (lib.filter (p: p != null) [ m.hostPath m.mountPoint ]))
+          (lib.attrValues declared.bindMounts)))
+      cfg);
   };
 }
