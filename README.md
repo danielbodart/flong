@@ -128,6 +128,14 @@ runs as another. It also reaches what evaluation cannot see: a container
 declared by `path` has no configuration to read, and a `users.users.<name>.uid`
 left unset is allocated during activation.
 
+What flong cannot derive, and does not police, is the other end of that number:
+the account you name should have the *invoking* user's uid. There is no uid
+namespace, so a bind mount carries the host's numbers — a session running as
+1001 cannot write a workspace owned by 1000, whatever either side calls the
+user. The container declares the uid and nothing in the container knows who will
+invoke the launcher, so this is the one identity fact that is still yours to get
+right.
+
 ### What it takes from the declaration
 
 flong drives the declaration rather than reimplementing it, so most of
