@@ -179,7 +179,7 @@ the others it needs beside it, one path per line:
 # Whatever travels with this checkout, read-write.
 extraBinds = ''
   case $workspace in
-    */data-lab) printf '%s\n' "$HOME/Projects/finance-api" ;;
+    */main-project) printf '%s\n' "$HOME/Projects/sibling-project" ;;
   esac
 '';
 
