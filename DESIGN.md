@@ -12,7 +12,7 @@ warm on one machine.
 
 ## Launch sequence
 
-1. `workspace`, then `extraBinds` and `extraBindsRo`, as the invoking user.
+1. `workspace`, then `binds`, as the invoking user.
 2. `guard`, as root.
 3. Prepare the root if this closure has none yet.
 4. Read `user`'s uid, gid and home from the prepared root's `/etc/passwd`.
@@ -123,14 +123,31 @@ to get root. The gid comes from the passwd database, since pkexec does not set
 `SUDO_GID`.
 
 The printed path is resolved with `realpath` before it is validated, so what
-is checked is what is mounted. `:` and newlines are refused because `--bind`
-has no escaping.
+is checked is what is mounted. `binds` runs next, the same way, with
+`$workspace` exported so it can name what travels with that directory.
+
+A caller's path travels as `PATH:MODE`, one per line: in what the hooks print,
+in `$binds` for the guard, and in `FLONG_BINDS` for the payload. So `:` and
+newlines are refused in a caller's path. nspawn could mount either; the refusal
+keeps those lists unambiguous to anything that splits them naively, and a
+guard is security code that will. A trailing `:ro` or `:rw` is always a mode.
+
+**Read-only is the default** for a caller's bind, as `isReadOnly` defaults to
+`true` in the declaration: a directory is writable because a line says `:rw`.
+The workspace is the exception, read-write unless it says `:ro`, because it is
+what the session was started to work on. `$binds` and `FLONG_BINDS` spell the
+mode out on every entry, so neither the guard nor the payload has to know the
+default. The caller's binds are directories only, bound at their own paths:
+they are the session's working set, which the payload is told about so that an
+agent can be given `--add-dir`, and a caller cannot choose where inside the
+session a path lands, so cannot put a directory over `/etc` or
+`/run/current-system`.
 
 `guard` runs second, as root, with `$workspace` set. It judges the directory
 that will be mounted, rather than re-deriving one from `$PWD` and agreeing with
 the mount only by coincidence. It stays root because a gate the caller can
-`ptrace` or `LD_PRELOAD` is not a gate. `$extra_binds` and `$extra_binds_ro`
-are in scope because they are mounts the caller chose; a guard that reads only
+`ptrace` or `LD_PRELOAD` is not a gate. `$binds` and `$workspace_mode` are in
+scope because they are mounts the caller chose; a guard that reads only
 `$workspace` admits them unexamined. The cost of this order is that a refused
 caller has already run `workspace`, as themselves, which gains them nothing.
 
@@ -163,7 +180,8 @@ what is mounted after it was judged.
   mask part of a bind mount and a bind mount can reach through a tmpfs. A
   single socket can be exposed from an otherwise masked directory this way.
 - **Read-only binds** stop writes, not execution. They are for reference
-  material, not for making untrusted directories safe.
+  material, not for making untrusted directories safe. A read-only bind also
+  refuses `chmod` and `chown` with `EROFS`, whoever owns the file.
 
 ## What flong honours from the declaration
 
@@ -375,7 +393,7 @@ symlink. Failure fails the launch.
 
 ### `attachBinds` and `attachWrap`
 
-`attachBinds` exists because `extraBinds` takes directories only, binds each at
+`attachBinds` exists because `binds` takes directories only, binds each at
 its own path, runs as the caller, and is reported to the payload. A hook needs
 a socket or a single file, from a path of its choosing, at a fixed path inside,
 and the payload has no need to be told. It runs before nspawn because a bind

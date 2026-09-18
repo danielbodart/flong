@@ -26,7 +26,7 @@ and the prepared root, the tmpfs mounts and the overlays each need their own
 answer. A wrong mapping shows up as `nobody` and a read failure, which is the
 safe direction to fail in.
 
-## 2. Persistence, and a read-only workspace
+## 2. Persistence, and a discardable workspace
 
 Two options that answer the same question in opposite directions. Each needs a
 sentence in the README saying when to choose it.
@@ -35,9 +35,10 @@ sentence in the README saying when to choose it.
   created on first use with the payload's ownership. A package index, a
   compiler cache or a language server's database wants state that persists
   across sessions and stays out of the host's own layout.
-- A read-only workspace: the workspace as the lower layer of an overlay whose
-  upper layer is discarded at the end. `workspace` is always bound read-write,
-  and `overlays` takes static paths fixed at evaluation, so a per-session
+- A discardable workspace: the workspace as the lower layer of an overlay whose
+  upper layer is discarded at the end, so the session can write and nothing
+  reaches the host. `workspace` binds read-write or, with `:ro`, read-only, and
+  `overlays` takes static paths fixed at evaluation, so a per-session
   workspace overlay cannot be expressed.
 
 ## 3. `nix` inside a session, only if asked for
@@ -78,7 +79,7 @@ asserted rather than assumed:
 - A session with no `network` has only `lo`, and no route in either family.
 - A `postStart` hook runs as root, is handed a namespace that is not the host's,
   and finds no route in it; its `attachBinds` are inside and absent from
-  `FLONG_EXTRA_BINDS`.
+  `FLONG_BINDS`.
 - The payload cannot list or flush a hook's ruleset, add a link or add a route,
   including inside `unshare -Ur`, where it holds `CAP_NET_ADMIN` again; the
   rule is intact from outside afterwards.

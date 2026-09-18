@@ -486,18 +486,29 @@ let
 
         # shellcheck disable=SC2016  # a snippet is data for `bash -c`, so it
         # is quoted to survive THIS shell rather than to run in it. Applies to
-        # all three call sites.
+        # both call sites.
         workspace=$(run_as_caller ${lib.escapeShellArg c.workspace}) || exit 1
+
+        # A trailing `:ro` binds the workspace read-only; `:rw`, the default,
+        # may be said out loud. A trailing mode is always a mode, which is
+        # unambiguous because a caller's path may not hold a ':' -- see below.
+        case $workspace in
+          *:ro) workspace_mode=ro; workspace=''${workspace%:ro} ;;
+          *:rw) workspace_mode=rw; workspace=''${workspace%:rw} ;;
+          *) workspace_mode=rw ;;
+        esac
 
         # Resolved before it is checked, so what gets validated is what gets
         # mounted -- and so that `guard` below judges the same canonical path
         # nspawn will be handed, rather than whatever spelling the caller
         # happened to use.
         workspace=$(realpath -e -- "$workspace") || exit 1
-        # nspawn splits --bind on ':', and a newline would corrupt the flag
-        # string it is spliced into, so a workspace naming either cannot be
-        # expressed as a mount and is refused rather than mounted wrongly.
-        # WHICH directory is allowed remains `guard`'s business, not this.
+        # nspawn could mount any path. What refuses a ':' or a newline here is
+        # flong's own format: a caller's path travels as PATH:MODE, one per
+        # line -- in what its hook prints, and in $binds and FLONG_BINDS,
+        # which a guard and a payload read -- and either character would make
+        # that ambiguous to anything that splits it naively, a guard
+        # included. WHICH directory is allowed remains `guard`'s business.
         nl='
 '
         case $workspace in
@@ -511,45 +522,57 @@ let
           exit 1
         }
 
-        # The extra binds, resolved with $workspace already in scope so a
+        # The caller's binds, resolved with $workspace already in scope so a
         # snippet can answer "what travels with THIS directory" -- which is
         # the question a consumer pairing repositories is actually asking.
         # Exported rather than passed, because the snippet runs in a bash of
         # its own under setpriv and would not otherwise inherit it.
-        export workspace
+        export workspace workspace_mode
 
-        # Same treatment $workspace gets, for the same reasons, applied to
-        # every line: resolved first so what is validated is what is mounted,
-        # then refused if it names anything --bind cannot express. Deciding
-        # WHICH directories are allowed remains `guard`'s business.
+        # Each line is PATH, bound read-only, or PATH:rw; PATH:ro says the
+        # default out loud. The same treatment $workspace gets, for the same
+        # reasons: resolved first so what is validated is what is mounted,
+        # then refused if it names what the PATH:MODE lists cannot carry.
+        # Directories only, because they are the caller's working set, which
+        # the payload is told about for an agent's --add-dir. Deciding WHICH
+        # directories are allowed remains `guard`'s business.
+        #
+        # The result has the mode on every line, so a guard reading it sees
+        # what it is granting without knowing the default.
         #
         # `exit 1` inside the function lands in the command substitution's
-        # subshell, so every caller needs its own `|| exit 1` -- a failure
-        # here must abort the launch, not mount a shorter list.
+        # subshell, so the caller needs its own `|| exit 1` -- a failure here
+        # must abort the launch, not mount a shorter list.
         resolve_binds() {
-          local raw=$1 p out=""
-          while IFS= read -r p; do
-            [ -n "$p" ] || continue
+          local line p mode out=""
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            case $line in
+              *:rw) mode=rw; p=''${line%:rw} ;;
+              *:ro) mode=ro; p=''${line%:ro} ;;
+              *) mode=ro; p=$line ;;
+            esac
             p=$(realpath -e -- "$p") || exit 1
             case $p in
               *:* | *"$nl"*)
-                echo "${name}: extra bind names ':' or a newline: $p" >&2
+                echo "${name}: bind names ':' or a newline: $p" >&2
                 exit 1
                 ;;
             esac
             [ -d "$p" ] || {
-              echo "${name}: extra bind is not a directory: $p" >&2
+              echo "${name}: bind is not a directory: $p" >&2
               exit 1
             }
-            out=$out$p$nl
-          done <<< "$raw"
+            out=$out$p:$mode$nl
+          done <<< "$1"
           printf '%s' "$out"
         }
 
+        # Two steps, so a snippet that fails aborts the launch: a command
+        # substitution inside an argument has its status thrown away.
         # shellcheck disable=SC2016
-        extra_binds=$(resolve_binds "$(run_as_caller ${lib.escapeShellArg c.extraBinds})") || exit 1
-        # shellcheck disable=SC2016
-        extra_binds_ro=$(resolve_binds "$(run_as_caller ${lib.escapeShellArg c.extraBindsRo})") || exit 1
+        binds_raw=$(run_as_caller ${lib.escapeShellArg c.binds}) || exit 1
+        binds=$(resolve_binds "$binds_raw") || exit 1
 
         # `guard` decides entitlement, so it stays root. A gate the caller can
         # ptrace or preload is not a gate, and dropping it would hand the
@@ -558,11 +581,11 @@ let
         # cannot express, which makes it the better-sanitised of the two
         # caller-shaped values in scope here. The other is $PWD.
         #
-        # $extra_binds and $extra_binds_ro are in scope too, newline
-        # separated and resolved the same way. A container that grants more
-        # than its caller had must judge THOSE as well: they are mounts the
-        # caller named, and a gate that reads only $workspace would let a
-        # second directory in unexamined.
+        # $workspace_mode is in scope, and so is $binds: PATH:ro and PATH:rw
+        # lines, resolved the same way. A container that grants more than its
+        # caller had must judge THOSE as well: they are mounts the caller
+        # named, and a gate that reads only $workspace would let a second
+        # directory in unexamined.
         #
         # A SUBSHELL, so the guard's `exit` is its verdict and nothing more:
         # `exit 0` lets the launch go on rather than ending the launcher
@@ -941,34 +964,25 @@ let
         # The declaration's binds and extraFlags, one argument each.
         declared_flags=(${lib.escapeShellArgs declaredFlags})
 
-        # An array, for the same reason: these are runtime values, and
-        # word-splitting a path is how a directory with a space in it becomes
-        # two broken mounts.
-        extra_flags=()
-        while IFS= read -r b; do
-          [ -n "$b" ] || continue
-          extra_flags+=("--bind=$b:$b")
-        done <<< "$extra_binds"
-        while IFS= read -r b; do
-          [ -n "$b" ] || continue
-          extra_flags+=("--bind-ro=$b:$b")
-        done <<< "$extra_binds_ro"
-
-        # Handed to `command` too, so a consumer can tell whatever it starts
-        # about the directories -- both agents this was built for take an
-        # --add-dir, and a mount the process does not know about is only half
-        # of what the caller asked for. ':' separated, which is unambiguous
-        # precisely because a path naming one was refused above.
-        joined() {
-          local out="" b
-          while IFS= read -r b; do
-            [ -n "$b" ] || continue
-            out=''${out:+$out:}$b
-          done <<< "$1"
-          printf '%s' "$out"
+        # The binds computed at launch, in an array for the same reason:
+        # these are runtime values, and word-splitting a path is how a
+        # directory with a space in it becomes two broken mounts.
+        bind_flags=()
+        # MODE HOSTPATH MOUNTPOINT
+        add_bind() {
+          local flag=--bind source="" target=""
+          if [ "$1" = ro ]; then flag=--bind-ro; fi
+          nspawn_path source "$2"
+          nspawn_path target "$3"
+          bind_flags+=("$flag=$source:$target")
         }
+        add_bind "$workspace_mode" "$workspace" "$workspace"
+        while IFS= read -r b; do
+          [ -n "$b" ] || continue
+          add_bind "''${b##*:}" "''${b%:*}" "''${b%:*}"
+        done <<< "$binds"
 
-        # THE HOOK'S OWN BINDS, which extraBinds cannot carry: that takes
+        # THE HOOK'S OWN BINDS, which `binds` cannot carry: that takes
         # directories only, binds each at its own path, is resolved as the
         # caller, and is advertised to the payload. These are the launcher's
         # plumbing -- a socket, a single file -- bound from a host path of the
@@ -1032,11 +1046,11 @@ let
         attach_binds=$(resolve_attach_binds "$attach_binds_raw") || exit 1
         ''}
         # Onto the nspawn command line and nowhere else: not joined into
-        # FLONG_EXTRA_BINDS, which is how the payload learns what the CALLER
+        # FLONG_BINDS, which is how the payload learns what the CALLER
         # asked to have mounted.
         while IFS= read -r b; do
           [ -n "$b" ] || continue
-          extra_flags+=("--bind=$b")
+          bind_flags+=("--bind=$b")
         done <<< "$attach_binds"
 
         # The command the payload is exec'd through, empty unless a consumer
@@ -1132,16 +1146,14 @@ let
             --bind-ro=/nix/store --bind-ro=/nix/var/nix/db \
             --bind-ro=${closure}:/run/current-system \
             ''${declared_flags[@]+"''${declared_flags[@]}"} \
-            --bind="$workspace:$workspace" \
-            ''${extra_flags[@]+"''${extra_flags[@]}"} \
+            ''${bind_flags[@]+"''${bind_flags[@]}"} \
             ''${tmpfs_flags[@]+"''${tmpfs_flags[@]}"} \
             ''${overlay_flags[@]+"''${overlay_flags[@]}"} \
             --uid=${c.user} \
             --setenv=PATH=${closure}/sw/bin \
             --setenv=TMPDIR="$home/tmp" \
             --setenv=XDG_RUNTIME_DIR="$runtime_dir" \
-            --setenv=FLONG_EXTRA_BINDS="$(joined "$extra_binds")" \
-            --setenv=FLONG_EXTRA_BINDS_RO="$(joined "$extra_binds_ro")" \
+            --setenv=FLONG_BINDS="$binds" \
             ${pkgs.tini}/bin/tini -g -- ${gateCmd} \
             ''${wrap[@]+"''${wrap[@]}"} \
             ${lib.getExe payload} "$workspace" "$@" <&3 &
@@ -1348,9 +1360,11 @@ in
         workspace = lib.mkOption {
           type = lib.types.lines;
           default = ''git -C "$PWD" rev-parse --show-toplevel'';
+          example = ''printf '%s:ro\n' "$PWD"'';
           description = ''
-            Shell printing the directory to bind into the container and cd
-            into. Runs on the host before launch, with the launcher's
+            Shell printing the directory to bind into the container at its own
+            path and start in: `PATH`, bound read-write, or `PATH:ro`, bound
+            read-only. Runs on the host before launch, with the launcher's
             arguments in "$@"; a non-zero exit aborts.
 
             Runs *before* `guard`, so that the gate can judge the directory
@@ -1363,47 +1377,44 @@ in
             unprivileged caller to drop to, as when a unit starts the
             launcher directly.
 
-            What it prints is resolved with `realpath` and then refused if it
-            names a `:` or a newline, neither of which nspawn's `--bind` can
-            express. Deciding *which* directory is allowed is `guard`'s job,
-            not this one's.
+            What it prints is resolved with `realpath`, must be a directory,
+            and is refused if it names a `:` or a newline: a caller's path
+            travels as `PATH:MODE` lines, which either would make ambiguous.
+            Later hooks see the path as `$workspace` and the mode as
+            `$workspace_mode` (`ro` or `rw`). Deciding *which* directory is
+            allowed is `guard`'s job, not this one's.
           '';
         };
 
-        extraBinds = lib.mkOption {
+        binds = lib.mkOption {
           type = lib.types.lines;
           default = "";
-          example = ''printf '%s\n' "$HOME/Projects/finance-api"'';
-          description = ''
-            Shell printing further directories to bind read-write, one per
-            line, each at its own path inside the container. Empty output
-            binds nothing, which is the default.
-
-            Runs after `workspace`, with `$workspace` exported, so it can
-            answer "what travels with THIS directory" rather than having to
-            name a fixed set -- which is the question a consumer pairing
-            repositories is actually asking.
-
-            Runs as the invoking user and sees the launcher's arguments in
-            "$@", exactly as `workspace` does, and every line it prints is
-            resolved with `realpath` and then refused if it names a `:` or a
-            newline. Deciding *which* directories are allowed is `guard`'s
-            job: it receives them in `$extra_binds`, newline separated.
-
-            Also reaches `command` as `$FLONG_EXTRA_BINDS`, `:` separated.
+          example = ''
+            printf '%s:rw\n' "$workspace/../shared-crates"
+            printf '%s\n' /srv/reference
           '';
-        };
-
-        extraBindsRo = lib.mkOption {
-          type = lib.types.lines;
-          default = "";
           description = ''
-            As `extraBinds`, but bound read-only, reaching `guard` as
-            `$extra_binds_ro` and `command` as `$FLONG_EXTRA_BINDS_RO`.
+            Shell printing more of the caller's directories to bind, one per
+            line, each at its own path inside the container: `PATH`, bound
+            read-only, or `PATH:rw`, bound read-write. Empty output binds
+            nothing, which is the default.
+
+            Runs after `workspace`, with `$workspace` and `$workspace_mode`
+            exported, so it can answer "what travels with THIS directory"
+            rather than having to name a fixed set. Runs as the invoking user
+            and sees the launcher's arguments in "$@", exactly as `workspace`
+            does; a non-zero exit aborts.
+
+            Every path is resolved with `realpath`, must be a directory, and is
+            refused if it names a `:` or a newline, as the workspace is.
+            Deciding *which* directories are allowed is `guard`'s job: it sees
+            them as `$binds`, one `PATH:ro` or `PATH:rw` per line, with the
+            mode always spelt out. The payload sees the same list as
+            `$FLONG_BINDS`, to pass on to an agent's `--add-dir`.
 
             Read-only is not a boundary on its own -- it stops writes, not
-            execution -- so this is for directories a session should read
-            rather than edit, not for making an untrusted one safe.
+            execution -- so it is for directories a session should read rather
+            than edit, not for making an untrusted one safe.
           '';
         };
 
@@ -1421,12 +1432,12 @@ in
             gate, and a gate the caller could ptrace or preload would be
             handing the decision to the process it exists to refuse.
 
-            Runs *after* `workspace`, with `$workspace` in scope: absolute,
-            symlink-resolved, and already refused if it held anything nspawn
-            cannot express. Judge that rather than re-deriving a directory
-            from `$PWD` -- what `$workspace` holds is exactly what will be
-            bound, where anything a guard works out for itself agrees with
-            the mount only by coincidence.
+            Runs *after* `workspace` and `binds`, with their answers in scope:
+            `$workspace`, absolute and symlink-resolved, `$workspace_mode`,
+            and `$binds`, one `PATH:ro` or `PATH:rw` per line. Judge those
+            rather than re-deriving a directory from `$PWD` -- they are
+            exactly what will be bound, where anything a guard works out for
+            itself agrees with the mounts only by coincidence.
 
             Runs in a subshell, so a non-zero exit refuses the launch, `exit 0`
             allows it, and nothing the guard assigns reaches the launcher: it
@@ -1457,8 +1468,7 @@ in
             `$leader` is the session's pid 1 as seen from the host and `$netns`
             its network namespace (`/proc/$leader/ns/net`), both exported.
             `$machine`, `$root`, `$uid`, `$gid`, `$home`, `$workspace`,
-            `$extra_binds`, `$extra_binds_ro` and `$attach_binds` are in scope
-            too. Without `privateNetwork` a session
+            `$workspace_mode`, `$binds` and `$attach_binds` are in scope too. Without `privateNetwork` a session
             shares the host's network namespace, and `$netns` names *that*: a
             hook that installs a ruleset there is steering the host.
 
@@ -1489,7 +1499,7 @@ in
             Shell printing `SOURCE:DESTINATION` lines, each bound read-write
             into the session: a host path of the hook's choosing, at a path
             inside of the hook's choosing. This is how `postStart` gets a socket
-            or a single file into the sandbox, which `extraBinds` cannot do --
+            or a single file into the sandbox, which `binds` cannot do --
             that takes directories only, binds each at its own path, is
             resolved as the caller, and is announced to the payload.
 
@@ -1505,13 +1515,13 @@ in
 
             The source is resolved with `realpath` and must exist; it may be
             any kind of file. The destination must be absolute. A line naming
-            a `:` or a newline on either side is refused, as `extraBinds`
+            a `:` or a newline on either side is refused, as `binds`
             refuses one. Bind the specific path and never a shared parent:
             with a whole directory bound, a workload can list and write its
             neighbours' entries.
 
             Not advertised to the payload: nothing here reaches
-            `FLONG_EXTRA_BINDS`, which says what the *caller* asked for.
+            `FLONG_BINDS`, which says what the *caller* asked for.
           '';
         };
 

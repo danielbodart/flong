@@ -23,7 +23,7 @@ generated script `flong.<name>.launcher` that starts a session; it runs as
 root. The **workspace** is the host directory bind-mounted into the session at
 its own path and used as its working directory. The **payload** is the process
 `command` selects. **Hooks** are the shell options the launcher runs at fixed
-points: `workspace`, `extraBinds`, `extraBindsRo`, `guard`, `attachBinds`,
+points: `workspace`, `binds`, `guard`, `attachBinds`,
 `attachWrap`, `postStart` and `postStop`.
 
 ## Examples
@@ -53,12 +53,17 @@ Declare the container with NixOS's own option, then name it in `flong`:
   flong.sandbox = {
     user = "alice";                  # uid, gid and home are read from the container
     command = ''set -- cargo "$@"''; # the launcher's arguments arrive in "$@"
+    binds = ''                       # more of the caller's directories, read-only unless :rw
+      [ -d "$workspace/../shared-crates" ] && printf '%s:rw\n' "$workspace/../shared-crates"
+      printf '%s\n' /srv/reference
+    '';
   };
 }
 ```
 
 Run from a git checkout, `sudo <launcher> build` runs `cargo build` in the
-repository root, bind-mounted into the session.
+repository root, bind-mounted into the session, with a sibling
+`shared-crates` read-write if there is one and `/srv/reference` read-only.
 
 ### A session with a network
 
@@ -139,9 +144,8 @@ All under `flong.<name>`. Hooks are shell snippets.
 | `container` | `<name>` | The `containers.<name>` declaration to run. |
 | `user` | *required* | Account inside the container that everything in the session runs as. Its uid, gid and home are read from the prepared root's `/etc/passwd`. |
 | `command` | *required* | Runs as `user` inside, in the workspace, under `set -euo pipefail`, with the launcher's arguments in `"$@"`. Must leave the command to exec in `"$@"`. |
-| `workspace` | `git -C "$PWD" rev-parse --show-toplevel` | Prints the directory to bind-mount read-write and `cd` into. Non-zero exit aborts. |
-| `extraBinds` | `""` | Prints further directories to bind-mount read-write, one per line, each at its own path. |
-| `extraBindsRo` | `""` | As `extraBinds`, read-only. |
+| `workspace` | `git -C "$PWD" rev-parse --show-toplevel` | Prints the directory to bind-mount and `cd` into: `PATH`, read-write, or `PATH:ro`. Non-zero exit aborts. |
+| `binds` | `""` | Prints more directories to bind-mount, each at its own path, one per line: `PATH`, read-only, or `PATH:rw`. |
 | `guard` | `""` | Decides whether the caller may launch. Non-zero exit refuses. |
 | `overlays` | `{ }` | `{ target = lower; }`: an overlayfs whose writes go to an upper layer deleted with the session. |
 | `scopeConfig` | `{ }` | Settings for the session's scope unit, typed as `serviceConfig`, e.g. `MemoryMax = "8G"`. |
@@ -164,15 +168,15 @@ In launch order:
 
 | hook | runs as | variables set |
 |---|---|---|
-| `workspace`, `extraBinds`, `extraBindsRo` | invoking user (`SUDO_UID` or `PKEXEC_UID`), else root | launcher arguments in `"$@"`; `$workspace` for the bind lists |
-| `guard` | root | `$workspace`, `$extra_binds`, `$extra_binds_ro` (newline-separated) |
+| `workspace`, `binds` | invoking user (`SUDO_UID` or `PKEXEC_UID`), else root | launcher arguments in `"$@"`; `$workspace` and `$workspace_mode` for `binds` |
+| `guard` | root | `$workspace`, `$workspace_mode` (`ro` or `rw`), `$binds` (`PATH:ro` or `PATH:rw` per line) |
 | `attachBinds`, `attachWrap` | root | `$machine`, `$root`, `$uid`, `$gid`, `$home`, `$workspace` |
 | `postStart` | root | `$leader` (the session's pid 1), `$netns` (`/proc/$leader/ns/net`), `$attach_binds`, and all of the above |
 | `postStop` | root | `$machine` only |
 
-The paths `workspace`, `extraBinds`, `extraBindsRo` and `attachBinds` print
-are resolved with `realpath` and refused if they contain `:` or a newline,
-which `--bind` cannot express.
+The paths `workspace` and `binds` print are resolved with `realpath`, must be
+directories, and are refused if they contain `:` or a newline. `attachBinds`
+lines are resolved and refused the same way.
 
 `postStop` runs from the launcher's exit trap, or from the next launch of the
 same container if the launcher was killed. It must depend on `$machine` alone
@@ -183,9 +187,8 @@ Without `privateNetwork`, `$netns` is the host's network namespace, and rules
 
 ### Inside a session
 
-- The workspace and extra binds are at their host paths. `command` gets the
-  extra binds as `$FLONG_EXTRA_BINDS` and `$FLONG_EXTRA_BINDS_RO`,
-  `:`-separated.
+- The workspace and the caller's binds are at their host paths. `command` gets
+  the binds as `$FLONG_BINDS`, one `PATH:ro` or `PATH:rw` per line.
 - `/nix/store` is read-only; the system closure is at `/run/current-system`.
 - `TMPDIR` is `~/tmp`. `XDG_RUNTIME_DIR` is `/run/user/<uid>`, a 0700 tmpfs;
   name it in the declaration's `tmpfs` to change its options.

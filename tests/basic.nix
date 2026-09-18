@@ -1,6 +1,6 @@
 # Exercises every option that changes what the container sees: the workspace
 # override, a read-write bind, a tmpfs mask over part of that bind, an overlay,
-# the extra binds in both modes, the privilege drop, the NOPASSWD grant, the
+# the caller's binds in both modes, the privilege drop, the NOPASSWD grant, the
 # root hook and its binds, wrapper and teardown, the network, its DNS and the
 # ports it does and does not reach, the session cleanup and the sweep that
 # reclaims what a killed session left.
@@ -219,9 +219,9 @@
       workspace = ''realpath /srv/work'';
       path = [ pkgs.nftables pkgs.netcat pkgs.procps ];
 
-      # What the caller asked for, so that FLONG_EXTRA_BINDS has something in
-      # it for the hook's binds to be absent from.
-      extraBinds = ''printf '%s\n' /srv/companion'';
+      # What the caller asked for, so that FLONG_BINDS has something in it
+      # for the hook's binds to be absent from.
+      binds = ''printf '%s:rw\n' /srv/companion'';
 
       # A file and a socket, each from a host path named for this session, each
       # at a fixed path inside that is nothing like its source. The listener
@@ -390,20 +390,26 @@
         # The gate has to see the extra mounts too, or a second directory
         # gets in unexamined -- which is the whole reason they are resolved
         # before this runs rather than spliced in afterwards.
-        [ "$extra_binds" = /srv/companion ] || {
-          echo "guard saw extra_binds='$extra_binds'" >&2
+        # With the mode spelt out on every entry, the default included, so
+        # the gate sees what it is granting.
+        [ "$binds" = "/srv/companion:rw
+/srv/reference:ro" ] || {
+          echo "guard saw binds='$binds'" >&2
           exit 1
         }
-        [ "$extra_binds_ro" = /srv/reference ] || {
-          echo "guard saw extra_binds_ro='$extra_binds_ro'" >&2
+        [ "$workspace_mode" = rw ] || {
+          echo "guard saw workspace_mode='$workspace_mode'" >&2
           exit 1
         }
       '';
 
       # Resolved with $workspace in scope, which is what lets a consumer pair
       # directories rather than name a fixed set.
-      extraBinds = ''[ "$workspace" = /srv/work ] && printf '%s\n' /srv/companion'';
-      extraBindsRo = ''printf '%s\n' /srv/reference'';
+      # One read-write because it says so, one read-only by default.
+      binds = ''
+        [ "$workspace" = /srv/work ] && printf '%s:rw\n' /srv/companion
+        printf '%s\n' /srv/reference
+      '';
 
       # Readable from the lower directory; writes must not reach it.
       overlays."/opt/layered" = "/srv/lower";
@@ -421,15 +427,39 @@
       command = ''set -- true'';
     };
 
-    # A fourth, whose extra bind names the colon nspawn cannot express. The
-    # workspace is fine, so this is the extra list getting the same refusal
-    # the workspace gets rather than sharing its code by accident.
-    flong.badextrabind = {
+    # A fourth, whose bind names a colon. The workspace is fine, so this is
+    # the bind list getting the same refusal the workspace gets rather than
+    # sharing its code by accident.
+    flong.badbinds = {
       container = "demo";
       user = "alice";
       workspace = ''realpath /srv/work'';
-      extraBinds = ''realpath "/srv/odd:name"'';
+      binds = ''realpath "/srv/odd:name"'';
       command = ''set -- true'';
+    };
+
+    # A bind snippet that fails, which must abort the launch rather than
+    # mount a shorter list.
+    flong.failingbinds = {
+      container = "demo";
+      user = "alice";
+      workspace = ''realpath /srv/work'';
+      binds = ''
+        printf '%s\n' /srv/reference
+        false
+      '';
+      command = ''set -- true'';
+    };
+
+    # A read-only workspace, which the guard sees as such.
+    flong.roworkspace = {
+      container = "demo";
+      user = "alice";
+      workspace = ''printf '%s:ro\n' /srv/work'';
+      guard = ''
+        [ "$workspace" = /srv/work ] && [ "$workspace_mode" = ro ]
+      '';
+      command = ''set -- bash -c "$1"'';
     };
 
     # Guards that would each subvert the launch if they ran in the launcher's
@@ -498,7 +528,9 @@
       launcher = lib.getExe nodes.machine.flong.demo.launcher;
       badWorkspace = lib.getExe nodes.machine.flong.badworkspace.launcher;
       defaultWorkspace = lib.getExe nodes.machine.flong.defaultworkspace.launcher;
-      badExtraBind = lib.getExe nodes.machine.flong.badextrabind.launcher;
+      badBinds = lib.getExe nodes.machine.flong.badbinds.launcher;
+      failingBinds = lib.getExe nodes.machine.flong.failingbinds.launcher;
+      roWorkspace = lib.getExe nodes.machine.flong.roworkspace.launcher;
       badUsername = lib.getExe nodes.machine.flong.badusername.launcher;
       guardExit = lib.getExe nodes.machine.flong.guardexit.launcher;
       guardReassign = lib.getExe nodes.machine.flong.guardreassign.launcher;
@@ -678,17 +710,17 @@
           machine.succeed("test -z \"$(find /run/flong -maxdepth 2 -name 's-netless-*')\"")
 
       with subtest("the hook's binds are inside, and the payload is not told about them"):
-          # A file and a socket, which extraBinds cannot carry, each at a path
+          # A file and a socket, which `binds` cannot carry, each at a path
           # the hook chose rather than at its own.
           out = machine.succeed("${hooked} 'cat /run/hook/file; test -S /run/hook/sock && echo socket'")
           assert "for-netless-" in out, out
           assert "socket" in out, out
-          # FLONG_EXTRA_BINDS says what the CALLER asked to have mounted, and
-          # the hook's plumbing is not that.
-          out = machine.succeed("${hooked} 'echo $FLONG_EXTRA_BINDS'")
-          assert out.strip() == "/srv/companion", out
+          # FLONG_BINDS says what the CALLER asked to have mounted, and the
+          # hook's plumbing is not that.
+          out = machine.succeed("${hooked} 'echo $FLONG_BINDS'")
+          assert out.strip() == "/srv/companion:rw", out
 
-      with subtest("an attach bind naming ':' is refused, like an extra bind"):
+      with subtest("an attach bind naming ':' is refused, like a caller's bind"):
           err = machine.fail("${badAttachBind} 2>&1")
           assert "attach bind names" in err, err
 
@@ -1098,28 +1130,40 @@
           machine.fail("test -e /srv/lower/new")
           machine.succeed("test -e /srv/lower/seed")
 
-      with subtest("extra binds are mounted at their own paths"):
+      with subtest("the caller's binds are mounted at their own paths"):
           out = machine.succeed("${launcher} 'cat /srv/companion/marker; cat /srv/reference/marker'")
           assert "in-the-companion" in out, out
           assert "read-only-reference" in out, out
 
-      with subtest("a read-write extra bind takes writes and a read-only one refuses"):
+      with subtest("a bind is read-only unless it says :rw"):
+          # /srv/reference is root-owned, so a write there fails anyway: what
+          # proves the mount is EROFS rather than EACCES.
           machine.succeed("${launcher} 'echo written > /srv/companion/from-session'")
           machine.succeed("grep -q written /srv/companion/from-session")
-          machine.fail("${launcher} 'echo nope > /srv/reference/from-session'")
+          out = machine.fail("${launcher} 'echo nope > /srv/reference/from-session' 2>&1")
+          assert "Read-only file system" in out, out
           machine.fail("test -e /srv/reference/from-session")
 
-      with subtest("the command is told about the extra binds"):
+      with subtest("the command is told about the caller's binds, with their modes"):
           # A mount the process does not know about is half of what the
-          # caller asked for, so the paths reach it in the environment.
-          out = machine.succeed("${launcher} 'echo $FLONG_EXTRA_BINDS'")
-          assert out.strip() == "/srv/companion", out
-          out = machine.succeed("${launcher} 'echo $FLONG_EXTRA_BINDS_RO'")
-          assert out.strip() == "/srv/reference", out
+          # caller asked for, so the paths reach it in the environment: one
+          # list, a PATH:MODE per line.
+          out = machine.succeed("${launcher} 'printf \"%s\\n\" \"$FLONG_BINDS\"'")
+          assert out.splitlines() == ["/srv/companion:rw", "/srv/reference:ro"], out
 
-      with subtest("an extra bind naming ':' is refused, like a workspace"):
-          err = machine.fail("${badExtraBind} 2>&1")
-          assert "extra bind names" in err, err
+      with subtest("a bind naming ':' is refused, like a workspace"):
+          err = machine.fail("${badBinds} 2>&1")
+          assert "bind names" in err, err
+
+      with subtest("a bind snippet that fails aborts the launch"):
+          machine.fail("${failingBinds}")
+
+      with subtest("a workspace printed as PATH:ro is bound read-only, and the guard is told"):
+          out = machine.succeed("${roWorkspace} 'pwd; cat marker; touch from-session 2>&1 || true'")
+          assert "/srv/work" in out, out
+          assert "in-the-workspace" in out, out
+          assert "Read-only file system" in out, out
+          machine.fail("test -e /srv/work/from-session")
 
       with subtest("the exit status of the command is the exit status of the launcher"):
           machine.succeed("${launcher} 'exit 0'")
