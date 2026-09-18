@@ -383,6 +383,19 @@ but `machinectl shell` asks the container's own systemd to start a unit, and
 there isn't one, so a shell is `nsenter --target <leader> --all` as root.
 `nixos-container login` and `journalctl -M` want the unit that never starts.
 
+**Killing the launcher does not kill the session.** `systemd-run --scope` makes
+the workload a child of the scope, so `kill -9` on a launcher leaves the session
+running — with no trap left to tidy up after it, since no trap survives SIGKILL.
+End such a session with `systemctl stop <machine>.scope` or `machinectl
+terminate <machine>`; `machinectl list` gives you the name.
+
+What a dead session leaves behind — its root, nspawn's `unix-export` mount and
+its mount tunnel — is swept by the next launch of the same container, across
+every prepared root that container has had rather than only the current
+closure's. Live sessions are left alone: a launch has no business terminating
+its neighbours, and liveness is read from the scope and machined rather than
+from the launcher that may already be gone.
+
 ## Versions
 
 Every push to `trunk` that passes `nix flake check` is tagged and released
@@ -400,8 +413,8 @@ $ nix flake check
 ```
 
 Boots a VM and exercises every option that changes what the container sees,
-plus the hook ordering, the identity every session process runs as and session
-cleanup.
+plus the hook ordering, the identity every session process runs as, session
+cleanup and the sweep that reclaims what a killed session left.
 
 ## Licence
 

@@ -398,6 +398,53 @@
           machine.succeed(reuse)
           machine.succeed("rm -rf /tmp/reuse-root")
 
+      with subtest("the sweep leaves a session whose launcher was killed but whose container is alive"):
+          # `systemd-run --scope` makes the workload a child of the SCOPE, so
+          # SIGKILLing the launcher leaves the scope active, nspawn alive and
+          # the payload running. The sweep read /proc for the launcher pid in
+          # the session's name, called that dead, and deleted the root of a
+          # session that was still using it.
+          name = start_session("sleep 300")
+          machine.succeed(f"kill -9 {launcher_pid(name)}")
+          machine.wait_until_fails(f"test -d /proc/{launcher_pid(name)}")
+          machine.succeed("${launcher} 'true'")
+          machine.succeed(f"ls -d /run/flong/demo-*/s-{name}")
+          machine.succeed(f"systemctl is-active --quiet {name}.scope")
+          machine.succeed(f"machinectl show {name} >/dev/null")
+
+          # And once nothing owns it either, the next launch does take it --
+          # or a killed launcher would leave a root nothing ever reclaims.
+          machine.succeed(f"systemctl kill -s KILL {name}.scope")
+          machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
+          machine.succeed("${launcher} 'true'")
+          machine.fail(f"ls -d /run/flong/demo-*/s-{name}")
+
+      with subtest("a leftover from a superseded closure is swept"):
+          # The cache is keyed on the closure hash, so a nixos-rebuild strands
+          # the previous generation's cache in a directory the old sweep --
+          # this launch's own s-* and nothing else -- never looked at again.
+          #
+          # The fixture is spelt like a real cache: a prepared root carrying
+          # the immutable directory tmpfiles leaves behind, and a session whose
+          # owner pid is one greater than the greatest the kernel will hand
+          # out, so /proc can never hold it and it is unambiguously dead.
+          dead = machine.succeed("cat /proc/sys/kernel/pid_max").strip()
+          stale = "/run/flong/demo-00000000-00000000"
+          machine.succeed(f"mkdir -p {stale}/prepared/var/empty {stale}/s-demo-{dead}-1")
+          machine.succeed(f"chattr +i {stale}/prepared/var/empty")
+
+          # A container whose name begins with this one's, which the sweep must
+          # not touch: both hashes are spelt out so the glob cannot reach it.
+          neighbour = "/run/flong/demo-two-00000000-00000000"
+          machine.succeed(f"mkdir -p {neighbour}/prepared")
+
+          machine.succeed("${launcher} 'true'")
+          machine.fail(f"test -e {stale}")
+          machine.succeed(f"test -d {neighbour}/prepared")
+          machine.succeed(f"rm -rf {neighbour}")
+          # The cache this launch actually uses is not swept with it.
+          machine.succeed("test -e /run/flong/demo-*/prepared/etc/passwd")
+
       with subtest("a user the container does not have is refused"):
           err = machine.fail("${badUsername} 2>&1")
           assert "absent is not a user in containers.demo" in err, err

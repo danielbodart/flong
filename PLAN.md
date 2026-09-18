@@ -1,7 +1,8 @@
 # Plan
 
-What is left, in order. Two of these are bugs in what already ships; the rest is
-the network work and the hooks a launcher needs around a session's lifetime.
+What is left, in order. The struck-out sections have shipped and are kept for
+their numbering; the rest is the network work and the hooks a launcher needs
+around a session's lifetime.
 
 Everything marked *measured* was run in a NixOS VM test against this flake's own
 nixpkgs (systemd 261.2, nftables 1.1.7, passt 2026_07_16, kernel 6.18.51), in
@@ -17,63 +18,28 @@ and the README section on what a session is not.
 
 ---
 
-## 1. The unix-export path is wrong
+## ~~1. The unix-export path is wrong~~
 
-`cleanup` and the SIGKILL sweep both look for
-`/run/systemd/nspawn/unix-export/<machine>`. Since systemd 257 the path is
-`/run/systemd/nspawn/<machine>/unix-export` — nspawn builds it as
-`runtime_directory_make(scope, "systemd/nspawn", arg_machine)` and then joins
-`unix-export` inside it.
+Done. `cleanup` and the sweep unmount `/run/systemd/nspawn/<machine>/unix-export`
+and remove the mount tunnel beside it, which is where nspawn leaves both.
 
-So flong's unmount never matches, and every SIGKILLed session leaves a tmpfs
-behind. Reusing that machine name then fails outright:
+## ~~2. The sweep's liveness test is wrong, and it deletes live sessions~~
 
-```
-Mount point '/run/systemd/nspawn/p6e-2466/unix-export' exists already, refusing.
-```
+Done. A session is live while its launcher pid, its scope unit or its
+registration with machined says so — the launcher pid first, because between
+`cp -a` and `systemd-run` it is the only one of the three that exists. Live
+sessions are left alone rather than stopped: the sweep runs inside an unrelated
+launch, and a session's own trap is what ends it. Tasks 6 and 7 are unblocked.
 
-Measured. One line in each place. It depends on nothing, so it goes first.
+## ~~3. Sweep past the current closure~~
 
-## 2. The sweep's liveness test is wrong, and it deletes live sessions
+Done. The sweep globs `/run/flong/<container>-????????-????????`, skips the
+current cache and anything live, and `chattr -R -i`s a superseded cache before
+removing it whole.
 
-The sweep decides a session is dead when `/proc/<owner>` is gone, where the
-owner is the launcher pid parsed out of the session directory name. But
-`systemd-run --scope` makes the workload a child of the *scope*, not of the
-launcher's shell: `kill -9` on the launcher leaves the scope active, nspawn
-alive, the workload running and the namespace present. Measured.
-
-So today the sweep can `rm -rf` the root of a session that is still running, and
-the session carries on with its filesystem deleted underneath it. Once the sweep
-is also given a namespace pin and a pasta process to reap (task 7), it would cut
-a live session's network as well — measured: after `umount -l` of the pin, the
-container kept running with only `lo`.
-
-The fix is to ask something that knows: the scope unit, or the leader pid, not
-the launcher. Either stop the session before reaping its files, or leave live
-sessions alone and let their own launcher's trap do it.
-
-This blocks tasks 6 and 7.
-
-## 3. Sweep past the current closure
-
-The cache directory is keyed on the closure hash, and the sweep globs only
-`${cache}/s-*`, so a session from a superseded closure is never swept. It is
-48K of hygiene today; it becomes load-bearing once a leftover can be a namespace
-pin or a pasta process.
-
-The shape is: glob `/run/flong/<container>-????????-????????` with both hashes
-spelt out, so a container whose name is a prefix of another's cannot sweep its
-neighbour; skip the current cache; skip anything still live by task 2's test;
-`chattr -R -i` before `rm -rf`, because the prepared root carries the immutable
-flag tmpfiles put on `/var/empty`.
-
-Note the race that kept this undone: a superseded cache is not reliably idle. A
-launcher from an earlier generation has no `s-*` directory between its identity
-check and its `cp -a`, and a concurrent sweep in that window deletes the root it
-is about to copy. The window is about a millisecond and costs only that launch,
-but the fix is a `flock` held across prepare-and-copy in every launcher, which
-puts a lock in the path of a tool that advertises 117 ms. Decide that
-deliberately.
+No lock. The prepare/copy race costs the launch that loses it, loudly — `cp -a`
+fails and `set -e` ends that launch — where a `flock` across prepare-and-copy
+would cost every launch of a tool that advertises 117 ms.
 
 ## 4. A root hook, after the namespace exists
 
@@ -294,9 +260,7 @@ are supposed to deliver, and none of them is asserted today:
 - `network` reaches a host port named in `hostPorts` and nothing else on the
   host's loopback.
 - A port in `forwardPorts` is reachable from the host; nothing else is.
-- Clean exit releases the pin and pasta; `kill -9` of the launcher leaves a
-  session the sweep can identify as live, and one it can identify as dead.
-- Reusing a SIGKILLed session's machine name succeeds (task 1).
+- Clean exit releases the pin and pasta.
 - A bind added by the hook exists inside and is not named in
   `FLONG_EXTRA_BINDS`.
 

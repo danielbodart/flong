@@ -108,6 +108,7 @@ let
       nspawn = "/run/current-system/sw/bin/systemd-nspawn";
       systemdRun = "/run/current-system/sw/bin/systemd-run";
       machinectl = "/run/current-system/sw/bin/machinectl";
+      systemctl = "/run/current-system/sw/bin/systemctl";
 
       # WHO A SESSION RUNS AS IS READ, NOT DECLARED.
       #
@@ -400,30 +401,93 @@ let
         # these, so they cannot disagree with what the container thinks.
         read_identity "$prepared"
 
-        # nspawn removes its own unix-export mount on a clean exit; a SIGKILL
-        # leaves it and the next run refuses to start. No trap survives
-        # SIGKILL, so this is swept on the way in instead.
+        # A session that ended cleanly took its own root and nspawn's mounts
+        # with it. A SIGKILLed one left all of it, and the unix-export tmpfs
+        # among it is refused rather than reused: the next nspawn to draw that
+        # machine name dies with "Mount point ... exists already, refusing." No
+        # trap survives SIGKILL, so what is left is swept on the way in.
         #
-        # Liveness is the owning pid, which is in the name and alive from
-        # before the directory exists. Asking machined is racy: a session that
-        # has copied its root but not yet started nspawn is not registered, and
-        # a concurrent launch would delete it.
-        for d in ${cache}/s-*; do
-          [ -e "$d" ] || continue
-          stale=''${d##*/s-}
-          owner=''${stale#${c.container}-}; owner=''${owner%%-*}
-          [ -d "/proc/$owner" ] && continue
-          ${machinectl} show "$stale" >/dev/null 2>&1 && continue
-          # /run/systemd/nspawn/<machine>/unix-export, which is where nspawn
-          # puts it: runtime_directory_make(scope, "systemd/nspawn", machine)
-          # and then "unix-export" joined inside. Looking for the pre-257
-          # spelling, /run/systemd/nspawn/unix-export/<machine>, matched
-          # nothing, so every killed session leaked its tmpfs. The mount tunnel
-          # next to it leaks the same way, and nspawn removes both on the exit
-          # this session never had.
-          umount "/run/systemd/nspawn/$stale/unix-export" 2>/dev/null || true
-          rm -rf "$d" "/run/systemd/nspawn/$stale" \
-            "/run/systemd/nspawn/propagate/$stale"
+        # LIVE SESSIONS ARE LEFT ALONE, NOT STOPPED. This runs inside somebody
+        # else's launch, and a launcher that terminates its neighbours is worse
+        # than a leftover: the session it would kill is doing the work it was
+        # started for, and its own trap will clear up after it. So the sweep
+        # only ever touches what nothing owns any more.
+        #
+        # Which makes the liveness test the whole of it. `systemd-run --scope`
+        # makes the workload a child of the SCOPE, not of the launcher, so
+        # SIGKILLing a launcher leaves the scope active, nspawn alive and the
+        # payload running -- and reading /proc for the launcher pid in the name
+        # called exactly that dead, and deleted a running session's root out
+        # from under it. Measured, in flong's own invocation shape.
+        #
+        # The launcher pid is still asked, and first, for a window nothing else
+        # covers: between `cp -a` and `systemd-run` there is a root on disk with
+        # no scope and no registration behind it, and a concurrent sweep would
+        # otherwise take a session that is starting.
+        session_live() {
+          local m=$1 owner
+          # Starting, or running with its launcher still waiting on it.
+          owner=''${m#${c.container}-}; owner=''${owner%%-*}
+          [ -d "/proc/$owner" ] && return 0
+          # Running, launcher or no launcher. The scope is named for the
+          # machine, because --unit="$machine" is what created it.
+          ${systemctl} is-active --quiet "$m.scope" && return 0
+          # Belt and braces, and the one that answers for an nspawn that
+          # outlived its scope: machined still knows the machine.
+          ${machinectl} show "$m" >/dev/null 2>&1 && return 0
+          return 1
+        }
+
+        # EVERY CACHE THIS CONTAINER HAS HAD, not just the one this launch
+        # uses. The cache is keyed on the closure hash, so a nixos-rebuild
+        # strands the previous generation's sessions in a directory that a sweep
+        # of this launch's own cache never looks at again -- and once a leftover
+        # is a namespace pin or a pasta process rather than 48K of tmpfs,
+        # nothing else is going to notice it either.
+        #
+        # Both hashes are spelt out as ????????-????????, and not as a bare *,
+        # so a container whose name is a prefix of another's -- `demo` and
+        # `demo-two` -- cannot sweep its neighbour's caches.
+        #
+        # DELIBERATELY NOT LOCKED. A launcher from a superseded generation has
+        # no s-* directory of its own between its check for `prepared` and its
+        # `cp -a`, so a sweep landing in that window takes the root it was
+        # about to copy. The copy then fails and `set -e` ends that one launch,
+        # which is loud and costs the caller a retry. The fix would be a flock
+        # held across prepare-and-copy in every launcher, and a lock in the
+        # launch path is the worse trade for a tool that advertises 117 ms.
+        for dir in /run/flong/${c.container}-????????-????????; do
+          [ -d "$dir" ] || continue
+          live=0
+          for d in "$dir"/s-*; do
+            [ -e "$d" ] || continue
+            m=''${d##*/}; m=''${m#s-}
+            if session_live "$m"; then live=1; continue; fi
+            # /run/systemd/nspawn/<machine>/unix-export, which is where nspawn
+            # puts it: runtime_directory_make(scope, "systemd/nspawn", machine)
+            # and then "unix-export" joined inside. Looking for the pre-257
+            # spelling, /run/systemd/nspawn/unix-export/<machine>, matched
+            # nothing, so every killed session leaked its tmpfs. The mount
+            # tunnel next to it leaks the same way, and nspawn removes both on
+            # the exit this session never had.
+            umount "/run/systemd/nspawn/$m/unix-export" 2>/dev/null || true
+            # Tolerated, because a leftover that will not go must not stop this
+            # launch: it costs the host a directory, where an abort costs the
+            # caller their session.
+            rm -rf "$d" "/run/systemd/nspawn/$m" \
+              "/run/systemd/nspawn/propagate/$m" || true
+          done
+          # A superseded closure's cache with nothing of it still running: the
+          # prepared root it was keyed on goes too, since no launcher will ever
+          # ask for that root again.
+          [ "$dir" = "${cache}" ] && continue
+          [ "$live" = 0 ] || continue
+          # chattr first, because prepare ran tmpfiles in there and NixOS
+          # declares `h /var/empty - - - - +i`: an immutable directory refuses
+          # rm even as root. Only the prepared root needs it -- a session root
+          # is `cp -a`'d from one, and cp does not carry inode flags.
+          chattr -R -i "$dir" 2>/dev/null || true
+          rm -rf "$dir" || true
         done
 
         # Tell the terminal what it is looking at, the way toolbox and distrobox
