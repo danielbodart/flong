@@ -149,24 +149,16 @@ namespace exists the mount table is made — but after the trap is armed, so a
 per-session source is released on every path. Refuses `:` and newlines on
 either side, after resolving the source as well as before.
 
-## 9. Capabilities
+## ~~9. Capabilities~~
 
-Pass `--drop-capability=CAP_NET_ADMIN` and `--no-new-privileges=yes` for a
-session with a root hook. Measured to remove exactly `CAP_NET_ADMIN` from the
-bounding set and set `NoNewPrivs=1`, with host-side setup unaffected.
-
-Document it as defence in depth and nothing more: `unshare -U` inside the
-sandbox restores the full bounding set. What actually holds is namespace
-ownership — the namespace is owned by the initial user namespace, so a workload
-that is not its owner gets `EPERM` on every write, whatever capabilities it
-appears to hold. Measured: it cannot list the ruleset, flush it, change a route,
-an address or a link, write `/proc/sys/net/*`, or move an interface into a
-namespace it just created.
-
-Refuse `--capability`, `--ambient-capability` and `--private-users` arriving
-through `extraFlags`. That contradicts the advice in flong's own assertion
-message today, which should be rewritten: `extraFlags` is not a hole for
-capabilities.
+Done. A session with a root hook runs with `--drop-capability=CAP_NET_ADMIN
+--no-new-privileges=yes`, documented as defence in depth only: the test shows
+the workload holding `CAP_NET_ADMIN` again inside `unshare -Ur` and *still*
+failing to flush the ruleset, add a link or add a route, with the hook's rule
+intact from outside afterwards. `--capability`, `--ambient-capability`,
+`--private-users` and `-U` are refused in `extraFlags`, and the old assertion
+message that recommended the first of them is rewritten. A new `assertions`
+check evaluates each refusal, since nothing tested flong's assertions before.
 
 ## ~~10. `--uid`, and `getent`~~
 

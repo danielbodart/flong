@@ -14,6 +14,27 @@
     virtualisation.diskSize = 8192;
     virtualisation.additionalPaths = [ ];
 
+    # To read a session's ruleset from outside, where the workload cannot.
+    environment.systemPackages = [ pkgs.nftables ];
+
+    # What a workload tries against what the hook installed. A file in the
+    # store, which every session can read, rather than a script quoted through
+    # the test's shell, the launcher's and the session's.
+    environment.etc."flong-tamper".source = pkgs.writeText "tamper.sh" ''
+      nft list ruleset >/dev/null 2>&1 && echo listed
+      nft flush ruleset >/dev/null 2>&1 && echo flushed
+      grep -E '^(CapBnd|NoNewPrivs)' /proc/self/status
+      # -r, so that it holds every capability the new namespace can give.
+      unshare -Ur bash -c '
+        grep ^CapEff /proc/self/status | sed s/CapEff/UserNsCapEff/
+        nft flush ruleset >/dev/null 2>&1 && echo flushed-from-userns
+        ip link add dummy0 type dummy >/dev/null 2>&1 && echo linked-from-userns
+        ip route add default dev lo >/dev/null 2>&1 && echo routed-from-userns
+      '
+      echo attempted
+      sleep 5
+    '';
+
     users.users.alice = {
       isNormalUser = true;
       uid = 1000;
@@ -135,9 +156,10 @@
           home = "/home/alice";
         };
         users.groups.users.gid = 100;
-        # So that a session can TRY to read and flush what the hook installed.
-        # nc, curl, unshare and nsenter are in every NixOS closure already.
-        environment.systemPackages = [ pkgs.nftables ];
+        # So that a session can TRY to read and flush what the hook installed,
+        # and to add a link and a route of its own. nc, curl, unshare and
+        # nsenter are in every NixOS closure already.
+        environment.systemPackages = [ pkgs.nftables pkgs.iproute2 ];
       };
     };
 
@@ -491,6 +513,33 @@
       with subtest("an attach bind naming ':' is refused, like an extra bind"):
           err = machine.fail("${badAttachBind} 2>&1")
           assert "attach bind names" in err, err
+
+      with subtest("the workload cannot change what the hook installed, even after unshare -U"):
+          machine.succeed("${hooked} \"bash $(readlink -f /etc/flong-tamper)\" >/tmp/tamper.out 2>&1 &")
+          machine.wait_until_succeeds("grep -q attempted /tmp/tamper.out")
+          out = machine.succeed("cat /tmp/tamper.out")
+          lines = out.split()
+          assert "listed" not in lines, out
+          assert "flushed" not in lines, out
+          assert "flushed-from-userns" not in lines, out
+          assert "linked-from-userns" not in lines, out
+          assert "routed-from-userns" not in lines, out
+          caps = dict(l.split(":\t") for l in out.splitlines() if ":\t" in l)
+          # Defence in depth: gone from the bounding set, and nothing new to be
+          # had through exec ...
+          assert not int(caps["CapBnd"], 16) & (1 << 12), caps
+          assert caps["NoNewPrivs"] == "1", caps
+          # ... and ONLY defence in depth: inside a user namespace of its own the
+          # workload holds CAP_NET_ADMIN again, which is what makes the failed
+          # flush above a statement about who owns the namespace rather than
+          # about which capabilities were dropped.
+          assert int(caps["UserNsCapEff"], 16) & (1 << 12), caps
+          # And from outside, the rule the hook installed is still there.
+          name = machine.succeed("ls -d /run/flong/netless-*/s-netless-*").strip().split("/s-")[-1]
+          leader = machine.succeed(f"machinectl show {name} --property=Leader --value").strip()
+          rules = machine.succeed(f"nsenter --net=/proc/{leader}/ns/net nft list table inet flong")
+          assert "dport 19999 drop" in rules, rules
+          machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
 
       with subtest("a session's teardown runs when it ends"):
           machine.succeed("rm -f /tmp/detached")

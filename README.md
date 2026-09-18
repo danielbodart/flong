@@ -154,7 +154,8 @@ built inside.
 | declared | under flong |
 |---|---|
 | `config` `path` `nixpkgs` `specialArgs` | the closure, which is the only thing flong wants from it |
-| `bindMounts` `extraFlags` | passed to nspawn, read back out of the generated `.conf` |
+| `bindMounts` | passed to nspawn, read back out of the generated `.conf` |
+| `extraFlags` | passed to nspawn the same way, except `--capability`, `--ambient-capability`, `--private-users` and `-U`, which are **refused at evaluation** |
 | `allowedDevices` | `DeviceAllow=` on the session's scope, behind the same `DevicePolicy=closed` the unit uses |
 | `tmpfs` | merged with `flong.<name>.tmpfs`, and given the payload's ownership |
 | `privateNetwork` | a network namespace holding loopback and nothing else |
@@ -168,9 +169,9 @@ than the default — a uid namespace, a smaller capability set, a network of its
 own — so a container that silently is not the one you declared is worse than one
 that will not build. The two groups differ in why: the first cannot work here at
 all, while the second is simply not written, and the assertion says which.
-Where a capability really is wanted for a file-capability binary in the closure,
-ask for it deliberately with `extraFlags = [ "--capability=CAP_NET_ADMIN" ]`,
-which flong passes through untouched.
+`extraFlags` is not a way round the first group: a capability, an ambient one
+or a user namespace of the container's own each gives a session back something
+flong keeps from it on purpose, so those flags are refused there too.
 
 Network isolation is the one worth knowing about, because the default is none:
 a session shares the host's network namespace, so it can reach anything on
@@ -361,6 +362,15 @@ race: no handshake, no readiness protocol, no window. flong attaches its own
 network only after `attach` returns. Provision egress of your own *first* — from
 `guard`, or at the top of the hook — and the property is gone without anything
 failing: measured, 12 connections out of 12 went round the rules.
+
+What stops the workload undoing what the hook installed is that the namespace
+is owned by the *initial* user namespace, which the workload is not in: it gets
+`EPERM` on every write — listing or flushing the ruleset, changing a route, an
+address or a link — whatever capabilities it appears to hold. A session with a
+hook also runs with `CAP_NET_ADMIN` dropped from its bounding set and
+`NoNewPrivs` set, but that is defence in depth and nothing more: `unshare -U`
+inside the sandbox gives the workload a full set again, in a namespace that
+owns nothing of the session's.
 
 A hook that exits non-zero ends the session rather than leaving it running
 unsteered; so does a leader that never appears. Without `privateNetwork` the

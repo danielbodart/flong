@@ -54,6 +54,23 @@ let
         + lib.optionalString (declared.networkNamespace != null)
           "--network-namespace-path=${lib.escapeShellArg declared.networkNamespace}";
 
+      # DEFENCE IN DEPTH, AND NOTHING MORE. A session whose namespace flong or
+      # a hook has put something into loses CAP_NET_ADMIN from its bounding set
+      # and gains NoNewPrivs, so no file-capability or setuid binary in the
+      # closure can pick up the one capability that would reach for it.
+      #
+      # It is not what holds. `unshare -U` inside the sandbox makes a user
+      # namespace with the full bounding set back again -- measured. What holds
+      # is that the network namespace is owned by the INITIAL user namespace,
+      # so a workload that is not its owner gets EPERM on every write, whatever
+      # capabilities it appears to hold: it cannot list the ruleset, flush it,
+      # change a route, an address or a link, write /proc/sys/net/*, or move an
+      # interface into a namespace it has just created. Measured, all of it.
+      # The flags are here so that a second failure is needed, not a first.
+      steered = c.attach != "";
+      capabilityFlags = lib.optionalString steered
+        "--drop-capability=CAP_NET_ADMIN --no-new-privileges=yes";
+
       overlayDir = p: ".overlay/" + lib.replaceStrings [ "/" ] [ "_" ] (lib.removePrefix "/" p);
 
       # An entry may name its own options as PATH:opts, so the path is the head.
@@ -828,7 +845,7 @@ let
           ${nspawn} -q --keep-unit --directory="$root" --machine="$machine" \
             --hostname=${lib.escapeShellArg c.container} \
             --console=autopipe \
-            ${networkFlags} \
+            ${networkFlags} ${capabilityFlags} \
             --kill-signal=SIGTERM \
             --bind-ro=/nix/store --bind-ro=/nix/var/nix/db \
             --bind-ro=${closure}:/run/current-system \
@@ -1312,6 +1329,17 @@ in
           # Only meaningful with a network namespace to configure, and each one
           # needs an interface brought up and addressed from inside the
           # container -- which a session has no privileged moment to do.
+          # Each extraFlags entry is spliced into EXTRA_NSPAWN_FLAGS and
+          # word-split, so one entry can carry several flags, and a flag and its
+          # value can be two words.
+          extraWords = lib.concatMap
+            (f: lib.filter (w: lib.isString w && w != "")
+              (builtins.split "[[:space:]]+" f))
+            declared.extraFlags;
+          privilegedFlags = lib.filter
+            (w: w == "-U" || lib.any (flag: w == flag || lib.hasPrefix "${flag}=" w)
+              [ "--capability" "--ambient-capability" "--private-users" ])
+            extraWords;
           needsInside = [
             (declared.hostBridge != null)
             (declared.forwardPorts != [ ])
@@ -1366,10 +1394,24 @@ in
               a session should have is one the launcher makes on the host and
               moves in.
 
-              If a file-capability binary in the closure genuinely needs one in
-              the bounding set, ask for it deliberately with
-              containers.${c.container}.extraFlags = [ "--capability=..." ],
-              which flong passes through.
+              extraFlags is not a way round this: --capability,
+              --ambient-capability and --private-users are refused there as
+              well.
+            '';
+          }
+          {
+            assertion = privilegedFlags == [ ];
+            message = ''
+              flong.${n} drives containers.${c.container}, whose extraFlags ask
+              for ${lib.concatStringsSep " " privilegedFlags}. flong passes
+              extraFlags through, and refuses these rather than pass them: each
+              gives a session back something flong keeps from it on purpose --
+              a capability in the bounding set, an ambient one, or a user
+              namespace of the container's own, which would make IT the owner
+              of the session's network namespace instead of the initial user
+              namespace. That ownership is what actually stops a workload
+              undoing what a hook installed, and none of this belongs in a
+              flag string where nobody reviewing the hook would look for it.
             '';
           }
           {
