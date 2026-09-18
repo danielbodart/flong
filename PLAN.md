@@ -190,26 +190,7 @@ source filesystem, and the prepared root, the tmpfs mounts and the overlays each
 need their own answer. A wrong mapping shows up as `nobody` and a read failure,
 which is the right direction to fail in.
 
-## 12. `nix` inside a session
-
-A declared container binds `/nix/var/nix/daemon-socket` plus per-container
-`profiles` and `gcroots`. flong binds `store` and `db` only, so `nix build`,
-`nix develop`, `nix-shell` and `nix profile` all fail inside a session.
-
-The daemon socket is a privilege: through it a session can build arbitrary
-derivations, reach the network from a fixed-output derivation, spend unbounded
-CPU and disk, and — if the invoking user is a `trusted-user` — set sandbox
-options, which is host-equivalent. It is also a way out of the network namespace
-that no in-namespace rule can see, which matters to anything steering a
-session's traffic. So: off by default, opt-in per launcher, with the caveat in
-the option description and not only here.
-
-When on: `--bind-ro=/nix/var/nix/daemon-socket`, and
-`--bind=/nix/var/nix/profiles/per-container/<container>:/nix/var/nix/profiles`
-plus the matching `gcroots`, created by the launcher. Per container rather than
-per session, so a warm toolchain survives.
-
-## 13. Persistence, and a read-only workspace
+## 12. Persistence, and a read-only workspace
 
 Two options that are the same question answered in opposite directions, and both
 want a sentence each in the README or nobody will pick correctly.
@@ -222,6 +203,38 @@ want a sentence each in the README or nobody will pick correctly.
   whose upper layer is discarded at the end. Today `workspace` is always bound
   read-write and `overlays` takes static paths fixed at evaluation, so a
   per-session workspace overlay cannot be expressed at all.
+
+## 13. `nix` inside a session — last, and only if asked for
+
+Nothing flong is being built for needs this. A session's tools belong in its
+container's declaration, which is already a Nix closure; if a session needs a
+tool, it goes there. And the one repository that does want `nix` against the
+host — a machine's own configuration — cannot run in a sandbox at all, because
+`nixos-rebuild switch` needs a real `sudo` and `no_new_privs` refuses it.
+
+The case it would serve is narrower: a session used as a development
+environment for a checkout whose *own* flake defines the toolchain, where
+`nix develop`, `nix build` and `nix-shell` are how the project is worked on and
+the container declaration cannot know about it. That is a fair thing for
+someone to want from flong. It is not something to build ahead of them asking.
+
+What it costs is why it stays off. A declared container binds
+`/nix/var/nix/daemon-socket` plus per-container `profiles` and `gcroots`, and
+through that socket a session can build arbitrary derivations, spend unbounded
+CPU and disk, and reach the network from a fixed-output derivation — which is
+fetched by the host's daemon, outside the session's namespace, where no rule in
+that namespace can see it or log it. So a session whose egress is being steered
+must refuse it, or steering stops being the whole story. A user in
+`trusted-users` could also set sandbox options through it, which is
+host-equivalent; on a default NixOS that list is `root` alone, so it is the
+weaker of the two reasons, but it is the reason the option description has to
+state.
+
+If it is ever built: off by default, opt-in per launcher, refused in a session
+with an `attach` hook, `--bind-ro=/nix/var/nix/daemon-socket`, and
+`--bind=/nix/var/nix/profiles/per-container/<container>:/nix/var/nix/profiles`
+plus the matching `gcroots`, created by the launcher and kept per container so
+a warm toolchain survives.
 
 ## Tests
 
