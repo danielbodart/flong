@@ -3,6 +3,12 @@
 let
   cfg = config.flong;
 
+  # nspawn 261 renamed --user to --uid; the launcher runs the host's nspawn, so
+  # it speaks the host's systemd. See the comment at the nspawn invocation.
+  uidFlag =
+    if lib.versionAtLeast config.systemd.package.version "261"
+    then "--uid" else "--user";
+
   # WHERE A NETWORKED SESSION SENDS ITS DNS, for pasta to take from there.
   # --dns-forward catches UDP and TCP to ports 53 and 853 at this address
   # and re-sends each query FROM THE HOST to the host's own first
@@ -1011,9 +1017,14 @@ let
         # -- and initialises the supplementary groups from its group file, so
         # a user declared into `audio` arrives in it.
         #
-        # --uid rather than --user, which systemd 261 deprecates and warns
-        # about on every single launch. Both spellings resolve a name the same
-        # way: nspawn execs `getent passwd` INSIDE the container root, so a
+        # --uid where the host's systemd has it (261 and later, which
+        # deprecates --user and warns about it on every launch), --user where
+        # it does not: the launcher runs the HOST'S nspawn, so the flag has to
+        # be the host's. Chosen at evaluation from config.systemd.package, the
+        # package that nspawn comes from -- no probe at launch. A 260 host
+        # given --uid refuses to start a session at all ("unrecognized option
+        # '--uid=…'"), which is how this was found, on nixos-26.05. Both
+        # spellings resolve a name the same way: nspawn execs `getent passwd` INSIDE the container root, so a
         # prepared root that cannot run getent cannot name its user. flong
         # satisfies that today only through --bind-ro=$closure:/run/current-system
         # and a PATH naming /run/current-system/sw/bin -- accidental, and a hard
@@ -1087,7 +1098,7 @@ let
             ''${bind_flags[@]+"''${bind_flags[@]}"} \
             ''${tmpfs_flags[@]+"''${tmpfs_flags[@]}"} \
             ''${overlay_flags[@]+"''${overlay_flags[@]}"} \
-            --uid=${c.user} \
+            ${uidFlag}=${c.user} \
             --setenv=PATH=${closure}/sw/bin \
             --setenv=TMPDIR="$home/tmp" \
             --setenv=XDG_RUNTIME_DIR="$runtime_dir" \
