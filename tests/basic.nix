@@ -1,9 +1,9 @@
 # Exercises every option that changes what the container sees: the workspace
 # override, a read-write bind, a tmpfs mask over part of that bind, an overlay,
 # the extra binds in both modes, the privilege drop, the NOPASSWD grant, the
-# root hook and its binds, wrapper and teardown, the network and the ports it
-# does and does not reach, the session cleanup and the sweep that reclaims what
-# a killed session left.
+# root hook and its binds, wrapper and teardown, the network, its DNS and the
+# ports it does and does not reach, the session cleanup and the sweep that
+# reclaims what a killed session left.
 { lib, ... }:
 
 {
@@ -18,6 +18,27 @@
 
     # To read a session's ruleset from outside, where the workload cannot.
     environment.systemPackages = [ pkgs.nftables ];
+
+    # The host's resolver, on the host's loopback and nowhere else: the stub
+    # case -- resolved's 127.0.0.53, a dnsmasq on 127.0.0.1 -- which is the
+    # whole reason a session's DNS is re-sent from the host by pasta rather
+    # than the host's resolv.conf copied in, where 127.0.0.1 would name the
+    # session's own loopback. resolveLocalQueries writes both families into
+    # the host's resolv.conf, so both of a session's forwards are exercised.
+    services.dnsmasq = {
+      enable = true;
+      resolveLocalQueries = true;
+      settings = {
+        listen-address = [ "127.0.0.1" "::1" ];
+        bind-interfaces = true;
+        no-resolv = true;
+        address = [ "/dns.flong.test/192.0.2.53" ];
+      };
+    };
+    # Carried into a networked session's resolv.conf, and proved to be by a
+    # short name that resolves only through the search domain.
+    networking.search = [ "flong.test" ];
+    networking.resolvconf.extraOptions = [ "ndots:2" ];
 
     # What a workload tries against what the hook installed. A file in the
     # store, which every session can read, rather than a script quoted through
@@ -161,7 +182,9 @@
         # So that a session can TRY to read and flush what the hook installed,
         # and to add a link and a route of its own. nc, curl, unshare and
         # nsenter are in every NixOS closure already.
-        environment.systemPackages = [ pkgs.nftables pkgs.iproute2 ];
+        #
+        # dig, to query each of pasta's DNS addresses directly.
+        environment.systemPackages = [ pkgs.nftables pkgs.iproute2 pkgs.dig ];
       };
     };
 
@@ -541,6 +564,11 @@
           out = machine.succeed("${netless} 'tail -n +2 /proc/net/route | wc -l; cat /proc/net/ipv6_route | grep -vc \" lo$\" || true'")
           assert out.split() == ["0", "0"], out
 
+      with subtest("a private session without a network has no resolv.conf"):
+          # It has nowhere to send a query, so it is not told of anywhere.
+          out = machine.succeed("${netless} 'test -e /etc/resolv.conf && echo present || echo absent'")
+          assert out.strip() == "absent", out
+
       with subtest("the root hook runs as root, in the session's namespace, before any egress"):
           # The hook is the only moment a session's namespace can be steered
           # from outside, and what makes it safe is that it happens before the
@@ -691,6 +719,36 @@
           assert "host-18124" not in unnamed, out
           assert "host-18123" not in gw_named, out
           assert "host-18124" not in gw_unnamed, out
+
+      with subtest("a networked session resolves through the host's loopback resolver"):
+          # The premise: the host's resolver is a stub on its loopback, in
+          # both families, and on nothing else.
+          machine.succeed("grep -qx 'nameserver 127.0.0.1' /etc/resolv.conf")
+          machine.succeed("grep -qx 'nameserver ::1' /etc/resolv.conf")
+          listening = machine.succeed("ss -Hlun 'sport = :53' | awk '{ print $4 }'").split()
+          assert sorted(listening) == ["127.0.0.1:53", "[::1]:53"], listening
+
+          out = machine.succeed("${networked} '"
+              "cat /etc/resolv.conf; echo ---; "
+              "getent ahostsv4 dns.flong.test; echo ---; "
+              "getent ahostsv4 dns; echo ---; "
+              "ip -6 route show default; echo ---; "
+              "dig -4 +short +time=2 +tries=1 @169.254.1.1 dns.flong.test; echo ---; "
+              "dig -6 +short +time=2 +tries=1 @100::1 dns.flong.test'")
+          resolv, full, short, route6, via4, via6 = out.split("---")
+          lines = resolv.strip().splitlines()
+          assert [l for l in lines if l.startswith("nameserver")] == \
+              ["nameserver 169.254.1.1", "nameserver 100::1"], resolv
+          assert "search flong.test" in lines, resolv
+          assert any(l.startswith("options") and "ndots:2" in l.split() for l in lines), resolv
+          assert "192.0.2.53" in full, out
+          # Found only through the search domain carried over from the host.
+          assert "192.0.2.53" in short, out
+          # Each family's address, asked directly: pasta configured IPv6 in
+          # the namespace, so the second is a real path and not a skipped one.
+          assert "default" in route6, out
+          assert via4.strip() == "192.0.2.53", out
+          assert via6.strip() == "192.0.2.53", out
 
       with subtest("a forwarded port reaches the session from the host"):
           # And a second listener on a port that is not forwarded, left up past

@@ -441,6 +441,17 @@ default: every port class is `none` unless listed — pasta's own default forwar
 every bound port on the other side — and `--no-map-gw` stops the gateway
 address leading to the host's loopback.
 
+DNS comes with it, and is not an option either. A networked session's
+`/etc/resolv.conf` is written into its own copy of the root at launch, naming
+`169.254.1.1` — Podman's address for the same job — and `100::1` as well when
+the host names an IPv6 nameserver, with the host's `search`, `domain` and
+`options` lines carried over. pasta catches a query sent there and re-sends it
+*from the host* to the host's own first nameserver, so a stub resolver on the
+host's loopback — resolved's `127.0.0.53`, a dnsmasq on `127.0.0.1` — answers a
+session that can reach nothing else on that loopback. The host's file is read,
+never written. A private session without `network` has no `resolv.conf` at all,
+since it has nowhere to send a query.
+
 What it costs is a pin and a process. pasta cannot attach to a namespace by pid
 as root, so the launcher bind-mounts the session's namespace under
 `/run/flong/netns` and points pasta at that; pasta runs outside the session's
@@ -491,11 +502,17 @@ that socket builds arbitrary derivations, reaches the network through a
 fixed-output one, and — for a `trusted-user` — sets sandbox options, which is
 host-equivalent. See `PLAN.md`.
 
-**A networked session has no DNS.** With a private network nspawn leaves the
-root's `/etc/resolv.conf` alone, and preparing the root removes it, so names do
-not resolve until you arrange it. How is a decision, not a default: the host's
-resolver is a service on its loopback, and a way to it is a way out that a hook
-steering the session would want a say in.
+**A session's resolver is the one the host had when it started.** pasta reads
+the host's first nameserver once, at launch, and flong writes the session's
+`resolv.conf` from the host's at the same moment. A laptop that moves networks
+mid-session leaves the session asking the old resolver — failing, or answering
+for the network it has left — until it is relaunched. A host whose
+`resolv.conf` names a stub on its own loopback is spared the worst of it: the
+stub's address does not move, and the stub follows the network itself; only
+the `search` domains the session was given go stale. A hook that redirects
+port 53 in the session's namespace, as frisket does, answers every query itself
+whatever `resolv.conf` names — so for such a session, which resolver answers is
+the hook's business and not pasta's.
 
 **A forwarded port is one session's at a time.** A host port can be bound once,
 so a second concurrent session with the same `forwardPorts` cannot attach its
@@ -548,8 +565,9 @@ $ nix flake check
 
 Boots a VM and exercises every option that changes what the container sees,
 plus the hook ordering, the identity every session process runs as, the root
-hook and what a workload cannot undo of it, the network and what it does not
-reach, session cleanup and the sweep that reclaims what a killed session left.
+hook and what a workload cannot undo of it, the network, its DNS and what it
+does not reach, session cleanup and the sweep that reclaims what a killed
+session left.
 The refusals are checked by evaluation alone, in seconds.
 
 ## Licence

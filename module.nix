@@ -3,6 +3,38 @@
 let
   cfg = config.flong;
 
+  # WHERE A NETWORKED SESSION SENDS ITS DNS, for pasta to take from there.
+  # --dns-forward catches UDP and TCP to ports 53 and 853 at this address
+  # and re-sends each query FROM THE HOST to the host's own first
+  # nameserver. Re-originated there, so a stub resolver on the host's
+  # loopback -- resolved's 127.0.0.53, a dnsmasq on 127.0.0.1 -- answers a
+  # session that has no way to the host's loopback otherwise. That is why
+  # this and not a copy of the host's resolv.conf: copied in, 127.0.0.53
+  # names the SESSION's loopback, where nothing is listening.
+  #
+  # 169.254.1.1 is Podman's address for the same job -- `dnsForwardIpv4`
+  # in go.podman.io/common's libnetwork/pasta -- followed deliberately.
+  # It is IPv4 link-local, which no router forwards, so nothing beyond
+  # the host's own link could answer it even without pasta in the way. A
+  # LAN has it only through link-local autoconfiguration, and then all
+  # the session loses is that one address's DNS ports. And it is well
+  # clear of the addresses a cloud answers on -- metadata at
+  # 169.254.169.254, AWS's resolver at 169.254.169.253, ECS at
+  # 169.254.170.2 -- so no rule about those catches it, and nobody reading
+  # a resolv.conf takes it for one of them. A steering hook's own service
+  # address in the same namespace (frisket's, on `lo`) must be another
+  # address again: on `lo`, it would take these queries before pasta ever
+  # saw them.
+  #
+  # 100::1 for IPv6, which Podman does not forward at all. It is in
+  # RFC 6666's discard-only block, which exists to be dropped: globally
+  # unreachable, used by no LAN, and blackholed by the first router that
+  # sees it. Link-local, the IPv4 answer, is no use in IPv6: an fe80::
+  # nameserver needs a zone, and the interface inside is named after
+  # whichever host interface pasta copied.
+  dnsForward4 = "169.254.1.1";
+  dnsForward6 = "100::1";
+
   mkPayload = name: c: pkgs.writeShellApplication {
     name = "flong-payload-${name}";
     runtimeInputs = [ pkgs.coreutils ] ++ c.payloadInputs;
@@ -53,6 +85,14 @@ let
         lib.optionalString declared.privateNetwork "--private-network "
         + lib.optionalString (declared.networkNamespace != null)
           "--network-namespace-path=${lib.escapeShellArg declared.networkNamespace}";
+
+      # OFF, SAID OUT LOUD, for a session whose resolv.conf flong writes. Under
+      # --private-network `auto` already leaves the root's file alone, but
+      # only by way of a rule about something else: were it ever to copy
+      # instead, it would do so after the custom binds are mounted, opening
+      # with O_TRUNC -- through whatever a bind, an `attachBinds` line say,
+      # had put at that path.
+      resolvConfFlag = lib.optionalString (c.network != null) "--resolv-conf=off";
 
       # DEFENCE IN DEPTH, AND NOTHING MORE. A session whose namespace flong or
       # a hook has put something into loses CAP_NET_ADMIN from its bounding set
@@ -226,9 +266,11 @@ let
           '${closure}/activate && systemd-tmpfiles --create --exclude-prefix=/dev' \
           >/dev/null 2>&1
 
-        # Would otherwise pin this moment's DNS for the life of the boot.
-        # nspawn binds a fresh one in per session instead, since --resolv-conf
-        # defaults to auto and a session shares the host's network.
+        # Would otherwise pin this moment's DNS for the life of the boot. A
+        # session on the host's network has nspawn bind a fresh one in, since
+        # --resolv-conf defaults to auto; a session with `network` has one
+        # written into its copy of the root at launch; and a private session
+        # without one keeps none, having nowhere to send a query.
         rm -f "$staging/etc/resolv.conf"
 
         # A container's machine id is written by its init from the uuid nspawn
@@ -681,6 +723,48 @@ let
         chown "$uid:$gid" "$root$home/tmp"
         chmod 0700 "$root$home/tmp"
         ${mountpointMkdirs}
+        ${lib.optionalString (c.network != null) ''
+        # A NETWORKED SESSION'S RESOLVER IS PASTA, and this is the file that
+        # says so. Written into the session's copy of the root, so nothing of
+        # the host's is touched, and before nspawn, which is told
+        # --resolv-conf=off rather than left to arrive there from `auto`.
+        #
+        # One synthetic nameserver per family the host's resolv.conf names a
+        # nameserver in, in the host's order, each with its --dns-forward.
+        # pasta sends a family's queries to the host's first nameserver of
+        # that family, and for a family with none it has only the unspecified
+        # address to send them to -- which Linux, asked to connect there,
+        # takes as its own loopback: port 53 on the host's, named in
+        # `hostPorts` or not. So a family pasta has nowhere to send is not
+        # one the session is given. `search`, `domain` and `options` come
+        # across as they are, so a short name means in here what it means
+        # out there.
+        #
+        # Read once, here, as pasta reads it once a moment later: a host that
+        # moves networks keeps a live session on the old resolver.
+        dns_forward=()
+        forward4="" forward6=""
+        resolv_conf="# flong: pasta forwards queries sent here to the host's resolver.$nl"
+        while read -r key value rest || [ -n "$key" ]; do
+          case $key in
+            nameserver)
+              case $value in
+                *:*) [ -z "$forward6" ] || continue; forward6=${dnsForward6}; ns=$forward6 ;;
+                *.*) [ -z "$forward4" ] || continue; forward4=${dnsForward4}; ns=$forward4 ;;
+                *) continue ;;
+              esac
+              dns_forward+=(--dns-forward "$ns")
+              resolv_conf+="nameserver $ns$nl"
+              ;;
+            search | domain | options)
+              resolv_conf+="$key $value''${rest:+ $rest}$nl"
+              ;;
+          esac
+        done < <(cat /etc/resolv.conf 2>/dev/null || true)
+        rm -f "$root/etc/resolv.conf"
+        printf '%s' "$resolv_conf" > "$root/etc/resolv.conf"
+        chmod 0644 "$root/etc/resolv.conf"
+        ''}
 
         # A bare --tmpfs mounts root-owned 0755, which the unprivileged payload
         # cannot write to -- and fails quietly on, most programs treating an
@@ -958,7 +1042,7 @@ let
           ${nspawn} -q --keep-unit --directory="$root" --machine="$machine" \
             --hostname=${lib.escapeShellArg c.container} \
             --console=autopipe \
-            ${networkFlags} ${capabilityFlags} \
+            ${networkFlags} ${resolvConfFlag} ${capabilityFlags} \
             --kill-signal=SIGTERM \
             --bind-ro=/nix/store --bind-ro=/nix/var/nix/db \
             --bind-ro=${closure}:/run/current-system \
@@ -1091,6 +1175,9 @@ let
         # inside with every port list set to none. --config-net, so pasta
         # addresses and routes the namespace itself; nothing inside could.
         #
+        # --dns-forward, for each family the session's resolv.conf names --
+        # see where that was written.
+        #
         # pasta forks once it is ready and its parent exits 0, having written
         # the daemon's pid -- so this returns when there is a network, and
         # leaves a pid the release can check before it signals.
@@ -1099,7 +1186,8 @@ let
         touch "$pin"
         mount --bind "$netns" "$pin"
         pasta --quiet --config-net --netns "$pin" --runas 0 --pid "$pin.pid" \
-          ${pastaPorts c.network} --no-map-gw
+          ${pastaPorts c.network} --no-map-gw \
+          ''${dns_forward[@]+"''${dns_forward[@]}"}
         ''}
 
         # The payload is waiting on this. Through the leader's own root, since
@@ -1433,6 +1521,16 @@ in
             `none` for every port class not listed here, because each defaults
             to `auto`, which forwards every bound port on the other side; and
             `--config-net`. A hooked session's capability flags apply here too.
+
+            DNS goes through pasta as well, and is not an option either. The
+            session's /etc/resolv.conf is written at launch naming
+            ${dnsForward4} -- and ${dnsForward6}, where the host names an IPv6
+            nameserver -- with the host's `search`, `domain` and `options`
+            carried over. pasta catches a query sent there and re-sends it
+            from the host to the host's own first nameserver, so a stub
+            resolver on the host's loopback answers it. Both read the host's
+            file once, at launch: a host that moves networks keeps a live
+            session on the old resolver.
           '';
           type = lib.types.nullOr (lib.types.submodule {
             options = {

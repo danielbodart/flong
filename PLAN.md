@@ -130,12 +130,24 @@ turned up that the plan did not have:
   \*/18200: Address already in use"*), so that launch fails and is ended rather
   than run without it — asserted. Loud rather than wrong, but the same
   concurrency limit the declaration's own `forwardPorts` is refused for.
-- **Nothing arranges DNS.** With `--private-network`, nspawn's
-  `--resolv-conf=auto` leaves the root's file alone, and prepare deletes it. A
-  resolver is a service on the host's loopback — reaching it is a channel out
-  that a steering hook would want a say in — so how a networked session
-  resolves names (pasta's `--dns-forward`, a `hostPorts` entry, or the hook's
-  business) is left as a decision rather than defaulted.
+- ~~**Nothing arranges DNS.**~~ Done, as pasta's `--dns-forward`, baked in and
+  not an option. A networked session's `resolv.conf` is written into its copy
+  of the root before nspawn starts, naming `169.254.1.1` — Podman's
+  `dnsForwardIpv4`, link-local and clear of every cloud metadata address — and
+  `100::1`, from RFC 6666's discard-only block, where the host names an IPv6
+  nameserver; the host's `search`, `domain` and `options` come across as they
+  are. pasta re-sends a query from the host to the host's first nameserver, so
+  a stub on the host's loopback answers — which a copy of the host's file could
+  never do, since its `127.0.0.53` would name the session's own loopback.
+  Measured, in both families, against a dnsmasq bound to `127.0.0.1` and `::1`
+  alone. A family is forwarded only if the host names a nameserver in it: for
+  one with none, pasta's only target is the unspecified address, which Linux
+  takes as the host's own loopback. nspawn is told `--resolv-conf=off` rather
+  than left to arrive there from `auto`. A private session without `network`
+  keeps no `resolv.conf`. What it does not do is follow the host: both reads
+  are once, at launch, so a host that moves networks keeps a live session on
+  the old resolver — a README limitation, spared where the host's resolver is
+  a stub.
 
 ## ~~8. Per-session binds, source ≠ destination~~
 
@@ -253,6 +265,10 @@ The network section is in, each property asserted rather than assumed:
 - A `forwardPorts` entry reaches the session from the host; a port the session
   listens on past pasta's one-second `auto` scan does not; a second concurrent
   session asking for the same host port is refused.
+- A networked session resolves a name, and a short one through the host's
+  search domain, from a resolver bound only to the host's loopback, in both
+  families; its `resolv.conf` names pasta's addresses and carries the host's
+  `search` and `options`. A private session without `network` has none.
 - A clean exit and a SIGKILLed launcher both release the pin and pasta — the
   second through a sweep by a different launcher over the same container.
 - `detach` runs on both paths, the sweep running the dead session's own.
