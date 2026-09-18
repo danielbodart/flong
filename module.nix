@@ -735,17 +735,39 @@ let
           # between -- is a session with nothing installed and nothing left to
           # install it, so it goes; and so is one whose network was asked for
           # and not attached, which is broken rather than unsafe but has no
-          # business carrying on as if it worked. Once both have run this is 1
-          # and the scope is left alone, which is what keeps SIGTERM on a
-          # launcher meaning what it has always meant here: the session
-          # survives it.
+          # business carrying on as if it worked.
           if [ "$attached" = 0 ]; then
             ${systemctl} kill -s KILL "$machine.scope" 2>/dev/null || true
           fi
           ''}
+          # THE LAUNCHER OWNS ITS SESSION, so a launcher asked to stop -- SIGTERM,
+          # SIGINT, SIGHUP, anything bash still gets to run this trap for --
+          # stops the session FIRST, and waits for it, and only then releases
+          # what the session depends on. Releasing first ran `detach`, pulled
+          # the network pin and deleted the root under a session that was still
+          # running. On the ordinary path the payload has already exited and
+          # been waited for, $session is empty, and there is nothing to stop.
+          #
+          # The scope is stopped, and nspawn is signalled as well: $session is
+          # systemd-run until it has registered the scope and exec'd nspawn, so
+          # a signal in that window finds no scope to stop. SIGKILL runs no
+          # trap at all, and a session outliving its launcher that way is left
+          # to its own devices and then to the sweep, which does not stop live
+          # sessions -- that part is unchanged.
+          if [ -n "''${session:-}" ]; then
+            ${systemctl} stop "$machine.scope" 2>/dev/null || true
+            kill -TERM "$session" 2>/dev/null || true
+            wait "$session" 2>/dev/null || true
+          fi
           release_session "$machine" "$root" ${cache}/detach-"$machine"
         }
         trap cleanup EXIT
+        # Explicitly, rather than trusting bash to run the EXIT trap from inside
+        # its fatal-signal handler: trapped, a signal interrupts `wait` and the
+        # trap above runs as ordinary code, with the usual 128+n status.
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
 
         # Deliberately word-split: it is a flag string.
         read -ra binds < <(sed -n 's/^EXTRA_NSPAWN_FLAGS="\(.*\)"$/\1/p' ${declaredConf})
@@ -1102,6 +1124,9 @@ let
 
         rc=0
         wait "$session" || rc=$?
+        # Waited for, so the trap has nothing to stop -- and a reaped pid is not
+        # one to go signalling, since its number can now belong to anyone.
+        session=""
         exit "$rc"
       '';
     };

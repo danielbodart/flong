@@ -98,6 +98,12 @@ records the store path of its own teardown beside its root, and the sweep runs
 that one, which also covers a superseded generation's. Only `$machine` is in
 scope, because on the sweep's path it is all that is left.
 
+A launcher that is signalled — `SIGTERM`, `SIGINT`, `SIGHUP` — stops its own
+session and waits for it before releasing anything. It used to release first,
+running `detach`, pulling the network pin and deleting the root under a session
+still running. `SIGKILL` runs no trap, and that path is unchanged: the sweep
+still leaves live sessions alone.
+
 ## ~~7. `network` — a real network for a private session~~
 
 Done, as planned: pasta through a bind-mounted pin with `--runas 0`,

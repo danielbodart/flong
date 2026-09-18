@@ -274,6 +274,15 @@
            add rule inet flong out tcp dport 19999 reject with tcp reset'
       '';
 
+      # Records that it ran, and whether the session was still running when
+      # it did -- which it must not be, whichever way the launcher ended.
+      detach = ''
+        if /run/current-system/sw/bin/systemctl is-active --quiet "$machine.scope"; then
+          echo "live-at-detach" >> /tmp/detached
+        fi
+        echo "$machine" >> /tmp/detached
+      '';
+
       command = ''set -- bash -c "$1"'';
     };
 
@@ -743,6 +752,27 @@
           machine.fail(f"test -e /run/flong/netns/{name}")
           machine.fail(f"test -e /run/flong/netns/{name}.pid")
           machine.wait_until_fails(pasta_for())
+
+      with subtest("SIGTERM to the launcher ends the session before releasing it"):
+          # The launcher owns its session: asked to stop, it stops the scope
+          # and waits, and only then runs detach, pulls the pin and removes the
+          # root. Releasing first did all three under a session still running.
+          machine.succeed("rm -f /tmp/detached")
+          machine.succeed("${networked} 'sleep 300' >/dev/null 2>&1 &")
+          name = machine.wait_until_succeeds(
+              "ls /run/flong/netns | grep -v pid").strip()
+          machine.wait_until_succeeds(f"test -s /run/flong/netns/{name}.pid")
+          machine.wait_until_succeeds(pasta_for(name + " "))
+          machine.succeed(f"kill -TERM {launcher_pid(name)}")
+          machine.wait_until_fails(f"test -d /proc/{launcher_pid(name)}")
+          machine.fail(f"systemctl is-active --quiet {name}.scope")
+          machine.fail(f"machinectl show {name} >/dev/null 2>&1")
+          machine.fail(f"test -e /run/flong/netns/{name}")
+          machine.fail(f"test -e /run/flong/netns/{name}.pid")
+          machine.wait_until_fails(pasta_for(name + " "))
+          machine.fail(f"ls -d /run/flong/netless-*/s-{name}")
+          assert machine.succeed("cat /tmp/detached").split() == [name], \
+              machine.succeed("cat /tmp/detached")
 
       for port in (18123, 18124, 19999):
           machine.succeed(f"systemctl stop listen-{port}")

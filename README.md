@@ -513,11 +513,14 @@ but `machinectl shell` asks the container's own systemd to start a unit, and
 there isn't one, so a shell is `nsenter --target <leader> --all` as root.
 `nixos-container login` and `journalctl -M` want the unit that never starts.
 
-**Killing the launcher does not kill the session.** `systemd-run --scope` makes
-the workload a child of the scope, so `kill -9` on a launcher leaves the session
-running — with no trap left to tidy up after it, since no trap survives SIGKILL.
-End such a session with `systemctl stop <machine>.scope` or `machinectl
-terminate <machine>`; `machinectl list` gives you the name.
+**SIGKILL on the launcher does not kill the session.** The launcher owns its
+session, so `SIGTERM`, `SIGINT` or `SIGHUP` stops the session first, waits for
+it, and only then runs `detach`, releases the network and removes the root. But
+`systemd-run --scope` makes the workload a child of the scope, not of the
+launcher, so `kill -9` on a launcher leaves the session running — with no trap
+left to tidy up after it, since no trap survives SIGKILL. End such a session
+with `systemctl stop <machine>.scope` or `machinectl terminate <machine>`;
+`machinectl list` gives you the name.
 
 What a dead session leaves behind — its root, nspawn's `unix-export` mount and
 its mount tunnel, and whatever its `detach` would have released — is swept by
