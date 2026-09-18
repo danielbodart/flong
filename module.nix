@@ -35,6 +35,20 @@ let
   dnsForward4 = "169.254.1.1";
   dnsForward6 = "100::1";
 
+  # A path as nspawn's --bind, --tmpfs and --overlay read one. They split on
+  # ':' and take a backslash as an escape for the character after it, so
+  # "\:" is a colon inside a path and "\\" a backslash; every other
+  # character, whitespace and newline included, is itself. So any path can be
+  # expressed, provided it reaches nspawn as one argument.
+  nspawnPath = lib.replaceStrings [ "\\" ":" ] [ "\\\\" "\\:" ];
+
+  # extraFlags as the container module's unit uses them: every entry expanded
+  # unquoted into the nspawn command line, so split on whitespace.
+  extraFlagWords = declared: lib.concatMap
+    (f: lib.filter (w: lib.isString w && w != "")
+      (builtins.split "[[:space:]]+" f))
+    declared.extraFlags;
+
   mkPayload = name: c: pkgs.writeShellApplication {
     name = "flong-payload-${name}";
     runtimeInputs = [ pkgs.coreutils ];
@@ -60,10 +74,52 @@ let
     let
       declared = config.containers.${c.container};
       closure = declared.path;
-      declaredConf = config.environment.etc."nixos-containers/${c.container}.conf".source;
 
-      # allowedDevices is a unit property rather than an nspawn flag, so it is
-      # not in that file and is translated here.
+      # THE DECLARATION'S MOUNTS AND FLAGS, READ AS THE OPTIONS THEY ARE. The
+      # container module renders these same values into a shell-sourced
+      # string for its own unit; reading them here, as data, means every path
+      # reaches nspawn as one argument, whatever it holds.
+      #
+      # Each bind is the declaration's own record -- hostPath null is the
+      # mount point on both sides, isReadOnly true is --bind-ro -- spelt as
+      # the container module spells it, with each path escaped for nspawn.
+      declaredBindFlags = lib.mapAttrsToList
+        (_: m: "--bind${lib.optionalString m.isReadOnly "-ro"}="
+          + nspawnPath (if m.hostPath == null then m.mountPoint else m.hostPath)
+          + ":" + nspawnPath m.mountPoint)
+        declared.bindMounts;
+
+      # extraFlags means what it means to the container module, whose unit
+      # expands the entries unquoted: each one is split on whitespace, so an
+      # entry can carry several flags, or a flag and its value as two words.
+      declaredFlags = declaredBindFlags ++ extraFlagWords declared;
+
+      # A declared tmpfs entry is an nspawn --tmpfs argument, PATH[:OPTIONS],
+      # where the path may escape a ':' or a '\' with a backslash. The path
+      # is needed on its own, to make the mount point and to find the
+      # runtime directory, so it is read out here the way nspawn reads it.
+      tmpfsEntries = map
+        (entry:
+          let
+            r = lib.foldl'
+              (acc: ch:
+                if acc.done then acc // { rest = acc.rest + ch; }
+                else if acc.escaped then acc // { path = acc.path + ch; escaped = false; }
+                else if ch == "\\" then acc // { escaped = true; }
+                else if ch == ":" then acc // { done = true; }
+                else acc // { path = acc.path + ch; })
+              { path = ""; rest = ""; escaped = false; done = false; }
+              (lib.stringToCharacters entry);
+          in
+          {
+            inherit (r) path;
+            # Empty when the entry names no options, and flong supplies them.
+            options = r.rest;
+          })
+        declared.tmpfs;
+
+      # allowedDevices is a unit property rather than an nspawn flag, and is
+      # translated here.
       deviceProps = lib.concatMapStringsSep " "
         (d: "--property=DeviceAllow=${lib.escapeShellArg "${d.node} ${d.modifier}"}")
         declared.allowedDevices;
@@ -140,15 +196,6 @@ let
 
       overlayDir = p: ".overlay/" + lib.replaceStrings [ "/" ] [ "_" ] (lib.removePrefix "/" p);
 
-      # An entry may name its own options as PATH:opts, so the path is the head.
-      tmpfsPath = p: lib.head (lib.splitString ":" p);
-
-      # The container's own `tmpfs` list means what flong's means -- the
-      # container module passes it to nspawn as --tmpfs, and flong is the thing
-      # calling nspawn -- so it is merged in rather than silently dropped.
-      # flong's entry wins where both name a path, which is how a consumer adds
-      # options to something the container asked for.
-      #
       # XDG_RUNTIME_DIR is exported unconditionally, so the directory it names
       # has to exist, and only the launcher can arrange that: /run is nspawn's
       # own tmpfs, made fresh at every start, and nothing inside a session is
@@ -158,17 +205,17 @@ let
       # quiet, which is how a session ends up with no keyring, no user bus and
       # no explanation.
       #
-      # The list is settled here and turned into flags in the launcher, because
-      # the uid and gid they are owned by come out of the prepared root's passwd
-      # and are not known until then.
-      tmpfsEntries = c.tmpfs ++ lib.filter
-        (p: ! lib.elem (tmpfsPath p) (map tmpfsPath c.tmpfs))
-        declared.tmpfs;
+      # The tmpfs flags are built in the launcher, because the uid and gid an
+      # entry without options is owned by come out of the prepared root's
+      # passwd and are not known until then.
 
       # An explicit upper inside the session root, not nspawn's empty-string
       # form, which puts it under the host's /var/tmp and leaks it on SIGKILL.
-      overlayFlags = lib.concatMapStringsSep " "
-        (p: ''--overlay=${c.overlays.${p}}:"$root"/${overlayDir p}:${p}'')
+      # $root is escaped in the launcher, as root_nspawn.
+      overlayFlags = lib.concatMapStrings
+        (p: ''
+          overlay_flags+=(${lib.escapeShellArg "--overlay=${nspawnPath "${c.overlays.${p}}"}:"}"$root_nspawn"${lib.escapeShellArg "/${nspawnPath (overlayDir p)}:${nspawnPath p}"})
+        '')
         (lib.attrNames c.overlays);
       # nspawn creates mount points for --bind but not for --overlay or
       # --tmpfs, so a target whose parent does not exist in the root fails the
@@ -178,11 +225,11 @@ let
       mountpointMkdirs = lib.concatStringsSep "\n        " (
         lib.concatMap
           (p: [
-            ''mkdir -p "$root"/${overlayDir p} "$root"${p}''
+            ''mkdir -p "$root"/${lib.escapeShellArg (overlayDir p)} "$root"${lib.escapeShellArg p}''
             # The upper layer receives the payload's writes, so it belongs to
             # the payload's user. Note the MERGED directory still takes its
             # ownership from the lower one.
-            ''chown "$uid:$gid" "$root"/${overlayDir p}''
+            ''chown "$uid:$gid" "$root"/${lib.escapeShellArg (overlayDir p)}''
           ])
           (lib.attrNames c.overlays)
       );
@@ -405,6 +452,15 @@ let
         # Captured because "$@" inside a function is the function's own
         # arguments, and every snippet must see the launcher's.
         launcher_args=("$@")
+
+        # Sets the variable named $1 to the path $2 as nspawn's --bind, --tmpfs
+        # and --overlay read one: ':' and '\' escaped with a backslash, and
+        # every other character itself. See nspawnPath.
+        nspawn_path() {
+          local bs=\\ value=$2
+          value=''${value//"$bs"/"$bs$bs"}
+          printf -v "$1" '%s' "''${value//:/"$bs:"}"
+        }
 
         # One way to run a consumer's snippet, shared by `workspace` and the
         # two bind lists, so they cannot drift in how much privilege they get.
@@ -742,6 +798,12 @@ let
         chown "$uid:$gid" "$root$home/tmp"
         chmod 0700 "$root$home/tmp"
         ${mountpointMkdirs}
+        overlay_flags=()
+        ${lib.optionalString (c.overlays != { }) ''
+        root_nspawn=""
+        nspawn_path root_nspawn "$root"
+        ${overlayFlags}
+        ''}
         ${lib.optionalString (c.network != null) ''
         # A NETWORKED SESSION'S RESOLVER IS PASTA, and this is the file that
         # says so. Written into the session's copy of the root, so nothing of
@@ -795,23 +857,24 @@ let
         # /run/user/$uid is one of these whether it was asked for or not:
         # XDG_RUNTIME_DIR names it, /run is nspawn's own tmpfs made fresh at
         # every start, and nothing inside a session can create a directory in
-        # it. Skipped if an entry already names that path, so the options remain
-        # a consumer's to override.
+        # it. Skipped if the declaration's `tmpfs` already names that path, so
+        # its options remain the declaration's to override.
         #
         # nspawn creates the mount point for a --tmpfs, but a mkdir here as well
         # keeps a nested bind -- a socket carved out of a masked runtime
         # directory -- from depending on which of the two nspawn makes first.
-        tmpfs_entries=(${lib.escapeShellArgs tmpfsEntries})
+        tmpfs_paths=(${lib.escapeShellArgs (map (e: e.path) tmpfsEntries)})
+        tmpfs_options=(${lib.escapeShellArgs (map (e: e.options) tmpfsEntries)})
         tmpfs_flags=()
+        path_nspawn=""
         runtime_dir=/run/user/$uid
         want_runtime_dir=1
-        for entry in ''${tmpfs_entries[@]+"''${tmpfs_entries[@]}"}; do
-          path=''${entry%%:*}
+        for i in "''${!tmpfs_paths[@]}"; do
+          path=''${tmpfs_paths[i]}
+          options=''${tmpfs_options[i]}
           [ "$path" = "$runtime_dir" ] && want_runtime_dir=0
-          case $entry in
-            *:*) tmpfs_flags+=("--tmpfs=$entry") ;;
-            *)   tmpfs_flags+=("--tmpfs=$entry:mode=0755,uid=$uid,gid=$gid") ;;
-          esac
+          nspawn_path path_nspawn "$path"
+          tmpfs_flags+=("--tmpfs=$path_nspawn:''${options:-mode=0755,uid=$uid,gid=$gid}")
           mkdir -p "$root$path"
         done
         if [ "$want_runtime_dir" = 1 ]; then
@@ -875,12 +938,12 @@ let
         trap 'exit 130' INT
         trap 'exit 143' TERM
 
-        # Deliberately word-split: it is a flag string.
-        read -ra binds < <(sed -n 's/^EXTRA_NSPAWN_FLAGS="\(.*\)"$/\1/p' ${declaredConf})
+        # The declaration's binds and extraFlags, one argument each.
+        declared_flags=(${lib.escapeShellArgs declaredFlags})
 
-        # An array rather than a string, unlike the line above: these are
-        # runtime values, and word-splitting a path is how a directory with a
-        # space in it becomes two broken mounts.
+        # An array, for the same reason: these are runtime values, and
+        # word-splitting a path is how a directory with a space in it becomes
+        # two broken mounts.
         extra_flags=()
         while IFS= read -r b; do
           [ -n "$b" ] || continue
@@ -1068,10 +1131,11 @@ let
             --kill-signal=SIGTERM \
             --bind-ro=/nix/store --bind-ro=/nix/var/nix/db \
             --bind-ro=${closure}:/run/current-system \
-            ''${binds[@]+"''${binds[@]}"} \
+            ''${declared_flags[@]+"''${declared_flags[@]}"} \
             --bind="$workspace:$workspace" \
             ''${extra_flags[@]+"''${extra_flags[@]}"} \
-            ''${tmpfs_flags[@]+"''${tmpfs_flags[@]}"} ${overlayFlags} \
+            ''${tmpfs_flags[@]+"''${tmpfs_flags[@]}"} \
+            ''${overlay_flags[@]+"''${overlay_flags[@]}"} \
             --uid=${c.user} \
             --setenv=PATH=${closure}/sw/bin \
             --setenv=TMPDIR="$home/tmp" \
@@ -1260,8 +1324,9 @@ in
           type = lib.types.str;
           default = name;
           description = ''
-            The `containers.<name>` whose closure, bind mounts and
-            allowedDevices this drives.
+            The `containers.<name>` declaration this runs: its closure,
+            `bindMounts`, `tmpfs`, `extraFlags`, `allowedDevices` and network
+            isolation, read as option values.
           '';
         };
 
@@ -1591,17 +1656,6 @@ in
           });
         };
 
-        tmpfs = lib.mkOption {
-          type = lib.types.listOf lib.types.str;
-          default = [ ];
-          example = [ "/home/alice/.cache" ];
-          description = ''
-            Paths made container-local and empty. Applied after the
-            container's own bind mounts, so this carves a subdirectory out of
-            a read-write bind.
-          '';
-        };
-
         overlays = lib.mkOption {
           type = lib.types.attrsOf lib.types.path;
           default = { };
@@ -1686,17 +1740,12 @@ in
       (n: c:
         let
           declared = config.containers.${c.container} or null;
-          # Each extraFlags entry is spliced into EXTRA_NSPAWN_FLAGS and
-          # word-split, so one entry can carry several flags, and a flag and its
-          # value can be two words.
-          extraWords = lib.concatMap
-            (f: lib.filter (w: lib.isString w && w != "")
-              (builtins.split "[[:space:]]+" f))
-            declared.extraFlags;
+          # One entry can carry several flags, and a flag and its value can be
+          # two words -- see extraFlagWords.
           privilegedFlags = lib.filter
             (w: w == "-U" || lib.any (flag: w == flag || lib.hasPrefix "${flag}=" w)
               [ "--capability" "--ambient-capability" "--private-users" ])
-            extraWords;
+            (extraFlagWords declared);
           # Each is fixed per declaration, and a declaration here is many
           # concurrent sessions: two of them would claim one address or one
           # host port. `network` is the per-session answer.
@@ -1720,7 +1769,7 @@ in
             declared.
           '';
         }]
-        ++ lib.optionals (declared != null) ([
+        ++ lib.optionals (declared != null) [
           {
             assertion = declared.flake == null;
             message = ''
@@ -1804,28 +1853,7 @@ in
               be pointed at the host's own network. Set privateNetwork = true.
             '';
           }
-        ]
-        # Bind mounts are recovered by word-splitting EXTRA_NSPAWN_FLAGS, which
-        # the NixOS container module writes unescaped. A path holding whitespace
-        # does not fail that parse -- it splits into two flags that are each
-        # valid and neither correct, so the container silently gets mounts
-        # nobody declared. A colon is the same story one level down, inside
-        # --bind's own SRC:DEST. Refused at eval, because there is no way to
-        # notice it at runtime.
-        ++ lib.concatMap
-          (m: map
-            # hostPath is null when the mount takes the container's own path on
-            # both sides, and then there is only the one path to judge.
-            (p: {
-              assertion = ! lib.any (bad: lib.hasInfix bad p) [ " " "\t" "\n" ":" ];
-              message = ''
-                flong: containers.${c.container} has a bind mount path that
-                cannot survive EXTRA_NSPAWN_FLAGS: "${p}". Whitespace and ':'
-                are not expressible there; rename the path.
-              '';
-            })
-            (lib.filter (p: p != null) [ m.hostPath m.mountPoint ]))
-          (lib.attrValues declared.bindMounts)))
+        ])
       cfg);
   };
 }

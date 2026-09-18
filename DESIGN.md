@@ -36,13 +36,25 @@ warm on one machine.
 | flong: nspawn against a prepared root | 117 ms |
 
 **Nothing is evaluated at launch.** About 2.5 s of the slower cases is Nix
-evaluation. The only per-session value is the workspace. The container module
-already writes every bind mount into `/etc/nixos-containers/<name>.conf` as
-`EXTRA_NSPAWN_FLAGS`, so `nixos-rebuild` builds the closure once and the
-launcher reads the flags back. That file is written unescaped: a path with
-whitespace splits into two valid, wrong flags, and a `:` does the same inside
-`--bind`'s `SRC:DEST`. Neither can be detected at runtime, so both are refused
-at evaluation.
+evaluation. `nixos-rebuild` builds the closure once, and the launcher is
+generated at the same time with the declaration's mounts and flags already in
+it. Everything else a session gets is computed at launch by the hooks.
+
+**The declaration is read as data.** `bindMounts`, `tmpfs` and `extraFlags`
+are read as the option values they are, at evaluation, and each path is passed
+to nspawn as one argument. The container module's own rendering of the same
+options is a string its unit splices into a shell command unquoted, where a
+path with whitespace splits into two valid, wrong flags. nspawn itself
+expresses any path: `--bind`, `--tmpfs` and `--overlay` split on `:` and treat
+a backslash as an escape for the next character, so flong writes `\:` and `\\`
+and every other character as itself. Nothing in a declared path is refused.
+`extraFlags` entries are split on whitespace, as the container module's unit
+splits them, so one entry can still carry several flags.
+
+A `tmpfs` entry is already in nspawn's `PATH[:OPTIONS]` syntax, and flong reads
+the path out of it the way nspawn does. A colon in a tmpfs path would need
+`\:` in the declaration, which nixpkgs cannot build: its `container@` unit
+splices the list into a script, and shellcheck refuses the escape.
 
 **Nothing boots.** Booting the container's systemd costs 1.23 s across about
 thirty units, to run one process. What boot provides that a session needs is
@@ -135,12 +147,18 @@ what is mounted after it was judged.
   `mode=0755,uid=<uid>,gid=<gid>`.
 - **`XDG_RUNTIME_DIR`.** `/run` is nspawn's tmpfs, created at every start, and
   nothing in the session can create a directory in it. The launcher mounts
-  `/run/user/<uid>` at 0700, owned by the user, unless `tmpfs` names it,
+  `/run/user/<uid>` at 0700, owned by the user, unless the declaration's
+  `tmpfs` names it,
   because tools reject a root-owned 0755 runtime directory without saying why.
 - **Overlay upper layers** live inside the session root, not in nspawn's
   default location under the host's `/var/tmp`, which a SIGKILL would leak.
   The upper layer is owned by the user; the merged directory takes its owner
   from the lower one.
+- **Static mounts are the declaration's.** Every mount known at evaluation,
+  bind or tmpfs, is declared on `containers.<name>`, in the vocabulary NixOS
+  already has for it. flong adds only what is known at launch (the workspace,
+  the caller's `binds`, a root hook's binds) or has no declaration form
+  (`overlays`, whose upper layer flong places and owns).
 - **Mount order.** nspawn sorts custom mounts by destination, so a tmpfs can
   mask part of a bind mount and a bind mount can reach through a tmpfs. A
   single socket can be exposed from an otherwise masked directory this way.

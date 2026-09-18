@@ -81,6 +81,14 @@
               "static per container";
             assert flongFailures { flong.box.network.hostPorts = [ 5432 ]; } == [ ]
               || throw "assertions: a network on a private container is refused";
+            # nspawn expresses any path once it is escaped, and flong passes
+            # the declaration's binds as data, so none is refused.
+            assert flongFailures
+              {
+                containers.box.bindMounts."/in side:colon\\slash".hostPath = "/out side:colon\\slash";
+                containers.box.tmpfs = [ "/tmp/with space" ];
+              } == [ ]
+              || throw "assertions: a bind or tmpfs path holding whitespace, ':' or '\\' is refused";
             pkgs.runCommand "assertions" { } "touch $out";
 
           # The version script decides what every release is called, so it is

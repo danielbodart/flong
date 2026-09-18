@@ -143,7 +143,6 @@ All under `flong.<name>`. Hooks are shell snippets.
 | `extraBinds` | `""` | Prints further directories to bind-mount read-write, one per line, each at its own path. |
 | `extraBindsRo` | `""` | As `extraBinds`, read-only. |
 | `guard` | `""` | Decides whether the caller may launch. Non-zero exit refuses. |
-| `tmpfs` | `[ ]` | Paths mounted as an empty tmpfs owned by `user`. Entries may add options as `PATH:opts`. |
 | `overlays` | `{ }` | `{ target = lower; }`: an overlayfs whose writes go to an upper layer deleted with the session. |
 | `scopeConfig` | `{ }` | Settings for the session's scope unit, typed as `serviceConfig`, e.g. `MemoryMax = "8G"`. |
 | `network` | `null` | User-mode networking through pasta. Requires `privateNetwork = true`. |
@@ -189,7 +188,7 @@ Without `privateNetwork`, `$netns` is the host's network namespace, and rules
   `:`-separated.
 - `/nix/store` is read-only; the system closure is at `/run/current-system`.
 - `TMPDIR` is `~/tmp`. `XDG_RUNTIME_DIR` is `/run/user/<uid>`, a 0700 tmpfs;
-  name it in `tmpfs` to change its options.
+  name it in the declaration's `tmpfs` to change its options.
 - The hostname is the container's name. pid 1 is
   [tini](https://github.com/krallin/tini). Nothing runs as root.
 
@@ -198,10 +197,10 @@ Without `privateNetwork`, `$netns` is the host's network namespace, and rules
 | option | under flong |
 |---|---|
 | `config`, `path`, `pkgs`, `nixpkgs`, `specialArgs` | Build the closure. |
-| `bindMounts` | Passed to nspawn. Paths containing whitespace or `:` are refused. |
-| `extraFlags` | Passed to nspawn, except `--capability`, `--ambient-capability`, `--private-users` and `-U`, which are refused. |
+| `bindMounts` | Passed to nspawn. Any path works. |
+| `extraFlags` | Passed to nspawn, each entry split on whitespace, except `--capability`, `--ambient-capability`, `--private-users` and `-U`, which are refused. |
 | `allowedDevices` | `DeviceAllow=` on the scope, with `DevicePolicy=closed`. |
-| `tmpfs` | Merged with `flong.<name>.tmpfs`, which wins on the same path. |
+| `tmpfs` | Mounted empty, owned by `user` unless the entry names its own options as `PATH:OPTIONS`. |
 | `privateNetwork` | A network namespace with loopback only, or with `flong.<name>.network`, user-mode networking through pasta. |
 | `networkNamespace` | The session joins that namespace. |
 | `autoStart`, `ephemeral`, `restartIfChanged`, `timeoutStartSec` | Ignored: they configure the `container@` unit. `autoStart = true` warns. |
@@ -216,9 +215,6 @@ Refusals are evaluation-time assertions.
 
 - **NixOS only.** flong depends on `containers.<name>` and the NixOS activation
   script.
-- **Parses a generated file.** Bind mounts and `extraFlags` are read from
-  `EXTRA_NSPAWN_FLAGS` in `/etc/nixos-containers/<name>.conf`, which nixpkgs
-  does not document as an interface.
 - **No user namespace.** Session processes run with host uids, so `user` should
   have the invoking user's uid or the workspace will not be writable. nspawn's
   manual says this mode must not be used for untrusted code. See

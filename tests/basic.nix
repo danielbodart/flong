@@ -72,8 +72,7 @@
       "d /srv/shared/masked 0755 root root -"
       "f /srv/shared/masked/host-only 0644 root root - should-not-be-visible"
 
-      # Masked by the CONTAINER's own tmpfs list rather than flong's, which the
-      # container module would have passed to nspawn and flong used to drop.
+      # Masked by a second entry in the declaration's tmpfs list.
       "d /srv/shared/declared 0755 root root -"
       "f /srv/shared/declared/host-only 0644 root root - should-not-be-visible"
       "d /srv/lower 0755 alice users -"
@@ -113,10 +112,28 @@
       autoStart = false;
       privateNetwork = false;
 
-      # Declared here rather than in `flong.demo.tmpfs`: the two lists mean the
-      # same thing, so flong merges them, and this is the half that used to be
-      # dropped.
-      tmpfs = [ "/srv/shared/declared" ];
+      # Masks part of the read-write bind below, and -- at /srv/nested --
+      # hides a host directory that a nested bind then reaches through. The
+      # last names a path with a space and no options: flong reads the path
+      # out of it and gives it the payload's ownership. (Not a colon, which
+      # nspawn would take as `\:`: the container module splices this list
+      # into its own unit's script, and shellcheck refuses that build.)
+      tmpfs = [
+        "/srv/shared/masked"
+        "/srv/shared/declared"
+        "/srv/nested"
+        "/srv/tmp masked"
+      ];
+
+      # A bind whose paths hold a space, a colon and a backslash on both
+      # sides. Read as data, each reaches nspawn as one escaped argument; the
+      # container module's own unit would split it into mounts nobody
+      # declared. Read-only, the declaration's default.
+      bindMounts."/srv/odd: in\\side".hostPath = "/srv/odd: out\\side";
+
+      # extraFlags as the container module uses them: one entry, split on
+      # whitespace into two flags.
+      extraFlags = [ "--setenv=FLONG_DECLARED_A=one --setenv=FLONG_DECLARED_B=two" ];
 
       bindMounts."/srv/shared" = {
         hostPath = "/srv/shared";
@@ -388,10 +405,6 @@
       extraBinds = ''[ "$workspace" = /srv/work ] && printf '%s\n' /srv/companion'';
       extraBindsRo = ''printf '%s\n' /srv/reference'';
 
-      # Masks part of the read-write bind above, and -- at /srv/nested --
-      # hides a host directory that a nested bind then reaches through.
-      tmpfs = [ "/srv/shared/masked" "/srv/nested" ];
-
       # Readable from the lower directory; writes must not reach it.
       overlays."/opt/layered" = "/srv/lower";
 
@@ -502,6 +515,13 @@
     ''
       machine.wait_for_unit("multi-user.target")
 
+      # The source of containers.demo's bind with a space, a colon and a
+      # backslash in its paths, which every demo session mounts. Made here
+      # rather than by tmpfiles, whose own syntax would need escaping of its
+      # own. Python's "\\" is one backslash.
+      odd_out = "/srv/odd: out\\side"
+      machine.succeed(f"mkdir -p '{odd_out}' && echo odd-path > '{odd_out}/marker'")
+
       # A session in the background, identified by the directory it makes: the
       # machine name carries the launcher's pid and a random number, so nothing
       # outside the launcher can know it in advance.
@@ -582,10 +602,28 @@
           out = machine.succeed("${launcher} 'cat /etc/machine-id'")
           assert len(out.strip()) == 32, out
 
-      with subtest("the container's own tmpfs list is honoured too"):
+      with subtest("every entry in the declaration's tmpfs list is mounted"):
           machine.succeed("test -e /srv/shared/declared/host-only")
           out = machine.succeed("${launcher} 'ls -A /srv/shared/declared | wc -l'")
           assert out.strip().endswith("0"), out
+
+      with subtest("a declared path holding a space, a colon or a backslash is mounted as declared"):
+          # Python's "\\" is one backslash, and single quotes carry it to
+          # the session's shell, where double quotes leave it alone.
+          odd_in = "/srv/odd: in\\side"
+          out = machine.succeed(
+              f"${launcher} 'cat \"{odd_in}/marker\"; touch \"{odd_in}/new\" 2>/dev/null || echo refused'")
+          assert out.split() == ["odd-path", "refused"], out
+          machine.fail(f"test -e '{odd_out}/new'")
+          # The tmpfs entry is found under its unescaped path, empty, and
+          # owned by the payload's user because it named no options.
+          out = machine.succeed(
+              "${launcher} 'stat -c %U \"/srv/tmp masked\"; touch \"/srv/tmp masked/mine\" && echo wrote'")
+          assert out.split() == ["alice", "wrote"], out
+
+      with subtest("extraFlags reach nspawn split on whitespace, as the container module splits them"):
+          out = machine.succeed("${launcher} 'echo $FLONG_DECLARED_A $FLONG_DECLARED_B'")
+          assert out.split() == ["one", "two"], out
 
       with subtest("privateNetwork gives the session loopback and nothing else"):
           # sysfs is per-namespace, so this needs no tools in the container.
