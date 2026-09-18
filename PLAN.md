@@ -1,286 +1,105 @@
 # Plan
 
-What is left, in order. The struck-out sections have shipped and are kept for
-their numbering; the rest is the network work and the hooks a launcher needs
-around a session's lifetime.
+What is not built yet, in order. What is built, and why, is in
+[DESIGN.md](DESIGN.md).
 
-Everything marked *measured* was run in a NixOS VM test against this flake's own
-nixpkgs (systemd 261.2, nftables 1.1.7, passt 2026_07_16, kernel 6.18.51), in
-flong's real invocation shape: `systemd-run --scope` around `systemd-nspawn
---private-network --user=…` with a prepared root.
+## 1. Reopen `privateUsers`
 
-Done already: the container's own `tmpfs` list, `privateNetwork` (as a
-loopback-only namespace), `networkNamespace`, `--console=autopipe` so stdin
-survives a pipeline, `--hostname`, `/run/user/<uid>`, `/etc/machine-id`,
-`machine.slice` and `properties`, a launch-time identity check against the
-prepared root's passwd, an assertion for each declaration flong does not honour,
-and the README section on what a session is not.
+flong refuses `privateUsers != "no"` because a bind-mounted file owned by a
+host uid is unreadable inside, so the session cannot read its workspace. That
+describes `noidmap`, which is the default.
 
----
-
-## ~~1. The unix-export path is wrong~~
-
-Done. `cleanup` and the sweep unmount `/run/systemd/nspawn/<machine>/unix-export`
-and remove the mount tunnel beside it, which is where nspawn leaves both.
-
-## ~~2. The sweep's liveness test is wrong, and it deletes live sessions~~
-
-Done. A session is live while its launcher pid, its scope unit or its
-registration with machined says so — the launcher pid first, because between
-`cp -a` and `systemd-run` it is the only one of the three that exists. Live
-sessions are left alone rather than stopped: the sweep runs inside an unrelated
-launch, and a session's own trap is what ends it. Tasks 6 and 7 are unblocked.
-
-## ~~3. Sweep past the current closure~~
-
-Done. The sweep globs `/run/flong/<container>-????????-????????`, skips the
-current cache and anything live, and `chattr -R -i`s a superseded cache before
-removing it whole.
-
-No lock. The prepare/copy race costs the launch that loses it, loudly — `cp -a`
-fails and `set -e` ends that launch — where a `flock` across prepare-and-copy
-would cost every launch of a tool that advertises 117 ms.
-
-## ~~4. A root hook, after the namespace exists~~
-
-Done, as `attach`. nspawn is started in the background — stdin handed over
-explicitly, since bash gives an asynchronous command `/dev/null` otherwise — and
-the launcher polls for the leader: `machinectl show --property=Leader` first,
-then a recursive walk of the scope's cgroups, both judged by the same test.
-
-That test is not "a pid whose `ns/net` differs from the host's". A container
-without `privateNetwork` shares the host's, so that finds no leader there; and
-"any pid in a namespace of its own" also matches a workload that ran
-`unshare -Upf`, whose pid 1 a hook must never be handed. The leader is pid 1 of
-the pid namespace exactly one level below the launcher's, which `NSpid` in
-`/proc/<pid>/status` spells out.
-
-The hook runs in a subshell, so its `exit` is its verdict. A non-zero one — or
-a leader that never appears — kills the scope: a session whose hook did not
-finish has nothing installed and nobody left to install it. The ordering
-contract is in the option description, the README and the comment beside the
-call. The test asserts the hook runs as root, is handed a namespace that is not
-the host's, and finds it with an empty route table.
-
-**Since changed: the payload waits for the hook.** nspawn starts the payload
-while the hook is still running, and a short payload finished first — measured
-as a hook failing with `nsenter: cannot open /proc/<pid>/ns/net`, a payload that
-succeeded reported as a launch that failed, at random. So for a session with a
-hook or a `network`, a gate between `tini` and everything else waits for
-`/run/flong-attached`, which the launcher creates through `/proc/<leader>/root`
-once the hook has run and pasta is up. It is
-not a boundary — the ordering still is, and "no handshake" still holds for
-safety — but it contradicts "no readiness protocol", and a hooked session's
-payload now starts after the hook rather than beside it.
-
-The marker is made with `mkdir`, never `touch`. It is reached through
-`/proc/<leader>/root`, where an absolute symlink resolves against the host's
-root: measured, a `/run/flong-attached -> /tmp/escaped` planted in the session
-had `touch` create `/tmp/escaped` on the host. nspawn's root-owned `/run` is
-what stops a workload planting one today; `mkdir` does not lean on it, since it
-fails with `EEXIST` on anything already there and never follows the final
-component. A failure fails the launch, and the test plants the symlink.
-
-## ~~5. Let the hook wrap the payload~~
-
-Done, as `attachWrap`: shell run as root before nspawn, printing a command one
-word per line, spliced between `tini` and the payload.
-
-## ~~6. A teardown hook~~
-
-Done, as `detach`. The trap and the sweep now release a session through one
-function, so the clean path and the killed path cannot drift apart again.
-
-The sweep runs inside whichever launch of the container comes next, and
-several launchers can drive one container — so running the *sweeping*
-launcher's teardown would release the wrong state, or none. Each session
-records the store path of its own teardown beside its root, and the sweep runs
-that one, which also covers a superseded generation's. Only `$machine` is in
-scope, because on the sweep's path it is all that is left.
-
-A launcher that is signalled — `SIGTERM`, `SIGINT`, `SIGHUP` — stops its own
-session and waits for it before releasing anything. It used to release first,
-running `detach`, pulling the network pin and deleting the root under a session
-still running. `SIGKILL` runs no trap, and that path is unchanged: the sweep
-still leaves live sessions alone.
-
-## ~~7. `network` — a real network for a private session~~
-
-Done, as planned: pasta through a bind-mounted pin with `--runas 0`,
-`--config-net`, `--no-map-gw` and an explicit `none` for every port class not
-listed; `forwardPorts` shaped like the declaration's, `hostPorts` going out as
-TCP and UDP both. It is attached after `attach` returns. The pin is released
-with `umount -l` and `rm` and pasta is signalled too — only once its command
-line shows it is that session's pasta, because on the sweep's path the pid file
-can be older than the process now holding its number. The release is not
-conditional on the *sweeping* launcher having a network, since the session it
-releases may be another launcher's. The veth, bridge and port refusal now says
-why: static per container, many sessions per declaration.
-
-The payload gate under task 4 covers a network too, and needs to: before it, a
-whole payload ran against an empty route table and exited, and the launcher
-then failed to pin a namespace that had already gone. Besides that, three things
-turned up that the plan did not have:
-
-- **`iproute2` is not needed.** The pin is `mount --bind` and `umount -l`, both
-  util-linux, which the launcher already carries; only `passt` joined
-  `runtimeInputs`.
-- **A host port in `forwardPorts` is one session's at a time.** The second
-  concurrent session's pasta cannot bind it (*"Listen failed for HOST TCP port
-  \*/18200: Address already in use"*), so that launch fails and is ended rather
-  than run without it — asserted. Loud rather than wrong, but the same
-  concurrency limit the declaration's own `forwardPorts` is refused for.
-- ~~**Nothing arranges DNS.**~~ Done, as pasta's `--dns-forward`, baked in and
-  not an option. A networked session's `resolv.conf` is written into its copy
-  of the root before nspawn starts, naming `169.254.1.1` — Podman's
-  `dnsForwardIpv4`, link-local and clear of every cloud metadata address — and
-  `100::1`, from RFC 6666's discard-only block, where the host names an IPv6
-  nameserver; the host's `search`, `domain` and `options` come across as they
-  are. pasta re-sends a query from the host to the host's first nameserver, so
-  a stub on the host's loopback answers — which a copy of the host's file could
-  never do, since its `127.0.0.53` would name the session's own loopback.
-  Measured, in both families, against a dnsmasq bound to `127.0.0.1` and `::1`
-  alone. A family is forwarded only if the host names a nameserver in it: for
-  one with none, pasta's only target is the unspecified address, which Linux
-  takes as the host's own loopback — measured with a throwaway variant that
-  forwarded the missing family anyway, where a TCP query to it was answered by
-  the host's loopback resolver in the other family, on a port `hostPorts` never
-  named; UDP timed out. The test holds the host to one family at a time and
-  finds the other neither forwarded nor listed, and unreachable through its
-  address or the unspecified one. nspawn is told `--resolv-conf=off` rather
-  than left to arrive there from `auto`. A private session without `network`
-  keeps no `resolv.conf`. What it does not do is follow the host: both reads
-  are once, at launch, so a host that moves networks keeps a live session on
-  the old resolver — a README limitation, spared where the host's resolver is
-  a stub.
-
-## ~~8. Per-session binds, source ≠ destination~~
-
-Done, as `attachBinds`: `SOURCE:DESTINATION` lines, any kind of source, bound
-read-write and kept out of `FLONG_EXTRA_BINDS`. Run as root before nspawn rather
-than from `attach` — a bind mount is an argument to nspawn, so by the time the
-namespace exists the mount table is made — but after the trap is armed, so a
-per-session source is released on every path. Refuses `:` and newlines on
-either side, after resolving the source as well as before.
-
-## ~~9. Capabilities~~
-
-Done. A session with a root hook runs with `--drop-capability=CAP_NET_ADMIN
---no-new-privileges=yes`, documented as defence in depth only: the test shows
-the workload holding `CAP_NET_ADMIN` again inside `unshare -Ur` and *still*
-failing to flush the ruleset, add a link or add a route, with the hook's rule
-intact from outside afterwards. `--capability`, `--ambient-capability`,
-`--private-users` and `-U` are refused in `extraFlags`, and the old assertion
-message that recommended the first of them is rewritten. A new `assertions`
-check evaluates each refusal, since nothing tested flong's assertions before.
-
-## ~~10. `--uid`, and `getent`~~
-
-Done. The flag is `--uid=`, so systemd 261 no longer prints a deprecation
-warning over every launch, and the test asserts the absence of one. Recorded
-beside it: nspawn resolves either spelling by exec'ing `getent` *inside the
-container root*, which flong satisfies only through
-`--bind-ro=$closure:/run/current-system` and a PATH naming
-`/run/current-system/sw/bin` — accidental, and a hard failure the day a closure
-stops carrying one.
-
-## 11. Reopen `privateUsers`
-
-flong refuses `privateUsers != "no"` on the ground that a bind-mounted file
-owned by a host uid is unreadable inside, so the session cannot read the
-workspace it was started for. That describes `noidmap`, which is the default.
-
-nspawn now takes an ID-mapping option per bind mount: `idmap`, `rootidmap` and
+nspawn takes an ID-mapping option per bind mount: `idmap`, `rootidmap` and
 `owneridmap`. With `owneridmap`, the owner of the bind source on the host maps
-to the user inside, which is exactly the workspace case, and
-`--private-users-ownership=map` maps the image with ID-mapped mounts rather than
+to the user inside, which is the workspace case, and
+`--private-users-ownership=map` maps the image with idmapped mounts instead of
 chowning it.
 
-The prize is worth the work: today a session runs as the caller's own uid, so
-anything it reaches outside its deliberate binds — a leaked descriptor, a path
-through `/proc`, a bug in nspawn — it acts on *as that user*. nspawn's own
-manual says of `--private-users=no`: *"This option is not secure and must not be
-used to run untrusted code."*
+The benefit is worth the work. A session runs as the caller's own uid, so
+anything it reaches outside its bind mounts (a leaked file descriptor, a path
+through `/proc`, a bug in nspawn) it acts on as that user. nspawn's manual says
+of `--private-users=no`: *"This option is not secure and must not be used to
+run untrusted code."*
 
-It needs checking rather than assuming: ID-mapped mounts need support from each
-source filesystem, and the prepared root, the tmpfs mounts and the overlays each
-need their own answer. A wrong mapping shows up as `nobody` and a read failure,
-which is the right direction to fail in.
+It needs testing: idmapped mounts need support from each source filesystem,
+and the prepared root, the tmpfs mounts and the overlays each need their own
+answer. A wrong mapping shows up as `nobody` and a read failure, which is the
+safe direction to fail in.
 
-## 12. Persistence, and a read-only workspace
+## 2. Persistence, and a read-only workspace
 
-Two options that are the same question answered in opposite directions, and both
-want a sentence each in the README or nobody will pick correctly.
+Two options that answer the same question in opposite directions. Each needs a
+sentence in the README saying when to choose it.
 
 - `state = [ paths ]`, each bound from `/var/lib/flong/<container><path>`,
-  created on first use with the payload's ownership. "Persists across sessions,
-  invisible to the host's own layout" is what a package index, a compiler cache
-  or a language server's database wants.
-- A read-only workspace: the workspace bound as the lower layer of an overlay
-  whose upper layer is discarded at the end. Today `workspace` is always bound
-  read-write and `overlays` takes static paths fixed at evaluation, so a
-  per-session workspace overlay cannot be expressed at all.
+  created on first use with the payload's ownership. A package index, a
+  compiler cache or a language server's database wants state that persists
+  across sessions and stays out of the host's own layout.
+- A read-only workspace: the workspace as the lower layer of an overlay whose
+  upper layer is discarded at the end. `workspace` is always bound read-write,
+  and `overlays` takes static paths fixed at evaluation, so a per-session
+  workspace overlay cannot be expressed.
 
-## 13. `nix` inside a session — last, and only if asked for
+## 3. `nix` inside a session, only if asked for
 
-Nothing flong is being built for needs this. A session's tools belong in its
-container's declaration, which is already a Nix closure; if a session needs a
-tool, it goes there. And the one repository that does want `nix` against the
-host — a machine's own configuration — cannot run in a sandbox at all, because
-`nixos-rebuild switch` needs a real `sudo` and `no_new_privs` refuses it.
+Nothing flong is built for needs this. A session's tools belong in its
+container's declaration, which is already a Nix closure. The one repository
+that does want `nix` against the host, a machine's own configuration, cannot
+run in a sandbox at all: `nixos-rebuild switch` needs a real `sudo`, and
+`no_new_privs` refuses it.
 
-The case it would serve is narrower: a session used as a development
-environment for a checkout whose *own* flake defines the toolchain, where
-`nix develop`, `nix build` and `nix-shell` are how the project is worked on and
-the container declaration cannot know about it. That is a fair thing for
-someone to want from flong. It is not something to build ahead of them asking.
+The case it would serve is a session used as a development environment for a
+checkout whose own flake defines the toolchain, where `nix develop`,
+`nix build` and `nix-shell` are how the project is worked on. That is a
+reasonable request, and not one to build before someone makes it.
 
-What it costs is why it stays off. A declared container binds
-`/nix/var/nix/daemon-socket` plus per-container `profiles` and `gcroots`, and
-through that socket a session can build arbitrary derivations, spend unbounded
-CPU and disk, and reach the network from a fixed-output derivation — which is
-fetched by the host's daemon, outside the session's namespace, where no rule in
-that namespace can see it or log it. So a session whose egress is being steered
-must refuse it, or steering stops being the whole story. A user in
-`trusted-users` could also set sandbox options through it, which is
-host-equivalent; on a default NixOS that list is `root` alone, so it is the
-weaker of the two reasons, but it is the reason the option description has to
-state.
+The cost is why it stays off. A declared container binds
+`/nix/var/nix/daemon-socket` plus per-container `profiles` and `gcroots`.
+Through that socket a session can build arbitrary derivations, use unbounded
+CPU and disk, and reach the network from a fixed-output derivation. The host's
+daemon fetches that derivation outside the session's network namespace, where
+no rule an `attach` hook installed can see or log it, so a session whose egress
+is filtered must refuse the socket. A user in `trusted-users` could also set
+sandbox options through it, which is root-equivalent; on a default NixOS that
+list is `root` alone, so this is the weaker reason, but the option description
+must state it.
 
-If it is ever built: off by default, opt-in per launcher, refused in a session
-with an `attach` hook, `--bind-ro=/nix/var/nix/daemon-socket`, and
+If built: off by default, opt-in per launcher, refused in a session with an
+`attach` hook, `--bind-ro=/nix/var/nix/daemon-socket`, and
 `--bind=/nix/var/nix/profiles/per-container/<container>:/nix/var/nix/profiles`
 plus the matching `gcroots`, created by the launcher and kept per container so
 a warm toolchain survives.
 
 ## Tests
 
-The network section is in, each property asserted rather than assumed:
+New work is tested to the standard the network tests set, each property
+asserted rather than assumed:
 
 - A session with no `network` has only `lo`, and no route in either family.
-- A hook runs as root, is handed a namespace that is not the host's, and finds
-  no route in it; its binds are inside and absent from `FLONG_EXTRA_BINDS`.
-- The workload cannot list or flush a hook's ruleset, add a link or add a route
-  — including inside `unshare -Ur`, where it holds `CAP_NET_ADMIN` again — and
-  the rule is intact from outside afterwards.
+- An `attach` hook runs as root, is handed a namespace that is not the host's,
+  and finds no route in it; its `attachBinds` are inside and absent from
+  `FLONG_EXTRA_BINDS`.
+- The payload cannot list or flush a hook's ruleset, add a link or add a route,
+  including inside `unshare -Ur`, where it holds `CAP_NET_ADMIN` again; the
+  rule is intact from outside afterwards.
 - Rules land before any egress: the hook sees no route, pasta adds some after,
   and the hook's rule then refuses a port the session was given.
 - `hostPorts` reaches the named host port, and not an unnamed one, directly or
   through the gateway address.
 - A `forwardPorts` entry reaches the session from the host; a port the session
-  listens on past pasta's one-second `auto` scan does not; a second concurrent
-  session asking for the same host port is refused.
+  starts listening on after pasta's one-second `auto` scan does not; a second
+  concurrent session asking for the same host port is refused.
 - A networked session resolves a name, and a short one through the host's
   search domain, from a resolver bound only to the host's loopback, in both
   families; its `resolv.conf` names pasta's addresses and carries the host's
-  `search` and `options`. A private session without `network` has none. A
-  host naming a nameserver in one family only gives the session that family
-  alone: the other is not forwarded, not listed, and reaches no port 53 on the
-  host's loopback through its forward address or the unspecified one.
-- A clean exit and a SIGKILLed launcher both release the pin and pasta — the
+  `search` and `options`. A private session without `network` has none. A host
+  with a nameserver in one family only gives the session that family alone:
+  the other is not forwarded, not listed, and reaches no port 53 on the host's
+  loopback through its forward address or the unspecified one.
+- A clean exit and a SIGKILLed launcher both release the pin and pasta, the
   second through a sweep by a different launcher over the same container.
 - `detach` runs on both paths, the sweep running the dead session's own.
-- The capability and privilege flags are refused in `extraFlags` — by a new
-  evaluation-only `assertions` check, along with the network assertions.
+- The capability and privilege flags are refused in `extraFlags`, checked by
+  the evaluation-only `assertions` check along with the network assertions.
 
 The suite runs in about 50 s of test script with KVM. Keep it affordable.
