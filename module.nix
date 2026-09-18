@@ -231,6 +231,22 @@ let
           (builtins.hashString "sha256" (identityFrom + prepareSteps));
 
       payload = mkPayload name c;
+
+      # A script of its own, rather than a snippet spliced into the launcher,
+      # because it is not always THIS launcher that runs it: the sweep runs
+      # inside whichever launch of the container comes next, and several
+      # launchers can drive one container. So each session records which
+      # teardown is its own, and the sweep runs that one -- including a
+      # superseded generation's, whose code this launcher no longer carries.
+      detachScript = pkgs.writeShellApplication {
+        name = "flong-detach-${name}";
+        runtimeInputs = [ pkgs.coreutils pkgs.util-linux ] ++ c.launcherInputs;
+        text = ''
+          # Exported, so a helper the snippet calls sees it as well.
+          export machine=$1
+          ${c.detach}
+        '';
+      };
     in
     pkgs.writeShellApplication {
       inherit name;
@@ -424,6 +440,47 @@ let
         # covers: between `cp -a` and `systemd-run` there is a root on disk with
         # no scope and no registration behind it, and a concurrent sweep would
         # otherwise take a session that is starting.
+        # EVERYTHING A SESSION LEAVES OUTSIDE ITSELF, RELEASED FROM ONE PLACE,
+        # because it is released from two: the cleanup trap, for a session
+        # whose launcher is still here to run it, and the sweep below, for one
+        # whose launcher was SIGKILLed. Given the machine name, the session's
+        # root and the record of its own teardown, because on the sweep's path
+        # that is all that is left.
+        #
+        # Tolerant throughout: a leftover that will not go costs the host a
+        # directory, where an abort here costs the caller their session -- or,
+        # in the trap, the payload's exit status.
+        release_session() {
+          local machine=$1 root=$2 record=$3 detach
+          # The consumer's teardown first, while nothing of flong's has gone
+          # yet. Only a store path is run: the record is written by root into a
+          # root-owned directory, and it is still not the place to take a
+          # command from.
+          if [ -e "$record" ]; then
+            detach=$(cat "$record")
+            case $detach in
+              /nix/store/*) ;;
+              *) detach="" ;;
+            esac
+            if [ -n "$detach" ] && [ -x "$detach" ]; then
+              "$detach" "$machine" || echo "${name}: detach failed for $machine" >&2
+            else
+              echo "${name}: no teardown left to run for $machine" >&2
+            fi
+            rm -f "$record"
+          fi
+          # /run/systemd/nspawn/<machine>/unix-export, which is where nspawn
+          # puts it: runtime_directory_make(scope, "systemd/nspawn", machine)
+          # and then "unix-export" joined inside. Looking for the pre-257
+          # spelling, /run/systemd/nspawn/unix-export/<machine>, matched
+          # nothing, so every killed session leaked its tmpfs. The mount tunnel
+          # next to it leaks the same way. nspawn removes both on a clean exit,
+          # and neither exists by the time a clean session's trap runs.
+          umount "/run/systemd/nspawn/$machine/unix-export" 2>/dev/null || true
+          rm -rf "$root" "/run/systemd/nspawn/$machine" \
+            "/run/systemd/nspawn/propagate/$machine" || true
+        }
+
         session_live() {
           local m=$1 owner
           # Starting, or running with its launcher still waiting on it.
@@ -463,19 +520,7 @@ let
             [ -e "$d" ] || continue
             m=''${d##*/}; m=''${m#s-}
             if session_live "$m"; then live=1; continue; fi
-            # /run/systemd/nspawn/<machine>/unix-export, which is where nspawn
-            # puts it: runtime_directory_make(scope, "systemd/nspawn", machine)
-            # and then "unix-export" joined inside. Looking for the pre-257
-            # spelling, /run/systemd/nspawn/unix-export/<machine>, matched
-            # nothing, so every killed session leaked its tmpfs. The mount
-            # tunnel next to it leaks the same way, and nspawn removes both on
-            # the exit this session never had.
-            umount "/run/systemd/nspawn/$m/unix-export" 2>/dev/null || true
-            # Tolerated, because a leftover that will not go must not stop this
-            # launch: it costs the host a directory, where an abort costs the
-            # caller their session.
-            rm -rf "$d" "/run/systemd/nspawn/$m" \
-              "/run/systemd/nspawn/propagate/$m" || true
+            release_session "$m" "$d" "$dir/detach-$m"
           done
           # A superseded closure's cache with nothing of it still running: the
           # prepared root it was keyed on goes too, since no launcher will ever
@@ -515,6 +560,12 @@ let
         machine=${c.container}-$$-''${RANDOM}
         root=${cache}/s-$machine
         cp -a "$prepared" "$root"
+        ${lib.optionalString (c.detach != "") ''
+        # Which teardown is this session's, for whoever ends up releasing it.
+        # Beside the root and not in it, since the root is the container's "/".
+        # Written before anything a teardown would release can exist.
+        echo ${detachScript}/bin/flong-detach-${name} > ${cache}/detach-"$machine"
+        ''}
 
         # An inherited TMPDIR names a host path that is absent or root-owned in
         # there, so the payload gets one of its own. Made out here, in the
@@ -584,14 +635,7 @@ let
             ${systemctl} kill -s KILL "$machine.scope" 2>/dev/null || true
           fi
           ''}
-          # Nothing to do on the path nspawn exits by itself -- it removes all
-          # three -- and everything to do on the paths where it does not, which
-          # is every signal the scope does not survive. The spelling is nspawn's
-          # own: <machine> under /run/systemd/nspawn, with unix-export inside
-          # it, and the mount tunnel under propagate/<machine>.
-          umount "/run/systemd/nspawn/$machine/unix-export" 2>/dev/null || true
-          rm -rf "$root" "/run/systemd/nspawn/$machine" \
-            "/run/systemd/nspawn/propagate/$machine"
+          release_session "$machine" "$root" ${cache}/detach-"$machine"
         }
         trap cleanup EXIT
 
@@ -1142,6 +1186,34 @@ in
             milliseconds gets `ENETUNREACH` instead of waiting -- which is the
             right way round: use it for a launcher that wants to *be* the
             workload's parent, not to close a window.
+          '';
+        };
+
+        detach = lib.mkOption {
+          type = lib.types.lines;
+          default = "";
+          example = ''rm -f "/run/my-gate/$machine.sock"'';
+          description = ''
+            Shell run on the host as root when a session ends, to release
+            whatever `attachBinds` and `attach` made outside it. `$machine` is
+            in scope, exported, and nothing else is -- deliberately, because
+            this runs on two paths and the second has nothing else left: the
+            launcher's cleanup trap runs it for a session that ended, and the
+            next launch of the same container runs it from its sweep for a
+            session whose launcher was SIGKILLed, where the machine name is all
+            that survives.
+
+            Each session records its own teardown, so the sweep runs the one
+            belonging to the session it is releasing -- not its own, which
+            differs whenever several launchers drive one container or a
+            rebuild has changed this snippet since.
+
+            It must therefore be keyed on `$machine` alone, and it must be
+            safe to run for a session whose state is already gone. It runs
+            under `set -euo pipefail` with `launcherInputs` on `PATH`; a
+            non-zero exit is reported and otherwise ignored, because what
+            follows it is flong's own release and a consumer's teardown must
+            not be what stops that.
           '';
         };
 

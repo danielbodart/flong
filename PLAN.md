@@ -67,12 +67,17 @@ the host's, and finds it with an empty route table.
 Done, as `attachWrap`: shell run as root before nspawn, printing a command one
 word per line, spliced between `tini` and the payload.
 
-## 6. A teardown hook
+## ~~6. A teardown hook~~
 
-Called from `cleanup` and from the sweep, so a session's external state is
-released on both the clean and the killed path. Depends on tasks 2 and 3: the
-sweep must be able to tell a dead session from a live one before it is given
-anything to tear down.
+Done, as `detach`. The trap and the sweep now release a session through one
+function, so the clean path and the killed path cannot drift apart again.
+
+The sweep runs inside whichever launch of the container comes next, and
+several launchers can drive one container — so running the *sweeping*
+launcher's teardown would release the wrong state, or none. Each session
+records the store path of its own teardown beside its root, and the sweep runs
+that one, which also covers a superseded generation's. Only `$machine` is in
+scope, because on the sweep's path it is all that is left.
 
 ## 7. `network` — a real network for a private session
 

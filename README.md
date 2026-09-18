@@ -118,6 +118,7 @@ Declare the container with NixOS's own option, then point a flong at it:
 | `attach` | lines | `""` | shell run on the host as root once the session's namespace exists, with it in `$netns`; whatever it installs is in place before any egress |
 | `attachBinds` | lines | `""` | shell printing `SOURCE:DESTINATION` lines, run as root before nspawn: a file or socket bound where the hook chooses, not announced to the payload |
 | `attachWrap` | lines | `""` | shell printing a command, one word per line, that the payload is exec'd through inside the session |
+| `detach` | lines | `""` | shell run on the host as root when a session ends — by its own trap, or by the next launch's sweep if it was killed — with `$machine` in scope |
 | `launcherInputs` `payloadInputs` | packages | `[ ]` | extra `PATH` for `guard`/`workspace` and for `command` |
 | `launcher` | package | *read-only* | the generated launcher; run it as root |
 
@@ -377,6 +378,15 @@ made per session and is released on every path. Bind the specific path and never
 a shared parent: with a whole directory bound, a workload can list and write
 its neighbours' entries.
 
+`detach` releases what the other two made, and it runs on both paths out of a
+session: from the launcher's own trap when a session ends, and from the next
+launch's sweep when its launcher was killed and no trap ran. That second path
+is why only `$machine` is in scope — it is all a killed session leaves — and why
+a teardown must be safe to run for state that is already gone. Each session
+records which teardown is its own, so the sweep runs *that* one, even when the
+launch doing the sweeping is a different launcher over the same container or a
+later generation of this one.
+
 `attachWrap` prints a command, one word per line, that the payload is exec'd
 through — spliced between the session's pid 1 and the payload, which is the
 only place a wrapper can go: `command` is already inside, running as `user`, so
@@ -442,7 +452,8 @@ End such a session with `systemctl stop <machine>.scope` or `machinectl
 terminate <machine>`; `machinectl list` gives you the name.
 
 What a dead session leaves behind — its root, nspawn's `unix-export` mount and
-its mount tunnel — is swept by the next launch of the same container, across
+its mount tunnel, and whatever its `detach` would have released — is swept by
+the next launch of the same container, across
 every prepared root that container has had rather than only the current
 closure's. Live sessions are left alone: a launch has no business terminating
 its neighbours, and liveness is read from the scope and machined rather than

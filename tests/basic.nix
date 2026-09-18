@@ -153,7 +153,7 @@
       container = "netless";
       user = "alice";
       workspace = ''realpath /srv/work'';
-      launcherInputs = [ pkgs.nftables pkgs.netcat ];
+      launcherInputs = [ pkgs.nftables pkgs.netcat pkgs.procps ];
 
       # What the caller asked for, so that FLONG_EXTRA_BINDS has something in
       # it for the hook's binds to be absent from.
@@ -173,6 +173,14 @@
         printf '%s\n' \
           "/run/hook-file-$machine:/run/hook/file" \
           "/run/hook-sock-$machine:/run/hook/sock"
+      '';
+
+      # Releases what attachBinds made, and says so. Keyed on $machine alone,
+      # because on the sweep's path that is all there is.
+      detach = ''
+        pkill -f "hook-sock-$machine" || true
+        rm -f "/run/hook-file-$machine" "/run/hook-sock-$machine"
+        echo "$machine" >> /tmp/detached
       '';
 
       attach = ''
@@ -483,6 +491,39 @@
       with subtest("an attach bind naming ':' is refused, like an extra bind"):
           err = machine.fail("${badAttachBind} 2>&1")
           assert "attach bind names" in err, err
+
+      with subtest("a session's teardown runs when it ends"):
+          machine.succeed("rm -f /tmp/detached")
+          machine.succeed("${hooked} 'true'")
+          name = machine.succeed("cat /tmp/attach-facts").split()[4]
+          assert machine.succeed("cat /tmp/detached").split() == [name]
+          machine.fail(f"test -e /run/hook-file-{name}")
+          machine.fail(f"test -e /run/hook-sock-{name}")
+          machine.fail(f"pgrep -f hook-sock-{name}")
+
+      with subtest("and when its launcher was killed, from the next launch's sweep"):
+          # No trap survives SIGKILL, so the sweep has to -- and it has to run
+          # the dead session's teardown rather than its own: the launch that
+          # sweeps here is `netless`, over the same container, and has none.
+          machine.succeed("rm -f /tmp/detached")
+          machine.succeed("${hooked} 'sleep 300' >/dev/null 2>&1 &")
+          name = machine.wait_until_succeeds(
+              "ls -d /run/flong/netless-*/s-netless-*").strip().split("/s-")[-1]
+          machine.wait_until_succeeds(f"machinectl show {name} >/dev/null 2>&1")
+          machine.wait_until_succeeds(f"test -S /run/hook-sock-{name}")
+          machine.succeed(f"kill -9 {launcher_pid(name)}")
+          machine.succeed(f"systemctl kill -s KILL {name}.scope")
+          machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
+          # Nothing has run it yet, and what it releases is still there.
+          machine.fail("test -e /tmp/detached")
+          machine.succeed(f"test -e /run/hook-file-{name}")
+          machine.succeed(f"pgrep -f hook-sock-{name}")
+
+          machine.succeed("${netless} 'true'")
+          assert machine.succeed("cat /tmp/detached").split() == [name]
+          machine.fail(f"test -e /run/hook-file-{name}")
+          machine.fail(f"pgrep -f hook-sock-{name}")
+          machine.fail(f"ls -d /run/flong/netless-*/s-{name}")
 
       with subtest("a session whose hook refuses does not run"):
           # The payload is `sleep 300`: if the launcher merely gave up, the
