@@ -358,10 +358,16 @@ flong.agent = {
 Whatever `attach` installs is in place before anything gives the namespace
 egress. A `privateNetwork` namespace starts with `lo` up and an empty route
 table, so until egress exists the workload has nowhere to go and nothing to
-race: no handshake, no readiness protocol, no window. flong attaches its own
-network only after `attach` returns. Provision egress of your own *first* — from
+race: no handshake, no window. Provision egress of your own *first* — from
 `guard`, or at the top of the hook — and the property is gone without anything
 failing: measured, 12 connections out of 12 went round the rules.
+
+The payload does wait for the hook, but not for safety. nspawn would start it
+before the hook had finished, and a short payload could then end before the
+hook ran at all — turning a session that succeeded into a launch that failed.
+So everything after the session's pid 1 waits for a marker the launcher creates
+once `attach` is done; a marker in the session's `/run`, which nothing inside
+could create first.
 
 What stops the workload undoing what the hook installed is that the namespace
 is owned by the *initial* user namespace, which the workload is not in: it gets

@@ -62,6 +62,16 @@ contract is in the option description, the README and the comment beside the
 call. The test asserts the hook runs as root, is handed a namespace that is not
 the host's, and finds it with an empty route table.
 
+**Since changed: the payload waits for the hook.** nspawn starts the payload
+while the hook is still running, and a short payload finished first — measured
+as a hook failing with `nsenter: cannot open /proc/<pid>/ns/net`, a payload that
+succeeded reported as a launch that failed, at random. So for a hooked session
+a gate between `tini` and everything else waits for `/run/flong-attached`, which
+the launcher creates through `/proc/<leader>/root` once the hook has run. It is
+not a boundary — the ordering still is, and "no handshake" still holds for
+safety — but it contradicts "no readiness protocol", and a hooked session's
+payload now starts after the hook rather than beside it.
+
 ## ~~5. Let the hook wrap the payload~~
 
 Done, as `attachWrap`: shell run as root before nspawn, printing a command one

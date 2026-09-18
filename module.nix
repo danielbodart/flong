@@ -249,6 +249,36 @@ let
 
       payload = mkPayload name c;
 
+      # A HOOKED SESSION'S PAYLOAD WAITS FOR THE HOOK. nspawn starts the
+      # payload 58-65 ms after systemd-run returns, while `attach` can only
+      # begin once the namespace exists at 26-30 ms, and takes what it takes.
+      # Left to race, a short payload finished first: measured, as a hook
+      # failing with "nsenter: cannot open /proc/<pid>/ns/net" -- turning a
+      # payload that SUCCEEDED into a launch that failed, at random.
+      #
+      # NOT A BOUNDARY. The ordering is that, and holds with or without this:
+      # nothing here decides what the workload can reach, only whether what
+      # the hook installs is there yet when it starts. So it is a marker, not a handshake -- created by the
+      # launcher from the host once everything is attached, in a /run that is
+      # nspawn's own root-owned tmpfs, where nothing in the session could
+      # create it first.
+      #
+      # Between tini and everything else, so `attachWrap`, `command` and the
+      # workload all start after it.
+      gate = pkgs.writeShellApplication {
+        name = "flong-gate";
+        runtimeInputs = [ pkgs.coreutils ];
+        text = ''
+          for ((try = 0; try < 2000; try++)); do
+            [ -e /run/flong-attached ] && exec "$@"
+            sleep 0.005
+          done
+          echo "flong: the session was never attached" >&2
+          exit 1
+        '';
+      };
+      gateCmd = lib.optionalString steered (lib.getExe gate);
+
       # A script of its own, rather than a snippet spliced into the launcher,
       # because it is not always THIS launcher that runs it: the sweep runs
       # inside whichever launch of the container comes next, and several
@@ -859,7 +889,7 @@ let
             --setenv=XDG_RUNTIME_DIR="$runtime_dir" \
             --setenv=FLONG_EXTRA_BINDS="$(joined "$extra_binds")" \
             --setenv=FLONG_EXTRA_BINDS_RO="$(joined "$extra_binds_ro")" \
-            ${pkgs.tini}/bin/tini -g -- \
+            ${pkgs.tini}/bin/tini -g -- ${gateCmd} \
             ''${wrap[@]+"''${wrap[@]}"} \
             ${lib.getExe payload} "$workspace" "$@" <&3 &
         session=$!
@@ -959,6 +989,10 @@ let
         (
           ${c.attach}
         )
+
+        # The payload is waiting on this. Through the leader's own root, since
+        # the /run it names is the session's and not the host's.
+        touch "/proc/$leader/root/run/flong-attached"
         attached=1
         ''}
 
@@ -1141,7 +1175,11 @@ in
             unsteered: the scope is killed, and the launcher exits non-zero.
 
             The leader is polled for, because `systemd-run` returns 26-30 ms
-            before there is a namespace and the payload starts at 58-65 ms.
+            before there is a namespace. The payload -- `attachWrap`, `command`
+            and the workload -- waits until this hook has finished: not for
+            safety, which the ordering gives, but so that a short payload
+            cannot finish before the hook has run and turn a session that
+            succeeded into a launch that failed.
           '';
         };
 
@@ -1198,11 +1236,9 @@ in
             one the workload could have declined to run; this one is between
             the workload and its own pid 1.
 
-            With `attach`'s ordering a wrapper is a convenience rather than a
-            boundary -- a workload that reaches for the network in its first
-            milliseconds gets `ENETUNREACH` instead of waiting -- which is the
-            right way round: use it for a launcher that wants to *be* the
-            workload's parent, not to close a window.
+            It starts after `attach` has finished, like the rest of the
+            payload, so it is not needed to close any window: use it for a
+            launcher that wants to *be* the workload's parent.
           '';
         };
 
