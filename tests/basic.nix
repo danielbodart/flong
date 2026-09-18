@@ -1,7 +1,9 @@
 # Exercises every option that changes what the container sees: the workspace
 # override, a read-write bind, a tmpfs mask over part of that bind, an overlay,
 # the extra binds in both modes, the privilege drop, the NOPASSWD grant, the
-# session cleanup and the sweep that reclaims what a killed session left.
+# root hook and its binds, wrapper and teardown, the network and the ports it
+# does and does not reach, the session cleanup and the sweep that reclaims what
+# a killed session left.
 { lib, ... }:
 
 {
@@ -245,6 +247,36 @@
       command = ''set -- true'';
     };
 
+    # A real network, through pasta, over the same private container -- with a
+    # hook that installs a rule first, because the ordering between the two is
+    # the property under test.
+    flong.networked = {
+      container = "netless";
+      user = "alice";
+      workspace = ''realpath /srv/work'';
+      launcherInputs = [ pkgs.nftables ];
+
+      network = {
+        # 18124 is listening on the host too, and is not named: it is the
+        # "nothing else" half. 19999 is named, and the hook refuses it.
+        hostPorts = [ 18123 19999 ];
+        forwardPorts = [ { hostPort = 18200; containerPort = 18201; } ];
+      };
+
+      attach = ''
+        # How much egress the namespace had while the hook held it. pasta is
+        # attached after this returns, so the answer must be none.
+        nsenter --net="$netns" cat /proc/net/route | tail -n +2 | wc -l \
+          > /tmp/networked-routes-at-hook
+        nsenter --net="$netns" nft \
+          'add table inet flong
+           add chain inet flong out { type filter hook output priority 0; policy accept; }
+           add rule inet flong out tcp dport 19999 reject with tcp reset'
+      '';
+
+      command = ''set -- bash -c "$1"'';
+    };
+
     # A hook that refuses. The payload would outlive the launcher if nothing
     # killed it, which is exactly what must not happen to a session whose hook
     # never finished.
@@ -380,6 +412,7 @@
       hooked = lib.getExe nodes.machine.flong.hooked.launcher;
       badHook = lib.getExe nodes.machine.flong.badhook.launcher;
       badAttachBind = lib.getExe nodes.machine.flong.badattachbind.launcher;
+      networked = lib.getExe nodes.machine.flong.networked.launcher;
       # The container's own closure, for the one nspawn this file runs itself:
       # the prepared root has no PATH of its own until nspawn is given one.
       closure = nodes.machine.containers.demo.path;
@@ -478,6 +511,11 @@
           assert "eth0" in out, out
           out = machine.succeed("${netless} 'ls /sys/class/net'")
           assert out.split() == ["lo"], out
+          # And no route out of it, in either family: this, not the missing
+          # interface, is why a workload has nowhere to go until something
+          # gives it egress -- which is what a hook's ordering rests on.
+          out = machine.succeed("${netless} 'tail -n +2 /proc/net/route | wc -l; cat /proc/net/ipv6_route | grep -vc \" lo$\" || true'")
+          assert out.split() == ["0", "0"], out
 
       with subtest("the root hook runs as root, in the session's namespace, before any egress"):
           # The hook is the only moment a session's namespace can be steered
@@ -573,6 +611,111 @@
           machine.fail(f"test -e /run/hook-file-{name}")
           machine.fail(f"pgrep -f hook-sock-{name}")
           machine.fail(f"ls -d /run/flong/netless-*/s-{name}")
+
+      # Listeners on the host's loopback, each answering with its own port so a
+      # reply cannot be mistaken for another's. A banner and not a bare connect:
+      # pasta accepts on its side before it knows whether the far side will, so
+      # a connection that opens proves nothing.
+      for port in (18123, 18124, 19999):
+          machine.succeed(
+              f"systemd-run --unit=listen-{port} /run/current-system/sw/bin/bash -c "
+              f"'while true; do echo host-{port} | /run/current-system/sw/bin/nc -N -l 127.0.0.1 {port}; done'")
+          machine.wait_until_succeeds(f"nc -d -w 2 127.0.0.1 {port} | grep -q host-{port}")
+
+      def reach(target):
+          return f"nc -d -w 3 {target} </dev/null 2>/dev/null || true"
+
+      with subtest("rules a hook installs are in place before any egress exists"):
+          # The hook saw no route at all, and pasta added some afterwards: the
+          # rule was installed into a namespace with nowhere to go. And it
+          # holds once there is somewhere -- 19999 is a host port the session
+          # was given, and the hook's rule refuses it.
+          out = machine.succeed("${networked} '"
+              "tail -n +2 /proc/net/route | wc -l; "
+              + reach("127.0.0.1 19999") + "'")
+          assert machine.succeed("cat /tmp/networked-routes-at-hook").strip() == "0"
+          routes, *rest = out.split()
+          assert int(routes) > 0, out
+          assert "host-19999" not in out, out
+
+      with subtest("hostPorts reach the host's loopback, and nothing else on it does"):
+          out = machine.succeed("${networked} '"
+              + reach("127.0.0.1 18123") + "; echo ---; "
+              + reach("127.0.0.1 18124") + "; echo ---; "
+              # --no-map-gw: the gateway address is not a way to the host's
+              # loopback either, for a named port or an unnamed one.
+              + "gw=$(ip -4 route show default | awk \"{ print \\$3 }\"); "
+              + reach("$gw 18123") + "; echo ---; "
+              + reach("$gw 18124") + "'")
+          named, unnamed, gw_named, gw_unnamed = out.split("---")
+          assert "host-18123" in named, out
+          assert "host-18124" not in unnamed, out
+          assert "host-18123" not in gw_named, out
+          assert "host-18124" not in gw_unnamed, out
+
+      with subtest("a forwarded port reaches the session from the host"):
+          # And a second listener on a port that is not forwarded, left up past
+          # the one-second scan with which pasta's default `auto` would have
+          # forwarded it -- so that "nothing else" is a statement about -t
+          # none, and not about there being nothing to find.
+          machine.succeed("${networked} '"
+              "echo not-forwarded | timeout 6 nc -N -l 18202 & "
+              "echo from-the-session | nc -N -l 18201; wait' >/dev/null 2>&1 &")
+          machine.wait_until_succeeds("nc -d -w 3 127.0.0.1 18200 | grep -q from-the-session")
+          out = machine.succeed("sleep 2; nc -d -w 2 127.0.0.1 18202 </dev/null 2>&1 || true")
+          assert "not-forwarded" not in out, out
+          machine.wait_until_succeeds("test -z \"$(ls -A /run/flong/netns)\"")
+
+          # One host port, one session: a second session asking for the same
+          # one cannot bind it, and is ended rather than run without it.
+          machine.succeed("${networked} 'sleep 300' >/dev/null 2>&1 &")
+          first = machine.wait_until_succeeds(
+              "ls /run/flong/netns | grep -v pid").split()
+          assert len(first) == 1, first
+          machine.fail("${networked} 'echo ran'")
+          machine.succeed(f"systemctl kill -s KILL {first[0]}.scope")
+          machine.wait_until_fails(f"machinectl show {first[0]} >/dev/null 2>&1")
+          machine.wait_until_succeeds("test -z \"$(ls -A /run/flong/netns)\"")
+
+      # By command line, not by name: nixpkgs' pasta execs passt.avx2 where the
+      # CPU has it, and `pgrep pasta` then matches nothing whether pasta is
+      # there or not. The bracket keeps the pattern from matching the shell
+      # that runs pgrep, whose own command line holds it too.
+      def pasta_for(name=""):
+          return f"pgrep -f '[/]run/flong/netns/{name}'"
+
+      with subtest("a clean exit releases the pin and pasta"):
+          machine.succeed("${networked} 'sleep 1' >/dev/null 2>&1 &")
+          name = machine.wait_until_succeeds(
+              "ls /run/flong/netns | grep -v pid").strip()
+          machine.wait_until_succeeds(pasta_for(name + " "))
+          machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
+          machine.wait_until_succeeds("test -z \"$(ls -A /run/flong/netns)\"")
+          machine.wait_until_fails(pasta_for())
+
+      with subtest("a killed session's pin and pasta are reaped by the next launch"):
+          # The leak this has to catch: the pin keeps a dead session's
+          # namespace alive, and pasta alive with it, for as long as the host
+          # runs -- and neither is inside the scope that was killed.
+          machine.succeed("${networked} 'sleep 300' >/dev/null 2>&1 &")
+          name = machine.wait_until_succeeds(
+              "ls /run/flong/netns | grep -v pid").strip()
+          machine.wait_until_succeeds(f"test -s /run/flong/netns/{name}.pid")
+          machine.succeed(f"kill -9 {launcher_pid(name)}")
+          machine.succeed(f"systemctl kill -s KILL {name}.scope")
+          machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
+          machine.succeed(f"mountpoint -q /run/flong/netns/{name}")
+          machine.succeed(pasta_for(name + " "))
+
+          # An unrelated launch over the same container, with no network of
+          # its own, is where the sweep runs.
+          machine.succeed("${netless} 'true'")
+          machine.fail(f"test -e /run/flong/netns/{name}")
+          machine.fail(f"test -e /run/flong/netns/{name}.pid")
+          machine.wait_until_fails(pasta_for())
+
+      for port in (18123, 18124, 19999):
+          machine.succeed(f"systemctl stop listen-{port}")
 
       with subtest("a session whose hook refuses does not run"):
           # The payload is `sleep 300`: if the launcher merely gave up, the

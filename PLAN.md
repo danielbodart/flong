@@ -65,9 +65,10 @@ the host's, and finds it with an empty route table.
 **Since changed: the payload waits for the hook.** nspawn starts the payload
 while the hook is still running, and a short payload finished first — measured
 as a hook failing with `nsenter: cannot open /proc/<pid>/ns/net`, a payload that
-succeeded reported as a launch that failed, at random. So for a hooked session
-a gate between `tini` and everything else waits for `/run/flong-attached`, which
-the launcher creates through `/proc/<leader>/root` once the hook has run. It is
+succeeded reported as a launch that failed, at random. So for a session with a
+hook or a `network`, a gate between `tini` and everything else waits for
+`/run/flong-attached`, which the launcher creates through `/proc/<leader>/root`
+once the hook has run and pasta is up. It is
 not a boundary — the ordering still is, and "no handshake" still holds for
 safety — but it contradicts "no readiness protocol", and a hooked session's
 payload now starts after the hook rather than beside it.
@@ -89,66 +90,38 @@ records the store path of its own teardown beside its root, and the sweep runs
 that one, which also covers a superseded generation's. Only `$machine` is in
 scope, because on the sweep's path it is all that is left.
 
-## 7. `network` — a real network for a private session
+## ~~7. `network` — a real network for a private session~~
 
-`flong.<name>.network = { … }`, present or absent; there is no `enable` flag.
-It requires `containers.<name>.privateNetwork = true`, and it is implemented
-with [pasta](https://passt.top).
+Done, as planned: pasta through a bind-mounted pin with `--runas 0`,
+`--config-net`, `--no-map-gw` and an explicit `none` for every port class not
+listed; `forwardPorts` shaped like the declaration's, `hostPorts` going out as
+TCP and UDP both. It is attached after `attach` returns. The pin is released
+with `umount -l` and `rm` and pasta is signalled too — only once its command
+line shows it is that session's pasta, because on the sweep's path the pid file
+can be older than the process now holding its number. The release is not
+conditional on the *sweeping* launcher having a network, since the session it
+releases may be another launcher's. The veth, bridge and port refusal now says
+why: static per container, many sessions per declaration.
 
-**Why pasta and not a veth pair.** flong runs many concurrent sessions from one
-container declaration, and `hostAddress`, `localAddress` and `forwardPorts` are
-static per container: two sessions would claim the same address, and the host
-cannot route one address to two interfaces. A veth would therefore need flong to
-allocate addresses from a pool and keep that allocation across crashes, plus
-`ip_forward`, NAT, and firewall rules to stop the sandbox reaching services the
-host binds on `0.0.0.0`. pasta needs none of it: no host-side interface, no host
-configuration, no addressing, and the sandbox gets no packet-level access at all,
-so spoofing is not expressible. It is Podman's default network mode and the
-rootless Docker backend.
+The payload gate under task 4 covers a network too, and needs to: before it, a
+whole payload ran against an empty route table and exited, and the launcher
+then failed to pin a namespace that had already gone. Besides that, three things
+turned up that the plan did not have:
 
-The declaration's veth, bridge and port options stay refused, and the assertion
-should now say why — concurrency, not "not built yet".
-
-Options, in the declaration's own vocabulary:
-
-- `forwardPorts` — host to sandbox, shaped exactly like
-  `containers.<name>.forwardPorts`: `{ protocol; hostPort; containerPort; }`.
-- `hostPorts` — the reverse: ports on the host's loopback the sandbox may reach.
-  The declaration has no equivalent, and this is what a session needs to reach a
-  database the host is running.
-
-Everything else is a safe default, not an option:
-
-- `--no-map-gw`. Without it the host's loopback is reachable through the gateway
-  address — measured: a host listener on `127.0.0.1:18123` answered from inside
-  the sandbox even with every port list set to `none`.
-- An explicit `none` for every port class, because `-t`, `-u`, `-T` and `-U` all
-  default to `auto`, and `auto` forwards every bound port on the host.
-- `--config-net`, so pasta configures the namespace itself.
-
-**Attaching.** pasta cannot attach by pid as root: it calls `isolate_user()`,
-which drops to `nobody`, before `pasta_open_ns()` calls `setns()`, and it never
-sets `PR_SET_KEEPCAPS`. All three by-pid forms fail with `Permission denied` —
-measured, in flong's own `--user=` shape. The working invocation is a
-bind-mounted namespace pin plus `--runas 0`:
-
-```
-pasta --config-net --netns <pin> --runas 0 -t none -u none -T none -U none --no-map-gw
-```
-
-**Releasing.** The pin must be removed with `umount -l` and then `rm`. A plain
-`umount` is `target is busy`, rc=32, for as long as pasta lives — measured both
-with the container alive and after it had gone — so flong's existing
-`umount … 2>/dev/null || true` idiom would silently leak it, and a leaked pin
-keeps the dead session's whole namespace alive indefinitely. After `umount -l`
-and `rm`, pasta reaps itself in about 60 ms: *"Namespace … is gone, exiting"*.
-
-Note what this costs, honestly: a session with a network has a pin and a process
-to clean up. A session without one has neither — no pin, no extra process,
-everything dies with the namespace. That, and not "nothing is pinned", is the
-shape to document.
-
-`passt` joins `runtimeInputs`, along with `iproute2` for the pin.
+- **`iproute2` is not needed.** The pin is `mount --bind` and `umount -l`, both
+  util-linux, which the launcher already carries; only `passt` joined
+  `runtimeInputs`.
+- **A host port in `forwardPorts` is one session's at a time.** The second
+  concurrent session's pasta cannot bind it (*"Listen failed for HOST TCP port
+  \*/18200: Address already in use"*), so that launch fails and is ended rather
+  than run without it — asserted. Loud rather than wrong, but the same
+  concurrency limit the declaration's own `forwardPorts` is refused for.
+- **Nothing arranges DNS.** With `--private-network`, nspawn's
+  `--resolv-conf=auto` leaves the root's file alone, and prepare deletes it. A
+  resolver is a service on the host's loopback — reaching it is a channel out
+  that a steering hook would want a say in — so how a networked session
+  resolves names (pasta's `--dns-forward`, a `hostPorts` entry, or the hook's
+  business) is left as a decision rather than defaulted.
 
 ## ~~8. Per-session binds, source ≠ destination~~
 
@@ -238,20 +211,25 @@ want a sentence each in the README or nobody will pick correctly.
 
 ## Tests
 
-The VM test grows a network section. Each of these is a property the tasks above
-are supposed to deliver, and none of them is asserted today:
+The network section is in, each property asserted rather than assumed:
 
-- A session with no `network` has only `lo`, and an empty route table.
-- With a root hook installing a ruleset, the workload cannot list or change it —
-  including after `unshare -U`.
-- Rules land before any egress exists: with egress deliberately delayed, every
-  attempt before it fails, and every attempt after it is steered.
-- `network` reaches a host port named in `hostPorts` and nothing else on the
-  host's loopback.
-- A port in `forwardPorts` is reachable from the host; nothing else is.
-- Clean exit releases the pin and pasta.
-- A bind added by the hook exists inside and is not named in
-  `FLONG_EXTRA_BINDS`.
+- A session with no `network` has only `lo`, and no route in either family.
+- A hook runs as root, is handed a namespace that is not the host's, and finds
+  no route in it; its binds are inside and absent from `FLONG_EXTRA_BINDS`.
+- The workload cannot list or flush a hook's ruleset, add a link or add a route
+  — including inside `unshare -Ur`, where it holds `CAP_NET_ADMIN` again — and
+  the rule is intact from outside afterwards.
+- Rules land before any egress: the hook sees no route, pasta adds some after,
+  and the hook's rule then refuses a port the session was given.
+- `hostPorts` reaches the named host port, and not an unnamed one, directly or
+  through the gateway address.
+- A `forwardPorts` entry reaches the session from the host; a port the session
+  listens on past pasta's one-second `auto` scan does not; a second concurrent
+  session asking for the same host port is refused.
+- A clean exit and a SIGKILLed launcher both release the pin and pasta — the
+  second through a sweep by a different launcher over the same container.
+- `detach` runs on both paths, the sweep running the dead session's own.
+- The capability and privilege flags are refused in `extraFlags` — by a new
+  evaluation-only `assertions` check, along with the network assertions.
 
-The suite runs in about 1m11s with KVM and 2m14s under TCG, which is what CI
-has. That is affordable; keep it that way.
+The suite runs in about 50 s of test script with KVM. Keep it affordable.

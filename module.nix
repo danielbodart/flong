@@ -44,11 +44,11 @@ let
         (k: "--property=${lib.escapeShellArg "${k}=${c.properties.${k}}"}")
         (lib.attrNames c.properties);
 
-      # The two kinds of network isolation that need nothing configured inside
-      # the container, which is the only kind a session can have: nspawn drops
-      # to `user` before pid 1, so there is no privileged moment in there to
-      # bring an interface up or address it. A veth, a bridge, a macvlan or a
-      # moved interface needs exactly that, and is refused at evaluation.
+      # The kinds of network isolation that need nothing configured inside the
+      # container, which is the only kind a session can have: nspawn drops to
+      # `user` before pid 1, so there is no privileged moment in there to
+      # bring an interface up or address it. A real network is pasta, attached
+      # from the host once the namespace exists -- see `network`.
       networkFlags =
         lib.optionalString declared.privateNetwork "--private-network "
         + lib.optionalString (declared.networkNamespace != null)
@@ -67,9 +67,31 @@ let
       # change a route, an address or a link, write /proc/sys/net/*, or move an
       # interface into a namespace it has just created. Measured, all of it.
       # The flags are here so that a second failure is needed, not a first.
-      steered = c.attach != "";
+      steered = c.attach != "" || c.network != null;
       capabilityFlags = lib.optionalString steered
         "--drop-capability=CAP_NET_ADMIN --no-new-privileges=yes";
+
+      # Where a session's namespace is pinned for pasta. Beside the caches and
+      # not in one, because a cache is swept whole and this is a mount.
+      pinDir = "/run/flong/netns";
+
+      # EVERY PORT CLASS IS SPELT OUT, "none" included, because -t, -u, -T and
+      # -U all default to `auto` -- and `auto` forwards every port bound on the
+      # other side, which for -T means everything listening on the host's
+      # loopback. A session asks for what it gets, port by port.
+      #
+      # hostPorts go out as TCP and UDP both: a port on the host's loopback is
+      # the thing named, and a resolver there is as likely a reason to name one
+      # as a database.
+      pastaPorts = net:
+        let
+          spec = ports: if ports == [ ] then "none" else lib.concatStringsSep "," ports;
+          forwards = protocol: map
+            (p: "${toString p.hostPort}:${toString (if p.containerPort == null then p.hostPort else p.containerPort)}")
+            (lib.filter (p: p.protocol == protocol) net.forwardPorts);
+          host = map toString net.hostPorts;
+        in
+        "-t ${spec (forwards "tcp")} -u ${spec (forwards "udp")} -T ${spec host} -U ${spec host}";
 
       overlayDir = p: ".overlay/" + lib.replaceStrings [ "/" ] [ "_" ] (lib.removePrefix "/" p);
 
@@ -250,15 +272,18 @@ let
       payload = mkPayload name c;
 
       # A HOOKED SESSION'S PAYLOAD WAITS FOR THE HOOK. nspawn starts the
-      # payload 58-65 ms after systemd-run returns, while `attach` can only
-      # begin once the namespace exists at 26-30 ms, and takes what it takes.
-      # Left to race, a short payload finished first: measured, as a hook
-      # failing with "nsenter: cannot open /proc/<pid>/ns/net" -- turning a
-      # payload that SUCCEEDED into a launch that failed, at random.
+      # payload 58-65 ms after systemd-run returns, while `attach` and pasta
+      # can only begin once the namespace exists at 26-30 ms, and take what
+      # they take. Left to race, a short payload finished first: measured,
+      # once as a whole payload run against an empty route table with the
+      # launcher then failing to pin a namespace that had gone, and once as a
+      # hook failing with "nsenter: cannot open /proc/<pid>/ns/net" -- turning
+      # a payload that SUCCEEDED into a launch that failed, at random.
       #
       # NOT A BOUNDARY. The ordering is that, and holds with or without this:
       # nothing here decides what the workload can reach, only whether what
-      # the hook installs is there yet when it starts. So it is a marker, not a handshake -- created by the
+      # the hook installs and the network it was promised are there yet when
+      # it starts. So it is a marker, not a handshake -- created by the
       # launcher from the host once everything is attached, in a /run that is
       # nspawn's own root-owned tmpfs, where nothing in the session could
       # create it first.
@@ -297,7 +322,9 @@ let
     in
     pkgs.writeShellApplication {
       inherit name;
-      runtimeInputs = [ pkgs.git pkgs.coreutils pkgs.util-linux pkgs.e2fsprogs ] ++ c.launcherInputs;
+      runtimeInputs = [ pkgs.git pkgs.coreutils pkgs.util-linux pkgs.e2fsprogs ]
+        ++ lib.optional (c.network != null) pkgs.passt
+        ++ c.launcherInputs;
       text = ''
         ${identityFrom}
         # WORKSPACE FIRST, THEN GUARD.
@@ -498,7 +525,7 @@ let
         # directory, where an abort here costs the caller their session -- or,
         # in the trap, the payload's exit status.
         release_session() {
-          local machine=$1 root=$2 record=$3 detach
+          local machine=$1 root=$2 record=$3 detach pasta_pid
           # The consumer's teardown first, while nothing of flong's has gone
           # yet. Only a store path is run: the record is written by root into a
           # root-owned directory, and it is still not the place to take a
@@ -516,6 +543,37 @@ let
             fi
             rm -f "$record"
           fi
+          # The namespace pin and the pasta behind it, whichever launcher made
+          # them -- so this is not conditional on THIS launcher having a
+          # network, since the session being released may not be its own.
+          #
+          # umount -l, THEN rm, and nothing less. A plain umount is "target is
+          # busy" for as long as pasta lives -- measured, with the container
+          # alive and after it had gone -- so the `umount ... || true` used
+          # everywhere else here would leak it without a word, and a leaked pin
+          # keeps a dead session's whole namespace alive for as long as the
+          # host runs. Removing the file is what pasta watches for: it exits
+          # about 60 ms later, "Namespace ... is gone".
+          #
+          # Signalled as well, so the release does not rest on a watch -- but
+          # only once the pid has been shown to be that pasta, because on the
+          # sweep's path the file may be far older than the process that
+          # holds its number now.
+          if [ -e "${pinDir}/$machine" ]; then
+            umount -l "${pinDir}/$machine" 2>/dev/null || true
+            rm -f "${pinDir}/$machine"
+          fi
+          if [ -e "${pinDir}/$machine.pid" ]; then
+            pasta_pid=$(cat "${pinDir}/$machine.pid" 2>/dev/null) || pasta_pid=""
+            # A whole argument, not a substring: netless-100-5 is a prefix of
+            # netless-100-55.
+            if [ -n "$pasta_pid" ] && tr '\0' '\n' 2>/dev/null < "/proc/$pasta_pid/cmdline" \
+                | grep -qxF "${pinDir}/$machine"; then
+              kill "$pasta_pid" 2>/dev/null || true
+            fi
+            rm -f "${pinDir}/$machine.pid"
+          fi
+
           # /run/systemd/nspawn/<machine>/unix-export, which is where nspawn
           # puts it: runtime_directory_make(scope, "systemd/nspawn", machine)
           # and then "unix-export" joined inside. Looking for the pre-257
@@ -656,7 +714,7 @@ let
           mkdir -p "$root$runtime_dir"
         fi
 
-        ${lib.optionalString (c.attach != "") ''
+        ${lib.optionalString steered ''
         # Set before the trap is armed rather than beside the launch, because
         # the trap runs for every exit after this line and reads it.
         attached=0
@@ -668,16 +726,19 @@ let
           if [ -t 1 ]; then
             printf '\033]666;vte.container.\033\134'
           fi
-          ${lib.optionalString (c.attach != "") ''
+          ${lib.optionalString steered ''
           # A SESSION WHOSE HOOK NEVER FINISHED MUST NOT BE LEFT RUNNING.
           # `attach` is the whole security property, and it is an ordering: what
           # it installs is in place before anything gives the namespace egress.
           # A session that gets past it without it -- a hook that exited
           # non-zero, a leader that never appeared, a launcher killed in
           # between -- is a session with nothing installed and nothing left to
-          # install it, so it goes. Once the hook has run this is 1 and the
-          # scope is left alone, which is what keeps SIGTERM on a launcher
-          # meaning what it has always meant here: the session survives it.
+          # install it, so it goes; and so is one whose network was asked for
+          # and not attached, which is broken rather than unsafe but has no
+          # business carrying on as if it worked. Once both have run this is 1
+          # and the scope is left alone, which is what keeps SIGTERM on a
+          # launcher meaning what it has always meant here: the session
+          # survives it.
           if [ "$attached" = 0 ]; then
             ${systemctl} kill -s KILL "$machine.scope" 2>/dev/null || true
           fi
@@ -894,7 +955,7 @@ let
             ${lib.getExe payload} "$workspace" "$@" <&3 &
         session=$!
 
-        ${lib.optionalString (c.attach != "") ''
+        ${lib.optionalString steered ''
         # THE LEADER IS POLLED FOR, NOT ASSUMED. systemd-run returns as soon as
         # the scope is started, which is before nspawn has unshared anything:
         # measured, a leader appears 26-30 ms after it returns, against a
@@ -981,7 +1042,7 @@ let
         # nothing to race. Everything flong attaches itself -- pasta, for one --
         # is attached after this returns, and a consumer that provisions egress
         # of its own before installing anything has given the property away.
-        #
+        ${lib.optionalString (c.attach != "") ''
         # A subshell, so that the hook's own `exit` is the hook's verdict and
         # not the launcher's: `exit 0` ends the hook rather than skipping
         # straight past the wait below, and anything non-zero lands in the trap
@@ -989,6 +1050,35 @@ let
         (
           ${c.attach}
         )
+        ''}
+        ${lib.optionalString (c.network != null) ''
+        # PASTA, AND ONLY NOW. This is the egress, so it is attached after the
+        # hook and never before: until this line the namespace has `lo` and an
+        # empty route table, and whatever the hook installed is in place before
+        # there is anywhere for the workload to go.
+        #
+        # Through a pin, because pasta cannot attach by pid as root: it drops
+        # to `nobody` in isolate_user() before pasta_open_ns() calls setns(),
+        # and never sets PR_SET_KEEPCAPS, so every by-pid form fails with
+        # "Permission denied" -- measured, in this invocation shape. A
+        # bind-mounted namespace plus --runas 0 is the form that works, and a
+        # pin is also what pasta watches: when it goes, pasta goes.
+        #
+        # --no-map-gw, because otherwise the gateway address IS the host's
+        # loopback -- measured: a listener on 127.0.0.1:18123 answered from
+        # inside with every port list set to none. --config-net, so pasta
+        # addresses and routes the namespace itself; nothing inside could.
+        #
+        # pasta forks once it is ready and its parent exits 0, having written
+        # the daemon's pid -- so this returns when there is a network, and
+        # leaves a pid the release can check before it signals.
+        pin=${pinDir}/$machine
+        mkdir -p ${pinDir}
+        touch "$pin"
+        mount --bind "$netns" "$pin"
+        pasta --quiet --config-net --netns "$pin" --runas 0 --pid "$pin.pid" \
+          ${pastaPorts c.network} --no-map-gw
+        ''}
 
         # The payload is waiting on this. Through the leader's own root, since
         # the /run it names is the session's and not the host's.
@@ -1176,10 +1266,10 @@ in
 
             The leader is polled for, because `systemd-run` returns 26-30 ms
             before there is a namespace. The payload -- `attachWrap`, `command`
-            and the workload -- waits until this hook has finished: not for
-            safety, which the ordering gives, but so that a short payload
-            cannot finish before the hook has run and turn a session that
-            succeeded into a launch that failed.
+            and the workload -- waits until this hook, and any `network`, has
+            finished: not for safety, which the ordering gives, but so that a
+            short payload cannot finish before the hook has run and turn a
+            session that succeeded into a launch that failed.
           '';
         };
 
@@ -1268,6 +1358,88 @@ in
             follows it is flong's own release and a consumer's teardown must
             not be what stops that.
           '';
+        };
+
+        network = lib.mkOption {
+          default = null;
+          example = lib.literalExpression ''
+            {
+              hostPorts = [ 5432 ];
+              forwardPorts = [ { hostPort = 8080; containerPort = 80; } ];
+            }
+          '';
+          description = ''
+            A real network for a `privateNetwork` session, provided by
+            [pasta](https://passt.top): present or absent, with no `enable` --
+            `network = { };` is a session that can reach the outside world and
+            no port on the host. Requires
+            `containers.<name>.privateNetwork = true`.
+
+            pasta rather than a veth, because flong runs many concurrent
+            sessions from one declaration: a veth needs an address per session,
+            forwarding, NAT and host firewall rules, and gives the sandbox
+            packet-level access to spoof with. pasta needs no host interface
+            and no host configuration, and hands the sandbox sockets rather than
+            packets.
+
+            Attached after `attach` returns, never before, which is what makes
+            the hook's ordering hold. A session with a network also has a
+            namespace pin under /run/flong/netns and a pasta process outside
+            its scope, both released by the cleanup trap and, for a killed
+            session, by the next launch's sweep. A session without one has
+            neither.
+
+            Always passed, and not options: `--no-map-gw`, because otherwise
+            the gateway address reaches the host's loopback; an explicit
+            `none` for every port class not listed here, because each defaults
+            to `auto`, which forwards every bound port on the other side; and
+            `--config-net`. A hooked session's capability flags apply here too.
+          '';
+          type = lib.types.nullOr (lib.types.submodule {
+            options = {
+              forwardPorts = lib.mkOption {
+                type = lib.types.listOf (lib.types.submodule {
+                  options = {
+                    protocol = lib.mkOption {
+                      type = lib.types.enum [ "tcp" "udp" ];
+                      default = "tcp";
+                      description = "The protocol forwarded.";
+                    };
+                    hostPort = lib.mkOption {
+                      type = lib.types.port;
+                      description = "Port on the host, on every address.";
+                    };
+                    containerPort = lib.mkOption {
+                      type = lib.types.nullOr lib.types.port;
+                      default = null;
+                      description = "Port in the session; `hostPort` if null.";
+                    };
+                  };
+                });
+                default = [ ];
+                description = ''
+                  Ports on the host forwarded into the session, shaped exactly
+                  like `containers.<name>.forwardPorts`, bound on every host
+                  address -- the host's firewall still decides who reaches them.
+
+                  A host port is one session's at a time. A second concurrent
+                  session asking for the same one fails to attach its network,
+                  and is ended rather than left running without it.
+                '';
+              };
+              hostPorts = lib.mkOption {
+                type = lib.types.listOf lib.types.port;
+                default = [ ];
+                example = [ 5432 ];
+                description = ''
+                  Ports on the host's loopback the session may reach, at the
+                  same port on its own loopback: the database the host is
+                  running, say. TCP and UDP both. Nothing else on the host's
+                  loopback is reachable, the gateway address included.
+                '';
+              };
+            };
+          });
         };
 
         tmpfs = lib.mkOption {
@@ -1362,9 +1534,6 @@ in
       (n: c:
         let
           declared = config.containers.${c.container} or null;
-          # Only meaningful with a network namespace to configure, and each one
-          # needs an interface brought up and addressed from inside the
-          # container -- which a session has no privileged moment to do.
           # Each extraFlags entry is spliced into EXTRA_NSPAWN_FLAGS and
           # word-split, so one entry can carry several flags, and a flag and its
           # value can be two words.
@@ -1376,6 +1545,9 @@ in
             (w: w == "-U" || lib.any (flag: w == flag || lib.hasPrefix "${flag}=" w)
               [ "--capability" "--ambient-capability" "--private-users" ])
             extraWords;
+          # Each is fixed per declaration, and a declaration here is many
+          # concurrent sessions: two of them would claim one address or one
+          # host port. `network` is the per-session answer.
           needsInside = [
             (declared.hostBridge != null)
             (declared.forwardPorts != [ ])
@@ -1454,21 +1626,30 @@ in
             assertion = ! lib.any (x: x) needsInside;
             message = ''
               flong.${n} drives containers.${c.container}, which declares a
-              veth, a bridge, a macvlan, a moved interface or a forwarded port.
-              flong does not build those yet. It refuses them rather than
-              dropping them, because a declaration that quietly does not happen
-              is worse than a build that stops.
+              veth, a bridge, a macvlan, a moved interface, an address or a
+              forwarded port. flong refuses them rather than dropping them,
+              because a declaration that quietly does not happen is worse than
+              a build that stops.
 
-              Not impossible, only unwritten, and by a different mechanism than
-              the container module uses: each of these leaves an interface for
-              the container's own init to bring up, and a session has none --
-              but the launcher is root on the host, and a namespace can be
-              built, addressed and routed out there before nspawn is called.
-              See PLAN.md.
+              They are refused because each is static per container, and flong
+              runs many concurrent sessions from one declaration: two sessions
+              would claim the same address, the same interface or the same host
+              port, and the host cannot route one address to two of them.
 
-              What works today is `privateNetwork` (loopback and nothing else)
+              What a session can have is `privateNetwork` alone (loopback and
+              nothing else), `privateNetwork` with flong.${n}.network (a real
+              network through pasta, with its own forwardPorts and hostPorts),
               or `networkNamespace`, pointed at a namespace something else
               already built.
+            '';
+          }
+          {
+            assertion = c.network == null || declared.privateNetwork;
+            message = ''
+              flong.${n}.network gives a session a network of its own, and
+              containers.${c.container} does not have privateNetwork = true --
+              so the session would share the host's namespace, and pasta would
+              be pointed at the host's own network. Set privateNetwork = true.
             '';
           }
         ]

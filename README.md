@@ -118,6 +118,7 @@ Declare the container with NixOS's own option, then point a flong at it:
 | `attach` | lines | `""` | shell run on the host as root once the session's namespace exists, with it in `$netns`; whatever it installs is in place before any egress |
 | `attachBinds` | lines | `""` | shell printing `SOURCE:DESTINATION` lines, run as root before nspawn: a file or socket bound where the hook chooses, not announced to the payload |
 | `attachWrap` | lines | `""` | shell printing a command, one word per line, that the payload is exec'd through inside the session |
+| `network` | `{ forwardPorts; hostPorts; }` or `null` | `null` | a real network for a `privateNetwork` session, through pasta; present or absent, no `enable` |
 | `detach` | lines | `""` | shell run on the host as root when a session ends — by its own trap, or by the next launch's sweep if it was killed — with `$machine` in scope |
 | `launcherInputs` `payloadInputs` | packages | `[ ]` | extra `PATH` for `guard`/`workspace` and for `command` |
 | `launcher` | package | *read-only* | the generated launcher; run it as root |
@@ -147,9 +148,9 @@ flong drives the declaration rather than reimplementing it, so most of
 that needed the container's own init: nspawn drops to `user` before pid 1, so
 there is no privileged moment inside a session to bring an interface up or grant
 a capability to. Some of that is structural — nothing in a session will ever
-hold a capability — and some of it is only unwritten, because the launcher is
-root on the host and can build out there what a container's init would have
-built inside.
+hold a capability — and some of it describes one container's network, where one
+declaration here is many concurrent sessions. What a session needs of either,
+the launcher builds on the host instead: `attach` and `network` below.
 
 | declared | under flong |
 |---|---|
@@ -158,30 +159,30 @@ built inside.
 | `extraFlags` | passed to nspawn the same way, except `--capability`, `--ambient-capability`, `--private-users` and `-U`, which are **refused at evaluation** |
 | `allowedDevices` | `DeviceAllow=` on the session's scope, behind the same `DevicePolicy=closed` the unit uses |
 | `tmpfs` | merged with `flong.<name>.tmpfs`, and given the payload's ownership |
-| `privateNetwork` | a network namespace holding loopback and nothing else |
+| `privateNetwork` | a network namespace holding loopback and nothing else — or, with `flong.<name>.network`, a real network through pasta |
 | `networkNamespace` | the session joins that namespace |
 | `ephemeral` `autoStart` `restartIfChanged` `timeoutStartSec` | inert — they describe the `container@` unit, which is never started. `autoStart = true` warns, because it boots the container you were avoiding |
 | `flake` `privateUsers` `additionalCapabilities` `enableTun` | **refused at evaluation** — none of these can work here |
-| `hostBridge` `hostAddress*` `localAddress*` `localMacAddress` `forwardPorts` `interfaces` `macvlans` `extraVeths` | **refused at evaluation** — *not built yet*, see `PLAN.md` |
+| `hostBridge` `hostAddress*` `localAddress*` `localMacAddress` `forwardPorts` `interfaces` `macvlans` `extraVeths` | **refused at evaluation** — each is static per container, and one declaration here is many concurrent sessions; `flong.<name>.network` is the per-session answer |
 
 A refusal is not the same as an omission. Every one of these declares *less*
 than the default — a uid namespace, a smaller capability set, a network of its
 own — so a container that silently is not the one you declared is worse than one
 that will not build. The two groups differ in why: the first cannot work here at
-all, while the second is simply not written, and the assertion says which.
+all, while the second describes one container's network and flong runs many
+sessions from it at once — two of them would claim one address or one host
+port — and the assertion says which.
 `extraFlags` is not a way round the first group: a capability, an ambient one
 or a user namespace of the container's own each gives a session back something
 flong keeps from it on purpose, so those flags are refused there too.
 
 Network isolation is the one worth knowing about, because the default is none:
 a session shares the host's network namespace, so it can reach anything on
-loopback and bind any port. `privateNetwork = true` takes that away entirely.
-Anything in between — NAT, a VPN, an allowlisting proxy — is for now a namespace
-you build on the host yourself, with a unit or `ip netns`, and point
-`networkNamespace` at. Teaching the launcher to build one from the declaration
-is the next thing on `PLAN.md`; the interface for it is already in
-`containers.<name>`, which is why those options are refused loudly rather than
-quietly dropped.
+loopback and bind any port. `privateNetwork = true` takes that away entirely,
+and `flong.<name>.network` gives back a real network with exactly the host ports
+you name. Anything else — an allowlisting proxy, a VPN, rules of your own — is
+`attach`, which steers the session's namespace from the host before it has any
+egress.
 
 ### Reaching the launcher
 
@@ -358,16 +359,17 @@ flong.agent = {
 Whatever `attach` installs is in place before anything gives the namespace
 egress. A `privateNetwork` namespace starts with `lo` up and an empty route
 table, so until egress exists the workload has nowhere to go and nothing to
-race: no handshake, no window. Provision egress of your own *first* — from
-`guard`, or at the top of the hook — and the property is gone without anything
-failing: measured, 12 connections out of 12 went round the rules.
+race: no handshake, no window. flong attaches its own network only after
+`attach` returns. Provision egress of your own *first* — from `guard`, or at the
+top of the hook — and the property is gone without anything failing: measured,
+12 connections out of 12 went round the rules.
 
 The payload does wait for the hook, but not for safety. nspawn would start it
 before the hook had finished, and a short payload could then end before the
 hook ran at all — turning a session that succeeded into a launch that failed.
 So everything after the session's pid 1 waits for a marker the launcher creates
-once `attach` is done; a marker in the session's `/run`, which nothing inside
-could create first.
+once `attach` and any `network` are done; a marker in the session's `/run`,
+which nothing inside could create first.
 
 What stops the workload undoing what the hook installed is that the namespace
 is owned by the *initial* user namespace, which the workload is not in: it gets
@@ -407,6 +409,45 @@ later generation of this one.
 through — spliced between the session's pid 1 and the payload, which is the
 only place a wrapper can go: `command` is already inside, running as `user`, so
 a gate expressed there is one the workload could have declined to run.
+
+### `network`: a real network for a private session
+
+`privateNetwork = true` alone gives a session loopback and nothing else. Add
+`network` and it gets a real one:
+
+```nix
+containers.agent.privateNetwork = true;
+
+flong.agent.network = {
+  hostPorts = [ 5432 ];                                  # the host's database
+  forwardPorts = [ { hostPort = 8080; containerPort = 80; } ];
+};
+```
+
+`network = { };` is a session that can reach the outside world and no port on
+the host. `hostPorts` names ports on the host's loopback the session may reach
+at the same port on its own, TCP and UDP both; nothing else on the host's
+loopback is reachable, the gateway address included. `forwardPorts` is shaped
+exactly like `containers.<name>.forwardPorts`, and binds each host port on every
+host address — the host's firewall still decides who reaches it.
+
+It is [pasta](https://passt.top), Podman's default network mode, and not a veth,
+because flong runs many concurrent sessions from one declaration. A veth needs
+an address per session, forwarding, NAT and firewall rules to keep the session
+off whatever the host binds on `0.0.0.0`, and gives the sandbox packets to spoof
+with. pasta needs no host interface and no host configuration, and gives the
+sandbox sockets rather than packets. Everything that is not an option is a safe
+default: every port class is `none` unless listed — pasta's own default forwards
+every bound port on the other side — and `--no-map-gw` stops the gateway
+address leading to the host's loopback.
+
+What it costs is a pin and a process. pasta cannot attach to a namespace by pid
+as root, so the launcher bind-mounts the session's namespace under
+`/run/flong/netns` and points pasta at that; pasta runs outside the session's
+scope, and exits when the pin goes. Both are released by the session's own
+trap, and by the next launch's sweep when a session was killed — a leaked pin
+would keep a dead session's namespace alive for as long as the host runs. A
+session without `network` has neither.
 
 ## Limitations
 
@@ -450,6 +491,17 @@ that socket builds arbitrary derivations, reaches the network through a
 fixed-output one, and — for a `trusted-user` — sets sandbox options, which is
 host-equivalent. See `PLAN.md`.
 
+**A networked session has no DNS.** With a private network nspawn leaves the
+root's `/etc/resolv.conf` alone, and preparing the root removes it, so names do
+not resolve until you arrange it. How is a decision, not a default: the host's
+resolver is a service on its loopback, and a way to it is a way out that a hook
+steering the session would want a say in.
+
+**A forwarded port is one session's at a time.** A host port can be bound once,
+so a second concurrent session with the same `forwardPorts` cannot attach its
+network, and ends rather than running without it. `hostPorts` has no such limit:
+each session's listeners are on its own loopback.
+
 **A session lives in RAM.** The root is copied under `/run`, and so are
 `TMPDIR` and every overlay upper, so a payload that writes ten gigabytes of
 build output to `$TMPDIR` spends the host's memory on it. That is what
@@ -492,8 +544,10 @@ $ nix flake check
 ```
 
 Boots a VM and exercises every option that changes what the container sees,
-plus the hook ordering, the identity every session process runs as, session
-cleanup and the sweep that reclaims what a killed session left.
+plus the hook ordering, the identity every session process runs as, the root
+hook and what a workload cannot undo of it, the network and what it does not
+reach, session cleanup and the sweep that reclaims what a killed session left.
+The refusals are checked by evaluation alone, in seconds.
 
 ## Licence
 

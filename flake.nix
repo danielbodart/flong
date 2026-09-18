@@ -70,6 +70,17 @@
             assert refused "--private-users in extraFlags"
               { containers.box.extraFlags = [ "--private-users=pick" ]; }
               "whose extraFlags ask";
+            assert refused "network without privateNetwork"
+              {
+                containers.box.privateNetwork = nixpkgs.lib.mkForce false;
+                flong.box.network = { };
+              }
+              "gives a session a network of its own";
+            assert refused "the declaration's own forwardPorts"
+              { containers.box.forwardPorts = [ { hostPort = 8080; } ]; }
+              "static per container";
+            assert flongFailures { flong.box.network.hostPorts = [ 5432 ]; } == [ ]
+              || throw "assertions: a network on a private container is refused";
             pkgs.runCommand "assertions" { } "touch $out";
 
           # The version script decides what every release is called, so it is
