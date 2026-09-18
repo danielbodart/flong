@@ -283,10 +283,10 @@ let
       # NOT A BOUNDARY. The ordering is that, and holds with or without this:
       # nothing here decides what the workload can reach, only whether what
       # the hook installs and the network it was promised are there yet when
-      # it starts. So it is a marker, not a handshake -- created by the
-      # launcher from the host once everything is attached, in a /run that is
-      # nspawn's own root-owned tmpfs, where nothing in the session could
-      # create it first.
+      # it starts. So it is a marker, not a handshake -- a directory the
+      # launcher makes from the host once everything is attached, in a /run
+      # that is nspawn's own root-owned tmpfs, where nothing in the session
+      # could make it first.
       #
       # Between tini and everything else, so `attachWrap`, `command` and the
       # workload all start after it.
@@ -295,7 +295,7 @@ let
         runtimeInputs = [ pkgs.coreutils ];
         text = ''
           for ((try = 0; try < 2000; try++)); do
-            [ -e /run/flong-attached ] && exec "$@"
+            [ -d /run/flong-attached ] && exec "$@"
             sleep 0.005
           done
           echo "flong: the session was never attached" >&2
@@ -1082,7 +1082,21 @@ let
 
         # The payload is waiting on this. Through the leader's own root, since
         # the /run it names is the session's and not the host's.
-        touch "/proc/$leader/root/run/flong-attached"
+        #
+        # MKDIR, AND NEVER TOUCH. Whatever is walked beneath /proc/<pid>/root
+        # is the session's, and an ABSOLUTE symlink met on that walk resolves
+        # against the CALLER's root -- so a /run/flong-attached planted as
+        # `-> /etc/something` would have root on the host create or touch that
+        # host path: the class of runc's /proc/self/exe escape. Today nothing
+        # in a session can write /run, since it is nspawn's root-owned tmpfs;
+        # this does not lean on that staying true. mkdir never follows its
+        # final component and fails with EEXIST on anything already there, a
+        # dangling symlink included -- and a failure here fails the launch, and
+        # the trap kills the session, rather than carrying on without a marker.
+        mkdir "/proc/$leader/root/run/flong-attached" || {
+          echo "${name}: could not mark $machine attached; something is already at /run/flong-attached" >&2
+          exit 1
+        }
         attached=1
         ''}
 

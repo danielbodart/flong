@@ -277,6 +277,20 @@
       command = ''set -- bash -c "$1"'';
     };
 
+    # A hook that plants what a workload would, if it could ever write the
+    # session's /run: an absolute symlink where the attach marker goes. Walked
+    # beneath /proc/<pid>/root, that resolves against the HOST's root -- so
+    # the launcher must refuse it, not follow it to /tmp/escaped.
+    flong.plantedmarker = {
+      container = "netless";
+      user = "alice";
+      workspace = ''realpath /srv/work'';
+      attach = ''
+        ln -s /tmp/escaped "/proc/$leader/root/run/flong-attached"
+      '';
+      command = ''set -- sleep 300'';
+    };
+
     # A hook that refuses. The payload would outlive the launcher if nothing
     # killed it, which is exactly what must not happen to a session whose hook
     # never finished.
@@ -412,6 +426,7 @@
       hooked = lib.getExe nodes.machine.flong.hooked.launcher;
       badHook = lib.getExe nodes.machine.flong.badhook.launcher;
       badAttachBind = lib.getExe nodes.machine.flong.badattachbind.launcher;
+      plantedMarker = lib.getExe nodes.machine.flong.plantedmarker.launcher;
       networked = lib.getExe nodes.machine.flong.networked.launcher;
       # The container's own closure, for the one nspawn this file runs itself:
       # the prepared root has no PATH of its own until nspawn is given one.
@@ -536,6 +551,21 @@
           # rather than something the workload's shell could decline to run.
           out = machine.succeed("${hooked} 'echo $FLONG_WRAPPED'")
           assert out.strip().startswith("netless-"), out
+
+      with subtest("the attach marker is a directory the launcher made"):
+          out = machine.succeed("${hooked} 'stat -c \"%F %U\" /run/flong-attached'")
+          assert out.strip() == "directory root", out
+
+      with subtest("an entry already at the marker's path fails the attach, and is not followed"):
+          # mkdir, not touch: an absolute symlink under /proc/<pid>/root
+          # resolves against the host's root, so following it would have root
+          # create a host path of the session's choosing.
+          machine.succeed("rm -f /tmp/escaped")
+          err = machine.fail("${plantedMarker} 2>&1")
+          machine.fail("test -e /tmp/escaped")
+          assert "could not mark" in err, err
+          machine.fail("machinectl list --no-legend | grep -q netless-")
+          machine.succeed("test -z \"$(find /run/flong -maxdepth 2 -name 's-netless-*')\"")
 
       with subtest("the hook's binds are inside, and the payload is not told about them"):
           # A file and a socket, which extraBinds cannot carry, each at a path

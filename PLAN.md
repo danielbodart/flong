@@ -73,6 +73,14 @@ not a boundary — the ordering still is, and "no handshake" still holds for
 safety — but it contradicts "no readiness protocol", and a hooked session's
 payload now starts after the hook rather than beside it.
 
+The marker is made with `mkdir`, never `touch`. It is reached through
+`/proc/<leader>/root`, where an absolute symlink resolves against the host's
+root: measured, a `/run/flong-attached -> /tmp/escaped` planted in the session
+had `touch` create `/tmp/escaped` on the host. nspawn's root-owned `/run` is
+what stops a workload planting one today; `mkdir` does not lean on it, since it
+fails with `EEXIST` on anything already there and never follows the final
+component. A failure fails the launch, and the test plants the symlink.
+
 ## ~~5. Let the hook wrap the payload~~
 
 Done, as `attachWrap`: shell run as root before nspawn, printing a command one
