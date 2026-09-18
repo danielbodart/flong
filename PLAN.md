@@ -1,145 +1,304 @@
 # Plan
 
-What is left after the gap analysis of `containers.<name>` against what a flong
-actually honours. Everything here is a *runtime* gap: a declaration the NixOS
-container module would act on, or something a booting container gets that a
-prepared root does not. The image half needs nothing — a closure is a closure.
+What is left, in order. Two of these are bugs in what already ships; the rest is
+the network work and the hooks a launcher needs around a session's lifetime.
+
+Everything marked *measured* was run in a NixOS VM test against this flake's own
+nixpkgs (systemd 261.2, nftables 1.1.7, passt 2026_07_16, kernel 6.18.51), in
+flong's real invocation shape: `systemd-run --scope` around `systemd-nspawn
+--private-network --user=…` with a prepared root.
 
 Done already: the container's own `tmpfs` list, `privateNetwork` (as a
 loopback-only namespace), `networkNamespace`, `--console=autopipe` so stdin
 survives a pipeline, `--hostname`, `/run/user/<uid>`, `/etc/machine-id`,
 `machine.slice` and `properties`, a launch-time identity check against the
-prepared root's passwd, an assertion for each declaration flong does not
-honour — saying which are structural and which are merely unwritten — and the
-README section on what a session is not (no wrappers, no bus, no PAM
-session, a root that lives in RAM, `nsenter` rather than `machinectl shell`).
+prepared root's passwd, an assertion for each declaration flong does not honour,
+and the README section on what a session is not.
 
-In order.
+---
 
-## 1. Build the network namespace from the declaration
+## 1. The unix-export path is wrong
 
-Refused at evaluation today: `hostBridge`, `hostAddress*`, `localAddress*`,
-`localMacAddress`, `forwardPorts`, `interfaces`, `macvlans`, `extraVeths`. That
-assertion is the to-do list — it shrinks option by option as this gets written,
-and the refusal exists so a declaration cannot quietly not happen in the
-meantime.
+`cleanup` and the SIGKILL sweep both look for
+`/run/systemd/nspawn/unix-export/<machine>`. Since systemd 257 the path is
+`/run/systemd/nspawn/<machine>/unix-export` — nspawn builds it as
+`runtime_directory_make(scope, "systemd/nspawn", arg_machine)` and then joins
+`unix-export` inside it.
 
-The container module honours them by handing nspawn `--network-veth`,
-`--network-bridge`, `--port`, `--network-interface` and `--network-macvlan` and
-then finishing the job in two places a session does not have: `containerInit`
-renames `host0` to `eth0`, addresses it and adds the routes, and the unit's
-`postStart` addresses the host side.
+So flong's unmount never matches, and every SIGKILLed session leaves a tmpfs
+behind. Reusing that machine name then fails outright:
 
-**flong should do it the other way round**: build the namespace on the host,
-before nspawn, and hand it over with `--network-namespace-path` — which flong
-already supports. `ip netns` and `ip -n` operate on a namespace with no process
-in it, so everything `containerInit` did inside can be done from out here, as
-root, before anything unprivileged exists. Nothing needs a privileged moment
-inside the container; that was only true of the mechanism upstream chose.
+```
+Mount point '/run/systemd/nspawn/p6e-2466/unix-export' exists already, refusing.
+```
 
-Sketch, in the order the launcher would do it:
+Measured. One line in each place. It depends on nothing, so it goes first.
 
-- Make the namespace. `ip netns add` puts it in `/run/netns/<name>`; pinning our
-  own under the session directory instead means the existing sweep already owns
-  the cleanup — but a bind-mounted namespace file inside a directory that gets
-  `rm -rf`'d has to be unmounted first, exactly like nspawn's unix-export mount.
-  Cleanup is the interesting half of this task, not the setup.
-- Name the host-side interface. `ve-$machine` will not do: `$machine` is
-  `<container>-<pid>-<random>` and `IFNAMSIZ` is 16, so a session needs a short
-  unique form of its own (`ve-` plus eight hex is 11 characters). This is the
-  same constraint that makes upstream assert container names of 11 characters or
-  fewer.
-- veth: `ip link add <ve> type veth peer name host0 netns <ns>`, then inside —
-  from outside — `ip -n <ns> link set host0 name eth0`, the `localAddress`es, the
-  route to `hostAddress`, the default via it, and `localMacAddress` if given. On
-  the host either the `hostAddress`es on `<ve>` or `ip link set <ve> master
-  <hostBridge>`, then up. `extraVeths` is the same work per entry.
-- `interfaces` is `ip link set <iface> netns <ns>`; `macvlans` is create on the
-  host and move in. Both are a line each, and both are why this is worth doing:
-  they need no addressing decisions at all.
-- `forwardPorts` last, and carefully. nspawn's `--port` manages its own DNAT and
-  is documented as supported only with one of nspawn's own networking modes
-  (`--network-veth`, `--network-zone=`, `--network-bridge=`), so it is not
-  available for a namespace we hand over — the rules have to be ours, and a
-  launch that is SIGKILLed must not
-  leave a port open. Sweep them the way the unix-export mount is swept, on the
-  way in, keyed on the owning pid.
+## 2. The sweep's liveness test is wrong, and it deletes live sessions
 
-**DNS needs deciding, and both existing paths get it wrong.** With
-`--private-network`, nspawn's `--resolv-conf=auto` leaves the image's file alone
-and prepare has deleted it, so a session has no `resolv.conf` — right for
-loopback-only, wrong the moment the namespace has a route. With
-`--network-namespace-path` it is not clear nspawn considers the session privately
-networked at all; if it does not, it binds the *host's* `/etc/resolv.conf` into a
-namespace that may not reach that resolver. Verify which happens, then have the
-launcher write the `resolv.conf` the namespace it built should have.
+The sweep decides a session is dead when `/proc/<owner>` is gone, where the
+owner is the launcher pid parsed out of the session directory name. But
+`systemd-run --scope` makes the workload a child of the *scope*, not of the
+launcher's shell: `kill -9` on the launcher leaves the scope active, nspawn
+alive, the workload running and the namespace present. Measured.
 
-The VM test can cover this properly in both directions: a listener on the host
-reachable from a session over the veth, and a session's port reachable from the
-host once `forwardPorts` exists.
+So today the sweep can `rm -rf` the root of a session that is still running, and
+the session carries on with its filesystem deleted underneath it. Once the sweep
+is also given a namespace pin and a pasta process to reap (task 7), it would cut
+a live session's network as well — measured: after `umount -l` of the pin, the
+container kept running with only `lo`.
 
-## 2. `nix` inside a session
+The fix is to ask something that knows: the scope unit, or the leader pid, not
+the launcher. Either stop the session before reaping its files, or leave live
+sessions alone and let their own launcher's trap do it.
 
-A declared container binds `/nix/var/nix/daemon-socket`, plus per-container
+This blocks tasks 6 and 7.
+
+## 3. Sweep past the current closure
+
+The cache directory is keyed on the closure hash, and the sweep globs only
+`${cache}/s-*`, so a session from a superseded closure is never swept. It is
+48K of hygiene today; it becomes load-bearing once a leftover can be a namespace
+pin or a pasta process.
+
+The shape is: glob `/run/flong/<container>-????????-????????` with both hashes
+spelt out, so a container whose name is a prefix of another's cannot sweep its
+neighbour; skip the current cache; skip anything still live by task 2's test;
+`chattr -R -i` before `rm -rf`, because the prepared root carries the immutable
+flag tmpfiles put on `/var/empty`.
+
+Note the race that kept this undone: a superseded cache is not reliably idle. A
+launcher from an earlier generation has no `s-*` directory between its identity
+check and its `cp -a`, and a concurrent sweep in that window deletes the root it
+is about to copy. The window is about a millisecond and costs only that launch,
+but the fix is a `flock` held across prepare-and-copy in every launcher, which
+puts a lock in the path of a tool that advertises 117 ms. Decide that
+deliberately.
+
+## 4. A root hook, after the namespace exists
+
+`guard` is the only root snippet flong has, and it runs before prepare, before
+the identity check, before `$machine` exists and before the cleanup trap — so
+anything it creates leaks whenever a later step fails, and it cannot see the
+namespace, which does not exist yet.
+
+Add a hook that runs as root on the host *after* nspawn has started, with
+`$machine`, the leader pid, the namespace path, `$uid`, `$gid`, `$home`,
+`$workspace` and the resolved extra binds in scope. It can add binds of its own
+(task 8).
+
+Finding the namespace means finding the leader. Under `--keep-unit` the scope's
+own `cgroup.procs` is empty — nspawn splits into `payload/` and `supervisor/` —
+so a cgroup walk must recurse and take the pid whose `ns/net` differs from the
+host's. `machinectl show --property=Leader` agrees with it. Measured at 26–30 ms
+after `systemd-run` returns, against a payload that starts at 58–65 ms.
+
+**The hook's contract is an ordering, and it is the whole security property.**
+The hook must install its rules into the namespace *before* it provisions any
+egress — before the dummy route, before pasta. With `--private-network` the
+namespace has `lo` up and an empty route table, so until something adds egress,
+the workload has nowhere to go and cannot race anything. Measured: rules at
+0.070 s with egress attached three seconds later and no barrier of any kind gave
+0 unsteered connections out of 20, with 12 of 12 attempts before it failing
+`Network is unreachable`. The other order loses every time: 12 of 12 unsteered.
+
+This is why flong needs no handshake, no wrapper and no readiness protocol. The
+window between the payload starting and the hook finishing contains no network.
+
+## 5. Let the hook wrap the payload
+
+`mkPayload` runs the consumer's `command` — arbitrary shell, inside the sandbox
+— before it execs the workload. A hook that needs the workload wrapped (a
+launcher's own gate, say) must therefore be able to put a prefix on the nspawn
+command line before the payload, not only inside `command`.
+
+With task 4's ordering this is a correctness nicety rather than a boundary: a
+workload that tries once in the first few milliseconds gets `ENETUNREACH`
+instead of waiting. Measured from the `command` position without the ordering
+fix: 8 of 8 unsteered over 1.8 s.
+
+## 6. A teardown hook
+
+Called from `cleanup` and from the sweep, so a session's external state is
+released on both the clean and the killed path. Depends on tasks 2 and 3: the
+sweep must be able to tell a dead session from a live one before it is given
+anything to tear down.
+
+## 7. `network` — a real network for a private session
+
+`flong.<name>.network = { … }`, present or absent; there is no `enable` flag.
+It requires `containers.<name>.privateNetwork = true`, and it is implemented
+with [pasta](https://passt.top).
+
+**Why pasta and not a veth pair.** flong runs many concurrent sessions from one
+container declaration, and `hostAddress`, `localAddress` and `forwardPorts` are
+static per container: two sessions would claim the same address, and the host
+cannot route one address to two interfaces. A veth would therefore need flong to
+allocate addresses from a pool and keep that allocation across crashes, plus
+`ip_forward`, NAT, and firewall rules to stop the sandbox reaching services the
+host binds on `0.0.0.0`. pasta needs none of it: no host-side interface, no host
+configuration, no addressing, and the sandbox gets no packet-level access at all,
+so spoofing is not expressible. It is Podman's default network mode and the
+rootless Docker backend.
+
+The declaration's veth, bridge and port options stay refused, and the assertion
+should now say why — concurrency, not "not built yet".
+
+Options, in the declaration's own vocabulary:
+
+- `forwardPorts` — host to sandbox, shaped exactly like
+  `containers.<name>.forwardPorts`: `{ protocol; hostPort; containerPort; }`.
+- `hostPorts` — the reverse: ports on the host's loopback the sandbox may reach.
+  The declaration has no equivalent, and this is what a session needs to reach a
+  database the host is running.
+
+Everything else is a safe default, not an option:
+
+- `--no-map-gw`. Without it the host's loopback is reachable through the gateway
+  address — measured: a host listener on `127.0.0.1:18123` answered from inside
+  the sandbox even with every port list set to `none`.
+- An explicit `none` for every port class, because `-t`, `-u`, `-T` and `-U` all
+  default to `auto`, and `auto` forwards every bound port on the host.
+- `--config-net`, so pasta configures the namespace itself.
+
+**Attaching.** pasta cannot attach by pid as root: it calls `isolate_user()`,
+which drops to `nobody`, before `pasta_open_ns()` calls `setns()`, and it never
+sets `PR_SET_KEEPCAPS`. All three by-pid forms fail with `Permission denied` —
+measured, in flong's own `--user=` shape. The working invocation is a
+bind-mounted namespace pin plus `--runas 0`:
+
+```
+pasta --config-net --netns <pin> --runas 0 -t none -u none -T none -U none --no-map-gw
+```
+
+**Releasing.** The pin must be removed with `umount -l` and then `rm`. A plain
+`umount` is `target is busy`, rc=32, for as long as pasta lives — measured both
+with the container alive and after it had gone — so flong's existing
+`umount … 2>/dev/null || true` idiom would silently leak it, and a leaked pin
+keeps the dead session's whole namespace alive indefinitely. After `umount -l`
+and `rm`, pasta reaps itself in about 60 ms: *"Namespace … is gone, exiting"*.
+
+Note what this costs, honestly: a session with a network has a pin and a process
+to clean up. A session without one has neither — no pin, no extra process,
+everything dies with the namespace. That, and not "nothing is pinned", is the
+shape to document.
+
+`passt` joins `runtimeInputs`, along with `iproute2` for the pin.
+
+## 8. Per-session binds, source ≠ destination
+
+`extraBinds` cannot serve a hook: it takes directories only, binds at the same
+path on both sides, is resolved as the caller before `guard`, and is advertised
+to the payload through `FLONG_EXTRA_BINDS`. A hook needs to bind a file or a
+socket from a host path of its choosing to a fixed path inside, and not tell the
+workload about it.
+
+It must refuse `:` and newlines the way `resolve_binds` does. Bind the specific
+path, never a shared parent: with a whole directory bound, a workload could list
+and write its neighbours' entries — measured.
+
+## 9. Capabilities
+
+Pass `--drop-capability=CAP_NET_ADMIN` and `--no-new-privileges=yes` for a
+session with a root hook. Measured to remove exactly `CAP_NET_ADMIN` from the
+bounding set and set `NoNewPrivs=1`, with host-side setup unaffected.
+
+Document it as defence in depth and nothing more: `unshare -U` inside the
+sandbox restores the full bounding set. What actually holds is namespace
+ownership — the namespace is owned by the initial user namespace, so a workload
+that is not its owner gets `EPERM` on every write, whatever capabilities it
+appears to hold. Measured: it cannot list the ruleset, flush it, change a route,
+an address or a link, write `/proc/sys/net/*`, or move an interface into a
+namespace it just created.
+
+Refuse `--capability`, `--ambient-capability` and `--private-users` arriving
+through `extraFlags`. That contradicts the advice in flong's own assertion
+message today, which should be rewritten: `extraFlags` is not a hole for
+capabilities.
+
+## 10. `--uid`, and `getent`
+
+systemd 261 deprecates `--user=` in favour of `--uid=`, and prints a warning on
+every launch. Worth noting while renaming: nspawn resolves either by exec'ing
+`getent` *inside the container root*, so a prepared root must carry one. flong
+satisfies that today only through `--bind-ro=$closure:/run/current-system` and a
+PATH naming `/run/current-system/sw/bin` — accidental, and a hard failure the
+day a closure changes.
+
+## 11. Reopen `privateUsers`
+
+flong refuses `privateUsers != "no"` on the ground that a bind-mounted file
+owned by a host uid is unreadable inside, so the session cannot read the
+workspace it was started for. That describes `noidmap`, which is the default.
+
+nspawn now takes an ID-mapping option per bind mount: `idmap`, `rootidmap` and
+`owneridmap`. With `owneridmap`, the owner of the bind source on the host maps
+to the user inside, which is exactly the workspace case, and
+`--private-users-ownership=map` maps the image with ID-mapped mounts rather than
+chowning it.
+
+The prize is worth the work: today a session runs as the caller's own uid, so
+anything it reaches outside its deliberate binds — a leaked descriptor, a path
+through `/proc`, a bug in nspawn — it acts on *as that user*. nspawn's own
+manual says of `--private-users=no`: *"This option is not secure and must not be
+used to run untrusted code."*
+
+It needs checking rather than assuming: ID-mapped mounts need support from each
+source filesystem, and the prepared root, the tmpfs mounts and the overlays each
+need their own answer. A wrong mapping shows up as `nobody` and a read failure,
+which is the right direction to fail in.
+
+## 12. `nix` inside a session
+
+A declared container binds `/nix/var/nix/daemon-socket` plus per-container
 `profiles` and `gcroots`. flong binds `store` and `db` only, so `nix build`,
-`nix develop`, `nix-shell` and `nix profile` all fail inside a session — which
-is awkward for a tool whose stated use is per-project toolchains and build
-sandboxes.
+`nix develop`, `nix-shell` and `nix profile` all fail inside a session.
 
-It is not a straight fix, which is why it is a task rather than a commit. The
-daemon socket is a privilege: through it a session can build arbitrary
+The daemon socket is a privilege: through it a session can build arbitrary
 derivations, reach the network from a fixed-output derivation, spend unbounded
 CPU and disk, and — if the invoking user is a `trusted-user` — set sandbox
-options, which is host-equivalent. So:
+options, which is host-equivalent. It is also a way out of the network namespace
+that no in-namespace rule can see, which matters to anything steering a
+session's traffic. So: off by default, opt-in per launcher, with the caveat in
+the option description and not only here.
 
-- `nixDaemon = false` by default, opt-in per launcher, with the caveat in the
-  option description rather than only here.
-- When on: `--bind-ro=/nix/var/nix/daemon-socket`, and
-  `--bind=/nix/var/nix/profiles/per-container/<container>:/nix/var/nix/profiles`
-  plus the matching `gcroots`, created on the host by the launcher the way the
-  container@ unit's start script creates them.
-- Decide whether the profiles are per container (shared between sessions,
-  survives a reboot, needs a real directory) or per session (inside the session
-  root, dies with it). Per container is what a real container does and what
-  makes a warm toolchain worth having.
+When on: `--bind-ro=/nix/var/nix/daemon-socket`, and
+`--bind=/nix/var/nix/profiles/per-container/<container>:/nix/var/nix/profiles`
+plus the matching `gcroots`, created by the launcher. Per container rather than
+per session, so a warm toolchain survives.
 
-## 3. Persistence that is not the host's namespace
+## 13. Persistence, and a read-only workspace
 
-There is no equivalent of a non-ephemeral container's private `/var`. The only
-way to keep anything across sessions today is to bind a host path, which puts
-the container's state in the host's tree and under the host's names.
+Two options that are the same question answered in opposite directions, and both
+want a sentence each in the README or nobody will pick correctly.
 
-A `state = [ paths ]` option, each path bound from
-`/var/lib/flong/<container><path>`, created on first use with the payload's
-ownership. "Persists across sessions, invisible to the host's own layout" is
-what a package index, a compiler cache or a language server's database wants,
-and all three are things an agent pays for repeatedly today.
+- `state = [ paths ]`, each bound from `/var/lib/flong/<container><path>`,
+  created on first use with the payload's ownership. "Persists across sessions,
+  invisible to the host's own layout" is what a package index, a compiler cache
+  or a language server's database wants.
+- A read-only workspace: the workspace bound as the lower layer of an overlay
+  whose upper layer is discarded at the end. Today `workspace` is always bound
+  read-write and `overlays` takes static paths fixed at evaluation, so a
+  per-session workspace overlay cannot be expressed at all.
 
-Note the interaction with `overlays`: an overlay is the same question answered
-the other way (lower from the host, writes discarded). Both should be
-describable in one sentence each in the README, or nobody will pick correctly.
+## Tests
 
-## 4. Sweep prepared roots from superseded closures
+The VM test grows a network section. Each of these is a property the tasks above
+are supposed to deliver, and none of them is asserted today:
 
-The stale sweep only looks at `s-*` inside the *current* cache directory, so a
-rebuild leaves the previous `/run/flong/<container>-<closure>-<prepare>`
-directory behind until reboot. It is 48K, so this is hygiene rather than cost —
-it is what makes `ls /run/flong` legible, not what makes it cheap.
+- A session with no `network` has only `lo`, and an empty route table.
+- With a root hook installing a ruleset, the workload cannot list or change it —
+  including after `unshare -U`.
+- Rules land before any egress exists: with egress deliberately delayed, every
+  attempt before it fails, and every attempt after it is steered.
+- `network` reaches a host port named in `hostPorts` and nothing else on the
+  host's loopback.
+- A port in `forwardPorts` is reachable from the host; nothing else is.
+- Clean exit releases the pin and pasta; `kill -9` of the launcher leaves a
+  session the sweep can identify as live, and one it can identify as dead.
+- Reusing a SIGKILLed session's machine name succeeds (task 1).
+- A bind added by the hook exists inside and is not named in
+  `FLONG_EXTRA_BINDS`.
 
-The shape is: glob `/run/flong/<container>-????????-????????` (both hashes spelt
-out, so a container whose name is a prefix of another's cannot sweep its
-neighbour), skip the current cache, skip any that still holds an `s-*` whose
-owning pid is alive, `chattr -R -i` before `rm -rf` because the prepared root
-carries the immutable flag tmpfiles put on `/var/empty`.
-
-**Why it is not done yet.** A superseded cache is not reliably idle. A launcher
-from an earlier generation, launching against a warm cache of its own, has no
-`s-*` directory between its identity check and its `cp -a` — and a concurrent
-sweep in that window deletes the root it is about to copy. The session is
-ephemeral so nothing is lost but the launch, and the window is about a
-millisecond, but the fix is a `flock` held across prepare-and-copy in every
-launcher, which puts a lock in the path of a tool that advertises 117 ms. Decide
-that deliberately rather than as a side effect of tidying `/run`.
-
-The cheap test, once it is decided: `mkdir -p
-/run/flong/demo-deadbeef-deadbeef/prepared`, run a launcher, assert it is gone.
+The suite runs in about 1m11s with KVM and 2m14s under TCG, which is what CI
+has. That is affordable; keep it that way.
