@@ -60,8 +60,8 @@ Declare the container with NixOS's own option, then name it in `flong`:
 }
 ```
 
-Run from a git checkout, `sudo <launcher> build` runs `cargo build` in the
-repository root, bind-mounted into the session, with a sibling
+`sudo <launcher> build` runs `cargo build` in the directory it was started
+from, bind-mounted into the session, with a sibling
 `shared-crates` read-write if there is one and `/srv/reference` read-only.
 
 ### A session with a network
@@ -149,7 +149,7 @@ ordered with `mkBefore` and `mkAfter`.
 | `container` | `<name>` | The `containers.<name>` declaration to run. |
 | `user` | *required* | Account inside the container that everything in the session runs as. Its uid, gid and home are read from the prepared root's `/etc/passwd`. |
 | `command` | *required* | The payload's argument list, e.g. `[ "cargo" ]` or `[ (lib.getExe pkgs.hello) ]`. The launcher's arguments are appended, and it is exec'd as `user` in the workspace, with the container's `PATH` and variables from its `/etc/set-environment`. No element is read by a shell. |
-| `workspace` | `git -C "$PWD" rev-parse --show-toplevel` | Prints the directory to bind-mount at its own path and `cd` into: `PATH`, read-write, or `PATH:ro`. |
+| `workspace` | `pwd` | Prints the directory to bind-mount at its own path and `cd` into: `PATH`, read-write, or `PATH:ro`. |
 | `binds` | `""` | Prints more directories to bind-mount, each at its own path, one per line: `PATH`, read-only, or `PATH:rw`. |
 | `guard` | `""` | Decides whether the caller may launch. Non-zero exit refuses. |
 | `postStart` | `""` | Configures the session once its namespaces exist, before `network` is attached and before the payload starts. Non-zero exit ends the session. |

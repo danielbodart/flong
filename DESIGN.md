@@ -163,9 +163,9 @@ per-bind-mount idmapped mounts are the likely route; see PLAN.md §1.
 ## `workspace` runs as the caller, `guard` as root
 
 `workspace` runs first, as `SUDO_UID` or `PKEXEC_UID`, and as root only when
-no unprivileged caller exists (a launcher started by a unit). It runs `git` in
-a directory the caller chose, and git reads configuration from the repository
-it is pointed at. The answer is the caller's to give, so running it with the
+no unprivileged caller exists (a launcher started by a unit). It runs in a
+directory the caller chose, and a consumer's snippet commonly runs `git`
+there, which reads configuration from the repository it is pointed at. The answer is the caller's to give, so running it with the
 caller's privilege loses nothing and avoids git-in-a-hostile-checkout
 privilege escalation. sudo sets `SUDO_UID` itself, so a caller cannot unset it
 to get root. The gid comes from the passwd database, since pkexec does not set

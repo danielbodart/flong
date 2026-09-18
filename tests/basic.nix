@@ -380,9 +380,6 @@
         IPAddressDeny = [ "192.0.2.1" "192.0.2.2" ];
       };
 
-      # Not a git checkout, which is the point: the default asks git, and a
-      # fast container is not obliged to be a repository.
-      #
       # The uid is recorded so the test can assert WHO evaluated this: the
       # invoking user when there is one, root only when there is not.
       workspace = ''
@@ -535,11 +532,19 @@
     # A third over the same container, taking the DEFAULT workspace. It exists
     # so that the default snippet is built -- and therefore shellchecked --
     # rather than only the overrides the other two declare, which is how a
-    # `$PWD` inside it once reached a release unlinted. It also covers the
-    # documented contract that a non-zero exit from `workspace` aborts.
+    # `$PWD` inside it once reached a release unlinted.
     flong.defaultworkspace = {
       container = "demo";
       user = "alice";
+      command = [ "pwd" ];
+    };
+
+    # A workspace snippet that fails, which must abort the launch: the
+    # documented contract for a non-zero exit from `workspace`.
+    flong.failingworkspace = {
+      container = "demo";
+      user = "alice";
+      workspace = "false";
       command = [ "true" ];
     };
 
@@ -560,6 +565,7 @@
       launcher = lib.getExe nodes.machine.flong.demo.launcher;
       badWorkspace = lib.getExe nodes.machine.flong.badworkspace.launcher;
       defaultWorkspace = lib.getExe nodes.machine.flong.defaultworkspace.launcher;
+      failingWorkspace = lib.getExe nodes.machine.flong.failingworkspace.launcher;
       badBinds = lib.getExe nodes.machine.flong.badbinds.launcher;
       failingBinds = lib.getExe nodes.machine.flong.failingbinds.launcher;
       roWorkspace = lib.getExe nodes.machine.flong.roworkspace.launcher;
@@ -1299,8 +1305,12 @@
           err = machine.fail("${badWorkspace} 2>&1")
           assert "workspace contains" in err, err
 
-      with subtest("the default workspace aborts outside a git checkout"):
-          machine.fail("cd /srv && ${defaultWorkspace}")
+      with subtest("the default workspace is the directory the launcher starts in"):
+          out = machine.succeed("cd /srv/work && ${defaultWorkspace}")
+          assert "/srv/work" in out, out
+
+      with subtest("a workspace snippet that fails aborts the launch"):
+          machine.fail("${failingWorkspace}")
 
       with subtest("a bind mount nested inside a tmpfs reaches through it"):
           # The tmpfs hides the host's /srv/nested ...

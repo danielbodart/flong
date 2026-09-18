@@ -434,7 +434,7 @@ let
     in
     pkgs.writeShellApplication {
       inherit name;
-      runtimeInputs = [ pkgs.git pkgs.coreutils pkgs.util-linux pkgs.e2fsprogs ]
+      runtimeInputs = [ pkgs.coreutils pkgs.util-linux pkgs.e2fsprogs ]
         ++ lib.optional (c.network != null) pkgs.passt
         ++ c.path;
       text = ''
@@ -456,10 +456,10 @@ let
         # it buys them nothing they could not have run themselves.
 
         # `workspace` is the only place this script touches attacker-shaped
-        # input: it runs a shell -- by default git -- in a directory the
-        # caller chose. Its answer is the caller's to give either way, so
-        # there is nothing to buy by deriving it as root and a whole class of
-        # git-in-a-hostile-checkout escalation to avoid.
+        # input: it runs a shell -- a consumer's, which may well run git -- in
+        # a directory the caller chose. Its answer is the caller's to give
+        # either way, so there is nothing to buy by deriving it as root and a
+        # whole class of git-in-a-hostile-checkout escalation to avoid.
         #
         # sudo sets SUDO_UID itself, so a caller cannot suppress it to get the
         # root path back; run0 sets it too and pkexec sets PKEXEC_UID. Root is
@@ -1307,12 +1307,13 @@ in
 
         workspace = lib.mkOption {
           type = lib.types.lines;
-          default = ''git -C "$PWD" rev-parse --show-toplevel'';
-          example = ''printf '%s:ro\n' "$PWD"'';
+          default = "pwd";
+          example = ''git -C "$PWD" rev-parse --show-toplevel'';
           description = ''
             Shell printing the directory to bind into the container at its own
             path and start in: `PATH`, bound read-write, or `PATH:ro`, bound
-            read-only. Runs on the host before launch, with the launcher's
+            read-only. The default is the directory the launcher was started
+            in; a consumer that wants a repository's root asks git for it. Runs on the host before launch, with the launcher's
             arguments in "$@"; a non-zero exit aborts.
 
             Runs *before* `guard`, so that the gate can judge the directory
