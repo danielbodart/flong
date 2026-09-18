@@ -116,6 +116,7 @@ Declare the container with NixOS's own option, then point a flong at it:
 | `overlays` | `{ target = lower; }` | `{ }` | lower readable, writes discarded |
 | `properties` | `{ NAME = value; }` | `{ }` | systemd properties for the session's scope, e.g. `MemoryMax` |
 | `attach` | lines | `""` | shell run on the host as root once the session's namespace exists, with it in `$netns`; whatever it installs is in place before any egress |
+| `attachWrap` | lines | `""` | shell printing a command, one word per line, that the payload is exec'd through inside the session |
 | `launcherInputs` `payloadInputs` | packages | `[ ]` | extra `PATH` for `guard`/`workspace` and for `command` |
 | `launcher` | package | *read-only* | the generated launcher; run it as root |
 
@@ -364,6 +365,10 @@ unsteered; so does a leader that never appears. Without `privateNetwork` the
 session shares the host's namespace and `$netns` names that one, so a hook that
 installs rules there is steering the host.
 
+`attachWrap` prints a command, one word per line, that the payload is exec'd
+through — spliced between the session's pid 1 and the payload, which is the
+only place a wrapper can go: `command` is already inside, running as `user`, so
+a gate expressed there is one the workload could have declined to run.
 
 ## Limitations
 

@@ -625,6 +625,25 @@ let
           printf '%s' "$out"
         }
 
+        # The command the payload is exec'd through, empty unless a consumer
+        # named one. An array rather than a string, for the reason the extra
+        # binds are one: a word with a space in it is a word, not two.
+        wrap=()
+        ${lib.optionalString (c.attachWrap != "") ''
+        # Resolved out here, as root, and spliced onto the nspawn command line
+        # before the payload -- which is the only place a wrapper can go. The
+        # consumer's `command` is already inside the sandbox and already
+        # running as ${c.user}, so anything expressed there is something the
+        # workload's own shell could have declined to run.
+        wrap_words=$(
+          ${c.attachWrap}
+        ) || exit 1
+        while IFS= read -r wrap_word; do
+          [ -n "$wrap_word" ] || continue
+          wrap+=("$wrap_word")
+        done <<< "$wrap_words"
+        ''}
+
         # --keep-unit, or nspawn makes a scope of its own and these properties
         # apply to nothing. tini rather than --as-pid2, whose stub reaps
         # orphans but does not forward SIGTERM to the payload.
@@ -709,6 +728,7 @@ let
             --setenv=FLONG_EXTRA_BINDS="$(joined "$extra_binds")" \
             --setenv=FLONG_EXTRA_BINDS_RO="$(joined "$extra_binds_ro")" \
             ${pkgs.tini}/bin/tini -g -- \
+            ''${wrap[@]+"''${wrap[@]}"} \
             ${lib.getExe payload} "$workspace" "$@" <&3 &
         session=$!
 
@@ -989,6 +1009,33 @@ in
 
             The leader is polled for, because `systemd-run` returns 26-30 ms
             before there is a namespace and the payload starts at 58-65 ms.
+          '';
+        };
+
+        attachWrap = lib.mkOption {
+          type = lib.types.lines;
+          default = "";
+          example = ''printf '%s\n' /run/current-system/sw/bin/my-gate --session "$machine"'';
+          description = ''
+            Shell printing a command, one argument per line, that the payload
+            is exec'd through inside the session. Empty output -- the default
+            -- execs the payload directly.
+
+            Runs on the host as root, before nspawn, with `$machine`, `$root`,
+            `$uid`, `$gid`, `$home` and `$workspace` in scope. What it prints
+            is a path *inside* the container and its arguments, spliced onto
+            the nspawn command line between `tini` and the payload.
+
+            That position is the point of it. `command` is already inside the
+            sandbox and already running as `user`, so a gate expressed there is
+            one the workload could have declined to run; this one is between
+            the workload and its own pid 1.
+
+            With `attach`'s ordering a wrapper is a convenience rather than a
+            boundary -- a workload that reaches for the network in its first
+            milliseconds gets `ENETUNREACH` instead of waiting -- which is the
+            right way round: use it for a launcher that wants to *be* the
+            workload's parent, not to close a window.
           '';
         };
 

@@ -62,17 +62,10 @@ contract is in the option description, the README and the comment beside the
 call. The test asserts the hook runs as root, is handed a namespace that is not
 the host's, and finds it with an empty route table.
 
-## 5. Let the hook wrap the payload
+## ~~5. Let the hook wrap the payload~~
 
-`mkPayload` runs the consumer's `command` — arbitrary shell, inside the sandbox
-— before it execs the workload. A hook that needs the workload wrapped (a
-launcher's own gate, say) must therefore be able to put a prefix on the nspawn
-command line before the payload, not only inside `command`.
-
-With task 4's ordering this is a correctness nicety rather than a boundary: a
-workload that tries once in the first few milliseconds gets `ENETUNREACH`
-instead of waiting. Measured from the `command` position without the ordering
-fix: 8 of 8 unsteered over 1.8 s.
+Done, as `attachWrap`: shell run as root before nspawn, printing a command one
+word per line, spliced between `tini` and the payload.
 
 ## 6. A teardown hook
 

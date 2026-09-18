@@ -175,6 +175,10 @@
            add rule inet flong out tcp dport 19999 drop'
       '';
 
+      # Exec'd between tini and the payload, inside the session. env is in
+      # every NixOS closure, so this needs nothing declared to prove it ran.
+      attachWrap = ''printf '%s\n' /run/current-system/sw/bin/env "FLONG_WRAPPED=$machine"'';
+
       command = ''set -- bash -c "$1"'';
     };
 
@@ -424,6 +428,12 @@
           assert session_ns != host_ns, f"{session_ns} == {host_ns}"
           assert routes == "0", f"the namespace had {routes} routes at hook time"
           assert name.startswith("netless-"), name
+
+      with subtest("the hook wraps the payload"):
+          # Between tini and the payload, so it is the workload's own parent
+          # rather than something the workload's shell could decline to run.
+          out = machine.succeed("${hooked} 'echo $FLONG_WRAPPED'")
+          assert out.strip().startswith("netless-"), out
 
       with subtest("a session whose hook refuses does not run"):
           # The payload is `sleep 300`: if the launcher merely gave up, the
