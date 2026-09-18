@@ -121,7 +121,7 @@ Declare the container with NixOS's own option, then point a flong at it:
 Only `user` is declared, and deliberately so: which account to be is a choice,
 while that account's uid, gid and home are facts the container already carries —
 in the `passwd` its own activation script wrote, which is the file nspawn
-resolves `--user` against. flong reads them from the prepared root at launch, so
+resolves `--uid` against. flong reads them from the prepared root at launch, so
 there is no second copy to keep in step, nothing for an assertion to compare,
 and no failure where the launcher owns `TMPDIR` to one uid while the session
 runs as another. It also reaches what evaluation cannot see: a container

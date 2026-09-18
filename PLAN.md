@@ -182,14 +182,15 @@ through `extraFlags`. That contradicts the advice in flong's own assertion
 message today, which should be rewritten: `extraFlags` is not a hole for
 capabilities.
 
-## 10. `--uid`, and `getent`
+## ~~10. `--uid`, and `getent`~~
 
-systemd 261 deprecates `--user=` in favour of `--uid=`, and prints a warning on
-every launch. Worth noting while renaming: nspawn resolves either by exec'ing
-`getent` *inside the container root*, so a prepared root must carry one. flong
-satisfies that today only through `--bind-ro=$closure:/run/current-system` and a
-PATH naming `/run/current-system/sw/bin` — accidental, and a hard failure the
-day a closure changes.
+Done. The flag is `--uid=`, so systemd 261 no longer prints a deprecation
+warning over every launch, and the test asserts the absence of one. Recorded
+beside it: nspawn resolves either spelling by exec'ing `getent` *inside the
+container root*, which flong satisfies only through
+`--bind-ro=$closure:/run/current-system` and a PATH naming
+`/run/current-system/sw/bin` — accidental, and a hard failure the day a closure
+stops carrying one.
 
 ## 11. Reopen `privateUsers`
 

@@ -115,12 +115,12 @@ let
       # `user` is the only half a consumer can usefully state: which account in
       # the container to be. The uid, the gid and the home are facts about that
       # account, and the container already carries them -- in the passwd its own
-      # activation script wrote, which is the very file nspawn resolves --user
+      # activation script wrote, which is the very file nspawn resolves --uid
       # against. Read them from there and there is nothing for a declaration to
       # disagree with.
       #
       # Declaring them meant keeping two copies in step, and a mismatch was an
-      # error nowhere: nspawn resolved --user in there while the launcher chowned
+      # error nowhere: nspawn resolved --uid in there while the launcher chowned
       # TMPDIR, the tmpfs entries and the overlay uppers to the other number,
       # leaving a session that could not write to its own home. Reading also
       # reaches where an assertion could not look -- a container declared by
@@ -396,7 +396,7 @@ let
         fi
 
         # Who this session runs as, out of the root nspawn is about to resolve
-        # --user against. Everything the launcher creates for the payload out
+        # --uid against. Everything the launcher creates for the payload out
         # here -- TMPDIR, the tmpfs entries, the overlay uppers -- is owned from
         # these, so they cannot disagree with what the container thinks.
         read_identity "$prepared"
@@ -609,12 +609,20 @@ let
         # apply to nothing. tini rather than --as-pid2, whose stub reaps
         # orphans but does not forward SIGTERM to the payload.
         #
-        # --user, so nspawn drops before it starts pid 1: tini, the payload
+        # --uid, so nspawn drops before it starts pid 1: tini, the payload
         # script and `command` with it all run as `user`, and no process
         # inside the container is ever root. It resolves the name against the
         # container's own passwd -- which is what preparing the root produces
         # -- and initialises the supplementary groups from its group file, so
         # a user declared into `audio` arrives in it.
+        #
+        # --uid rather than --user, which systemd 261 deprecates and warns
+        # about on every single launch. Both spellings resolve a name the same
+        # way: nspawn execs `getent passwd` INSIDE the container root, so a
+        # prepared root that cannot run getent cannot name its user. flong
+        # satisfies that today only through --bind-ro=$closure:/run/current-system
+        # and a PATH naming /run/current-system/sw/bin -- accidental, and a hard
+        # failure the day a closure stops carrying one.
         #
         # /run is nspawn's own tmpfs, made fresh at every start, so the
         # symlink `activate` wrote when the root was prepared is already gone,
@@ -658,7 +666,7 @@ let
             --bind="$workspace:$workspace" \
             ''${extra_flags[@]+"''${extra_flags[@]}"} \
             ''${tmpfs_flags[@]+"''${tmpfs_flags[@]}"} ${overlayFlags} \
-            --user=${c.user} \
+            --uid=${c.user} \
             --setenv=PATH=${closure}/sw/bin \
             --setenv=TMPDIR="$home/tmp" \
             --setenv=XDG_RUNTIME_DIR="$runtime_dir" \

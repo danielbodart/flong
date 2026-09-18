@@ -287,6 +287,14 @@
           assert "/srv/work" in out, out
           assert "in-the-workspace" in out, out
 
+      with subtest("a launch is not accompanied by a deprecation warning"):
+          # systemd 261 deprecates --user= in favour of --uid= and prints a
+          # warning for it on every single launch, so a tool that advertises
+          # 117 ms and a clean exit spent one line of every session apologising
+          # for its own command line.
+          out = machine.succeed("${launcher} 'true' 2>&1")
+          assert "deprecat" not in out.lower(), out
+
       with subtest("nothing in the session runs as root"):
           # pid 1 is tini, and nspawn drops before starting it, so there is no
           # process in here for a root phase to have belonged to.
