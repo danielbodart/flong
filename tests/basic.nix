@@ -419,6 +419,32 @@
       command = ''set -- true'';
     };
 
+    # Guards that would each subvert the launch if they ran in the launcher's
+    # own shell: one ends early with success, which must allow the launch and
+    # not end it with nothing launched; the other reassigns the workspace it
+    # has just judged, which must not change what gets mounted.
+    flong.guardexit = {
+      container = "demo";
+      user = "alice";
+      workspace = ''realpath /srv/work'';
+      # Conditional, as an early allow is in practice: a bare `exit 0` in the
+      # launcher's own shell leaves the rest of it unreachable, which
+      # shellcheck would refuse before any test ran.
+      guard = ''
+        if [ -n "$workspace" ]; then exit 0; fi
+      '';
+      command = ''set -- bash -c "$1"'';
+    };
+    flong.guardreassign = {
+      container = "demo";
+      user = "alice";
+      workspace = ''realpath /srv/work'';
+      # Through eval, because shellcheck reads a plain assignment in a
+      # subshell as the mistake it is and refuses to build the launcher.
+      guard = ''eval workspace=/srv/reference'';
+      command = ''set -- bash -c "$1"'';
+    };
+
     # Names a user the container does not have. Since the uid, gid and home are
     # read out of the container's passwd rather than declared, this is the whole
     # of what can now go wrong with an identity -- and it has to be caught out
@@ -461,6 +487,8 @@
       defaultWorkspace = lib.getExe nodes.machine.flong.defaultworkspace.launcher;
       badExtraBind = lib.getExe nodes.machine.flong.badextrabind.launcher;
       badUsername = lib.getExe nodes.machine.flong.badusername.launcher;
+      guardExit = lib.getExe nodes.machine.flong.guardexit.launcher;
+      guardReassign = lib.getExe nodes.machine.flong.guardreassign.launcher;
       netless = lib.getExe nodes.machine.flong.netless.launcher;
       hooked = lib.getExe nodes.machine.flong.hooked.launcher;
       badHook = lib.getExe nodes.machine.flong.badhook.launcher;
@@ -909,7 +937,9 @@
               f"systemctl show {scope} -p TasksMax -p MemoryZSwapWriteback -p IPAddressDeny")
           assert "TasksMax=512" in props, props
           assert "MemoryZSwapWriteback=no" in props, props
-          assert "IPAddressDeny=192.0.2.1/32 192.0.2.2/32" in props, props
+          # A set to systemd, so shown in whatever order it keeps.
+          deny = next(l for l in props.splitlines() if l.startswith("IPAddressDeny="))
+          assert sorted(deny.split("=", 1)[1].split()) == ["192.0.2.1/32", "192.0.2.2/32"], props
           # And nothing of that session survives it, which the subtests after
           # this one assume.
           machine.wait_until_succeeds("test -z \"$(find /run/flong -maxdepth 2 -name 's-*')\"")
@@ -1081,6 +1111,14 @@
           assert "ok" in out, out
           err = machine.fail("${badWorkspace} 2>&1")
           assert "workspace contains" in err, err
+
+      with subtest("a guard's exit 0 allows the launch rather than ending it"):
+          out = machine.succeed("${guardExit} 'echo the-payload-ran'")
+          assert "the-payload-ran" in out, out
+
+      with subtest("a guard cannot change the workspace it judged"):
+          out = machine.succeed("${guardReassign} 'pwd; test -e /srv/reference && echo reference-bound || true'")
+          assert out.split() == ["/srv/work"], out
 
       with subtest("workspace sees the launcher's arguments, caller or not"):
           machine.succeed("sudo -u alice sudo -n ${launcher} 'true'")

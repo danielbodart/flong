@@ -122,6 +122,11 @@ are in scope because they are mounts the caller chose; a guard that reads only
 `$workspace` admits them unexamined. The cost of this order is that a refused
 caller has already run `workspace`, as themselves, which gains them nothing.
 
+`guard` runs in a subshell, as the other root hooks do. Its exit status is its
+verdict and nothing more: `exit 0` allows the launch rather than ending the
+launcher with nothing launched, and an assignment to `$workspace` cannot change
+what is mounted after it was judged.
+
 ## Mounts
 
 - **tmpfs ownership.** A bare `--tmpfs` is root-owned 0755. An unprivileged

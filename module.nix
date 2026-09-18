@@ -507,7 +507,18 @@ let
         # than its caller had must judge THOSE as well: they are mounts the
         # caller named, and a gate that reads only $workspace would let a
         # second directory in unexamined.
-        ${c.guard}
+        #
+        # A SUBSHELL, so the guard's `exit` is its verdict and nothing more:
+        # `exit 0` lets the launch go on rather than ending the launcher
+        # successfully with nothing launched, and an assignment to $workspace
+        # -- or to anything else the launcher goes on to use -- dies with the
+        # subshell rather than changing what gets mounted after it was
+        # judged. Non-zero lands in `set -e` and ends the launch. The `:` keeps
+        # the subshell well-formed for a guard that is empty or all comments.
+        (
+          :
+          ${c.guard}
+        )
 
         # passwd, group and shadow are written by the activation script, not
         # carried in the closure, so a root assembled from the store alone
@@ -1165,6 +1176,7 @@ let
         # straight past the wait below, and anything non-zero lands in the trap
         # through `set -e`, which kills the scope because $ready is still 0.
         (
+          :
           ${c.postStart}
         )
         ''}
@@ -1350,6 +1362,10 @@ in
             from `$PWD` -- what `$workspace` holds is exactly what will be
             bound, where anything a guard works out for itself agrees with
             the mount only by coincidence.
+
+            Runs in a subshell, so a non-zero exit refuses the launch, `exit 0`
+            allows it, and nothing the guard assigns reaches the launcher: it
+            judges `$workspace` and cannot change it.
           '';
         };
 
