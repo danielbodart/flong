@@ -23,9 +23,9 @@ warm on one machine.
    arm the exit trap.
 8. `attachBinds`, then `attachWrap`, as root.
 9. Start `systemd-run --scope … systemd-nspawn …` in the background.
-10. Find the session's leader, run `attach`, then start pasta (with `network`),
+10. Find the session's leader, run `postStart`, then start pasta (with `network`),
     then create the readiness marker.
-11. Wait for the session. The exit trap runs `detach` and releases the rest.
+11. Wait for the session. The exit trap runs `postStop` and releases the rest.
 
 ## Sessions are copies of a prepared root
 
@@ -159,7 +159,7 @@ than one that fails to build.
 - `--capability`, `--ambient-capability`, `--private-users`, `-U` in
   `extraFlags`: each returns something flong withholds. A user namespace of the
   container's own would make it the owner of the session's network namespace,
-  which is the property that stops the payload undoing an `attach` hook.
+  which is the property that stops the payload undoing a `postStart` hook.
 - `hostBridge`, addresses, `forwardPorts`, `interfaces`, `macvlans`,
   `extraVeths`: each is fixed per container, and one declaration runs many
   concurrent sessions. Two sessions would claim one address or one host port.
@@ -205,7 +205,7 @@ control, so nspawn stays in the terminal's foreground process group and an
 interactive session still reads the keyboard.
 
 On SIGHUP, SIGINT or SIGTERM the launcher stops the session, waits for it, and
-only then releases what it depends on. Releasing first would run `detach`,
+only then releases what it depends on. Releasing first would run `postStop`,
 remove the namespace pin and delete the root under a running session. The
 launcher runs `systemctl stop <machine>.scope` and also signals its
 `systemd-run` child, because until that child has registered the scope and
@@ -224,7 +224,7 @@ once it stops.
 What a session leaves outside itself (its root, nspawn's
 `/run/systemd/nspawn/<machine>/unix-export` mount and
 `/run/systemd/nspawn/propagate/<machine>` directory, the namespace pin, pasta,
-and whatever `detach` releases) is released by one function, called from two
+and whatever `postStop` releases) is released by one function, called from two
 places: the exit trap, and the next launch's sweep. A leftover `unix-export`
 mount is not reusable: nspawn refuses to start a machine whose mount point
 already exists.
@@ -257,19 +257,26 @@ to a concurrent sweep between checking for it and copying it. The copy then
 fails and that launch exits with an error. A `flock` across prepare-and-copy
 in every launch would cost every launch to avoid a rare, visible failure.
 
-**Each session records its own `detach`.** Several launchers can drive one
+**Each session records its own `postStop`.** Several launchers can drive one
 container, and a rebuild changes the snippet. The launcher writes the store
-path of the session's own teardown script to `detach-<machine>` beside the
+path of the session's own `postStop` script to `poststop-<machine>` beside the
 root, and the sweep runs that one. Only a `/nix/store` path is executed. Only
 `$machine` is passed, because on the sweep's path nothing else survives. A
-failing `detach` is reported and does not stop the rest of the release.
+failing `postStop` is reported and does not stop the rest of the release.
 
-## `attach`
+## `postStart`
 
 `guard` runs before the session exists: before prepare, before the machine
 name and before the exit trap. Anything it creates leaks if a later step
 fails, and the network namespace it would configure does not exist yet.
-`attach` runs after nspawn has created the namespace.
+`postStart` runs after nspawn has created the namespace.
+
+The root hooks take the names of a systemd service's stages, `postStart` and
+`postStop`, because they run at the same moments and fail the same way: a
+failed `ExecStartPost` stops the unit, and `ExecStopPost` runs however the unit
+ended. One difference is deliberate and stronger than systemd's: during
+`ExecStartPost` the main process is already running, while a session's payload
+is held until `postStart` has returned.
 
 ### Finding the leader
 
@@ -289,10 +296,10 @@ that ran `unshare -Upf`, handing the hook a namespace the payload built.
 
 ### The ordering is the security property
 
-Whatever `attach` installs is in place before anything gives the namespace
+Whatever `postStart` installs is in place before anything gives the namespace
 egress. A `--private-network` namespace starts with `lo` up and an empty
 routing table, so until egress exists the payload has nowhere to send packets.
-There is no window to race. flong starts pasta only after `attach` returns. A
+There is no window to race. flong starts pasta only after `postStart` returns. A
 hook that provisions egress before installing its rules (from `guard`, or at
 the top of the hook) loses the property without any error. Measured: 12 of 12
 connections bypassed the rules.
@@ -311,7 +318,7 @@ capabilities it appears to hold: listing or flushing the nftables ruleset,
 changing a route, address or link, writing `/proc/sys/net/*`, or moving an
 interface into a namespace it created. Measured, all of these.
 
-A session with `attach` or `network` also runs with `CAP_NET_ADMIN` dropped
+A session with `postStart` or `network` also runs with `CAP_NET_ADMIN` dropped
 from its capability bounding set and `--no-new-privileges=yes`, so no
 file-capability or setuid binary can regain it. This is defence in depth only:
 `unshare -U` inside the session creates a user namespace with a full capability
@@ -320,24 +327,24 @@ owns nothing of the session's.
 
 ### The payload waits for the hook
 
-nspawn would start the payload while `attach` and pasta are still running. A
+nspawn would start the payload while `postStart` and pasta are still running. A
 short payload could then finish before the hook ran, turning a successful
 payload into a failed launch. Measured: a payload ran to completion against an
 empty routing table, and the launcher then failed to pin a namespace that no
 longer existed; separately, a hook failed with `nsenter: cannot open
 /proc/<pid>/ns/net`.
 
-So in a session with `attach` or `network`, a wait between tini and everything
+So in a session with `postStart` or `network`, a wait between tini and everything
 else (`attachWrap`, `command`, the payload) polls for the directory
-`/run/flong-attached`, every 5 ms for up to 10 s. The launcher creates it
-through `/proc/<leader>/root` once `attach` and pasta are done. This is a
+`/run/flong-ready`, every 5 ms for up to 10 s. The launcher creates it
+through `/proc/<leader>/root` once `postStart` and pasta are done. This is a
 readiness marker, not a security boundary; the ordering above is the boundary.
 
 The marker is created with `mkdir`, not `touch`. Paths walked beneath
 `/proc/<pid>/root` belong to the session, and an absolute symlink met on that
 walk resolves against the caller's root: the same class of bug as runc's
 `/proc/self/exe` escape. Measured: `touch` through a planted
-`/run/flong-attached -> /tmp/escaped` creates `/tmp/escaped` on the host.
+`/run/flong-ready -> /tmp/escaped` creates `/tmp/escaped` on the host.
 Today nothing in a session can write `/run`, which is nspawn's root-owned
 tmpfs; `mkdir` does not depend on that. It never follows its final component
 and fails with `EEXIST` on anything already there, including a dangling
@@ -463,9 +470,16 @@ use") and is killed rather than run without its network.
   `CAP_SYS_ADMIN` from nspawn's default capability set.
 - **Nix daemon.** The daemon socket is not bound. Through it a session could
   build arbitrary derivations, and a fixed-output derivation is fetched by the
-  host's daemon outside the session's network namespace, where no `attach` rule
-  sees it. A `trusted-users` member could also set sandbox options, which is
+  host's daemon outside the session's network namespace, where no `postStart`
+  rule sees it. A `trusted-users` member could also set sandbox options, which is
   root-equivalent. See PLAN.md §3.
 - **Resource limits.** The session root, `TMPDIR` and overlay upper layers are
-  under `/run`, which is RAM. `properties` exists so `MemoryMax` makes a payload
-  that fills them the session's problem, not the host's.
+  under `/run`, which is RAM. `scopeConfig` exists so `MemoryMax` makes a
+  payload that fills them the session's problem, not the host's. It takes the
+  value type `serviceConfig` takes, rendered the same way, so a setting means
+  what it would in a unit file.
+- **A payload `PATH` option.** `/etc/set-environment` sets `PATH` before the
+  payload is exec'd, so packages added only to `command`'s script would reach
+  `command` and not the program it runs. The workload's tools belong in the
+  container's `environment.systemPackages`; `path` is for the host-side hooks
+  only.

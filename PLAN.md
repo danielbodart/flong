@@ -58,14 +58,14 @@ The cost is why it stays off. A declared container binds
 Through that socket a session can build arbitrary derivations, use unbounded
 CPU and disk, and reach the network from a fixed-output derivation. The host's
 daemon fetches that derivation outside the session's network namespace, where
-no rule an `attach` hook installed can see or log it, so a session whose egress
+no rule a `postStart` hook installed can see or log it, so a session whose egress
 is filtered must refuse the socket. A user in `trusted-users` could also set
 sandbox options through it, which is root-equivalent; on a default NixOS that
 list is `root` alone, so this is the weaker reason, but the option description
 must state it.
 
 If built: off by default, opt-in per launcher, refused in a session with an
-`attach` hook, `--bind-ro=/nix/var/nix/daemon-socket`, and
+`postStart` hook, `--bind-ro=/nix/var/nix/daemon-socket`, and
 `--bind=/nix/var/nix/profiles/per-container/<container>:/nix/var/nix/profiles`
 plus the matching `gcroots`, created by the launcher and kept per container so
 a warm toolchain survives.
@@ -76,7 +76,7 @@ New work is tested to the standard the network tests set, each property
 asserted rather than assumed:
 
 - A session with no `network` has only `lo`, and no route in either family.
-- An `attach` hook runs as root, is handed a namespace that is not the host's,
+- A `postStart` hook runs as root, is handed a namespace that is not the host's,
   and finds no route in it; its `attachBinds` are inside and absent from
   `FLONG_EXTRA_BINDS`.
 - The payload cannot list or flush a hook's ruleset, add a link or add a route,
@@ -98,7 +98,7 @@ asserted rather than assumed:
   loopback through its forward address or the unspecified one.
 - A clean exit and a SIGKILLed launcher both release the pin and pasta, the
   second through a sweep by a different launcher over the same container.
-- `detach` runs on both paths, the sweep running the dead session's own.
+- `postStop` runs on both paths, the sweep running the dead session's own.
 - The capability and privilege flags are refused in `extraFlags`, checked by
   the evaluation-only `assertions` check along with the network assertions.
 

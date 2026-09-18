@@ -24,7 +24,7 @@ root. The **workspace** is the host directory bind-mounted into the session at
 its own path and used as its working directory. The **payload** is the process
 `command` selects. **Hooks** are the shell options the launcher runs at fixed
 points: `workspace`, `extraBinds`, `extraBindsRo`, `guard`, `attachBinds`,
-`attachWrap`, `attach` and `detach`.
+`attachWrap`, `postStart` and `postStop`.
 
 ## Examples
 
@@ -91,9 +91,9 @@ DNS, published ports, and the host loopback ports you list.
 
 `network = { };` gives outbound access and no host ports.
 
-### A session with an `attach` hook
+### A session with a `postStart` hook
 
-Added to the previous example. `attach` runs as root on the host once the
+Added to the previous example. `postStart` runs as root on the host once the
 session's network namespace exists and before it has any route out, so
 firewall rules installed here are in place before the payload's first packet.
 
@@ -101,8 +101,8 @@ firewall rules installed here are in place before the payload's first packet.
 { pkgs, ... }:
 {
   flong.agent = {
-    launcherInputs = [ pkgs.nftables ];
-    attach = ''
+    path = [ pkgs.nftables ];
+    postStart = ''
       nsenter --net="$netns" nft -f ${./egress.nft}
     '';
   };
@@ -145,16 +145,15 @@ All under `flong.<name>`. Hooks are shell snippets.
 | `guard` | `""` | Decides whether the caller may launch. Non-zero exit refuses. |
 | `tmpfs` | `[ ]` | Paths mounted as an empty tmpfs owned by `user`. Entries may add options as `PATH:opts`. |
 | `overlays` | `{ }` | `{ target = lower; }`: an overlayfs whose writes go to an upper layer deleted with the session. |
-| `properties` | `{ }` | systemd properties for the session's scope, e.g. `MemoryMax = "8G"`. |
+| `scopeConfig` | `{ }` | Settings for the session's scope unit, typed as `serviceConfig`, e.g. `MemoryMax = "8G"`. |
 | `network` | `null` | User-mode networking through pasta. Requires `privateNetwork = true`. |
 | `network.forwardPorts` | `[ ]` | Published ports, shaped like `containers.<name>.forwardPorts`, bound on every host address. |
 | `network.hostPorts` | `[ ]` | Host loopback ports the session reaches at the same port on its own loopback, TCP and UDP. |
-| `attach` | `""` | Configures the session from the host once its network namespace exists, before any egress. Non-zero exit ends the session. |
+| `postStart` | `""` | Configures the session from the host once its namespaces exist, before `network` is attached and before the payload starts. Non-zero exit ends the session. |
 | `attachBinds` | `""` | Prints `SOURCE:DESTINATION` lines to bind-mount, for a socket or single file. Not reported to the payload. |
 | `attachWrap` | `""` | Prints a command, one argument per line, that the payload is exec'd through inside the session. |
-| `detach` | `""` | Releases what `attach` and `attachBinds` created, after the session ends. |
-| `launcherInputs` | `[ ]` | Packages on `PATH` for the host-side hooks. |
-| `payloadInputs` | `[ ]` | Packages on `PATH` for `command`. |
+| `postStop` | `""` | Releases what the root hooks created, after the session ends. |
+| `path` | `[ ]` | Packages on `PATH` for every hook that runs on the host. |
 | `launcher` | *read-only* | The generated launcher package. |
 
 [DESIGN.md](DESIGN.md) gives the reasoning behind each hook's privilege and
@@ -169,19 +168,19 @@ In launch order:
 | `workspace`, `extraBinds`, `extraBindsRo` | invoking user (`SUDO_UID` or `PKEXEC_UID`), else root | launcher arguments in `"$@"`; `$workspace` for the bind lists |
 | `guard` | root | `$workspace`, `$extra_binds`, `$extra_binds_ro` (newline-separated) |
 | `attachBinds`, `attachWrap` | root | `$machine`, `$root`, `$uid`, `$gid`, `$home`, `$workspace` |
-| `attach` | root | `$leader` (the session's pid 1), `$netns` (`/proc/$leader/ns/net`), `$attach_binds`, and all of the above |
-| `detach` | root | `$machine` only |
+| `postStart` | root | `$leader` (the session's pid 1), `$netns` (`/proc/$leader/ns/net`), `$attach_binds`, and all of the above |
+| `postStop` | root | `$machine` only |
 
 The paths `workspace`, `extraBinds`, `extraBindsRo` and `attachBinds` print
 are resolved with `realpath` and refused if they contain `:` or a newline,
 which `--bind` cannot express.
 
-`detach` runs from the launcher's exit trap, or from the next launch of the
+`postStop` runs from the launcher's exit trap, or from the next launch of the
 same container if the launcher was killed. It must depend on `$machine` alone
 and succeed when what it releases is already gone.
 
 Without `privateNetwork`, `$netns` is the host's network namespace, and rules
-`attach` installs there apply to the host.
+`postStart` installs there apply to the host.
 
 ### Inside a session
 
@@ -240,7 +239,7 @@ Refusals are evaluation-time assertions.
   session with the same `forwardPorts` entry fails to start. `hostPorts` has no
   such limit.
 - **Sessions use RAM.** The session root, `TMPDIR` and overlay upper layers are
-  under `/run`. Set `properties.MemoryMax`.
+  under `/run`. Set `scopeConfig.MemoryMax`.
 - **Overlays need care.** The merged directory takes its owner from the lower
   one. overlayfs reports changing device and inode numbers as a file is
   written, so do not overlay a SQLite database.

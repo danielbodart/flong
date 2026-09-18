@@ -1,4 +1,4 @@
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, utils, ... }:
 
 let
   cfg = config.flong;
@@ -37,7 +37,7 @@ let
 
   mkPayload = name: c: pkgs.writeShellApplication {
     name = "flong-payload-${name}";
-    runtimeInputs = [ pkgs.coreutils ] ++ c.payloadInputs;
+    runtimeInputs = [ pkgs.coreutils ];
     text = ''
       workspace=$1
       shift
@@ -72,9 +72,15 @@ let
       # Worth having per session because a session writes its root, its TMPDIR
       # and every overlay upper into /run -- which is RAM, so a payload that
       # fills one is the host's problem rather than its own.
-      resourceProps = lib.concatMapStringsSep " "
-        (k: "--property=${lib.escapeShellArg "${k}=${c.properties.${k}}"}")
-        (lib.attrNames c.properties);
+      # Rendered as a unit file renders `serviceConfig`, so a value means here
+      # what it would mean there: a bool is "true" or "false", and a list is
+      # one assignment per element, which systemd-run appends for the
+      # properties that take a list.
+      scopeProps = lib.concatStringsSep " " (lib.concatLists (lib.mapAttrsToList
+        (k: v: map
+          (x: "--property=${lib.escapeShellArg "${k}=${utils.systemdUtils.lib.toOption x}"}")
+          (lib.toList v))
+        c.scopeConfig));
 
       # The kinds of network isolation that need nothing configured inside the
       # container, which is the only kind a session can have: nspawn drops to
@@ -90,8 +96,7 @@ let
       # --private-network `auto` already leaves the root's file alone, but
       # only by way of a rule about something else: were it ever to copy
       # instead, it would do so after the custom binds are mounted, opening
-      # with O_TRUNC -- through whatever a bind, an `attachBinds` line say,
-      # had put at that path.
+      # with O_TRUNC -- through whatever a bind had put at that path.
       resolvConfFlag = lib.optionalString (c.network != null) "--resolv-conf=off";
 
       # DEFENCE IN DEPTH, AND NOTHING MORE. A session whose namespace flong or
@@ -107,7 +112,7 @@ let
       # change a route, an address or a link, write /proc/sys/net/*, or move an
       # interface into a namespace it has just created. Measured, all of it.
       # The flags are here so that a second failure is needed, not a first.
-      steered = c.attach != "" || c.network != null;
+      steered = c.postStart != "" || c.network != null;
       capabilityFlags = lib.optionalString steered
         "--drop-capability=CAP_NET_ADMIN --no-new-privileges=yes";
 
@@ -314,7 +319,7 @@ let
       payload = mkPayload name c;
 
       # A HOOKED SESSION'S PAYLOAD WAITS FOR THE HOOK. nspawn starts the
-      # payload 58-65 ms after systemd-run returns, while `attach` and pasta
+      # payload 58-65 ms after systemd-run returns, while `postStart` and pasta
       # can only begin once the namespace exists at 26-30 ms, and take what
       # they take. Left to race, a short payload finished first: measured,
       # once as a whole payload run against an empty route table with the
@@ -326,21 +331,21 @@ let
       # nothing here decides what the workload can reach, only whether what
       # the hook installs and the network it was promised are there yet when
       # it starts. So it is a marker, not a handshake -- a directory the
-      # launcher makes from the host once everything is attached, in a /run
+      # launcher makes from the host once the hook and pasta are done, in a /run
       # that is nspawn's own root-owned tmpfs, where nothing in the session
       # could make it first.
       #
-      # Between tini and everything else, so `attachWrap`, `command` and the
+      # Between tini and everything else, so a wrapper, `command` and the
       # workload all start after it.
       gate = pkgs.writeShellApplication {
         name = "flong-gate";
         runtimeInputs = [ pkgs.coreutils ];
         text = ''
           for ((try = 0; try < 2000; try++)); do
-            [ -d /run/flong-attached ] && exec "$@"
+            [ -d /run/flong-ready ] && exec "$@"
             sleep 0.005
           done
-          echo "flong: the session was never attached" >&2
+          echo "flong: the session never became ready" >&2
           exit 1
         '';
       };
@@ -352,13 +357,13 @@ let
       # launchers can drive one container. So each session records which
       # teardown is its own, and the sweep runs that one -- including a
       # superseded generation's, whose code this launcher no longer carries.
-      detachScript = pkgs.writeShellApplication {
-        name = "flong-detach-${name}";
-        runtimeInputs = [ pkgs.coreutils pkgs.util-linux ] ++ c.launcherInputs;
+      postStopScript = pkgs.writeShellApplication {
+        name = "flong-poststop-${name}";
+        runtimeInputs = [ pkgs.coreutils pkgs.util-linux ] ++ c.path;
         text = ''
           # Exported, so a helper the snippet calls sees it as well.
           export machine=$1
-          ${c.detach}
+          ${c.postStop}
         '';
       };
     in
@@ -366,7 +371,7 @@ let
       inherit name;
       runtimeInputs = [ pkgs.git pkgs.coreutils pkgs.util-linux pkgs.e2fsprogs ]
         ++ lib.optional (c.network != null) pkgs.passt
-        ++ c.launcherInputs;
+        ++ c.path;
       text = ''
         ${identityFrom}
         # WORKSPACE FIRST, THEN GUARD.
@@ -559,27 +564,30 @@ let
         # EVERYTHING A SESSION LEAVES OUTSIDE ITSELF, RELEASED FROM ONE PLACE,
         # because it is released from two: the cleanup trap, for a session
         # whose launcher is still here to run it, and the sweep below, for one
-        # whose launcher was SIGKILLed. Given the machine name, the session's
-        # root and the record of its own teardown, because on the sweep's path
-        # that is all that is left.
+        # whose launcher was SIGKILLed. Given the machine name and the cache
+        # it ran from, because on the sweep's path that is all that is left:
+        # the session's root and the record of its own teardown are both
+        # named for the machine, in that cache.
         #
         # Tolerant throughout: a leftover that will not go costs the host a
         # directory, where an abort here costs the caller their session -- or,
         # in the trap, the payload's exit status.
         release_session() {
-          local machine=$1 root=$2 record=$3 detach pasta_pid
-          # The consumer's teardown first, while nothing of flong's has gone
+          local machine=$1 dir=$2 root record post_stop pasta_pid
+          root=$dir/s-$machine
+          record=$dir/poststop-$machine
+          # The consumer's postStop first, while nothing of flong's has gone
           # yet. Only a store path is run: the record is written by root into a
           # root-owned directory, and it is still not the place to take a
           # command from.
           if [ -e "$record" ]; then
-            detach=$(cat "$record")
-            case $detach in
+            post_stop=$(cat "$record")
+            case $post_stop in
               /nix/store/*) ;;
-              *) detach="" ;;
+              *) post_stop="" ;;
             esac
-            if [ -n "$detach" ] && [ -x "$detach" ]; then
-              "$detach" "$machine" || echo "${name}: detach failed for $machine" >&2
+            if [ -n "$post_stop" ] && [ -x "$post_stop" ]; then
+              "$post_stop" "$machine" || echo "${name}: postStop failed for $machine" >&2
             else
               echo "${name}: no teardown left to run for $machine" >&2
             fi
@@ -667,7 +675,7 @@ let
             [ -e "$d" ] || continue
             m=''${d##*/}; m=''${m#s-}
             if session_live "$m"; then live=1; continue; fi
-            release_session "$m" "$d" "$dir/detach-$m"
+            release_session "$m" "$dir"
           done
           # A superseded closure's cache with nothing of it still running: the
           # prepared root it was keyed on goes too, since no launcher will ever
@@ -707,11 +715,11 @@ let
         machine=${c.container}-$$-''${RANDOM}
         root=${cache}/s-$machine
         cp -a "$prepared" "$root"
-        ${lib.optionalString (c.detach != "") ''
-        # Which teardown is this session's, for whoever ends up releasing it.
+        ${lib.optionalString (c.postStop != "") ''
+        # Which postStop is this session's, for whoever ends up releasing it.
         # Beside the root and not in it, since the root is the container's "/".
-        # Written before anything a teardown would release can exist.
-        echo ${detachScript}/bin/flong-detach-${name} > ${cache}/detach-"$machine"
+        # Written before anything a postStop would release can exist.
+        echo ${postStopScript}/bin/flong-poststop-${name} > ${cache}/poststop-"$machine"
         ''}
 
         # An inherited TMPDIR names a host path that is absent or root-owned in
@@ -803,7 +811,7 @@ let
         ${lib.optionalString steered ''
         # Set before the trap is armed rather than beside the launch, because
         # the trap runs for every exit after this line and reads it.
-        attached=0
+        ready=0
         ''}
 
         # NOT exec: that would replace the shell and discard the trap with it.
@@ -814,22 +822,23 @@ let
           fi
           ${lib.optionalString steered ''
           # A SESSION WHOSE HOOK NEVER FINISHED MUST NOT BE LEFT RUNNING.
-          # `attach` is the whole security property, and it is an ordering: what
-          # it installs is in place before anything gives the namespace egress.
+          # `postStart` is the whole security property, and it is an ordering:
+          # what it installs is in place before anything gives the namespace
+          # egress.
           # A session that gets past it without it -- a hook that exited
           # non-zero, a leader that never appeared, a launcher killed in
           # between -- is a session with nothing installed and nothing left to
           # install it, so it goes; and so is one whose network was asked for
           # and not attached, which is broken rather than unsafe but has no
           # business carrying on as if it worked.
-          if [ "$attached" = 0 ]; then
+          if [ "$ready" = 0 ]; then
             ${systemctl} kill -s KILL "$machine.scope" 2>/dev/null || true
           fi
           ''}
           # THE LAUNCHER OWNS ITS SESSION, so a launcher asked to stop -- SIGTERM,
           # SIGINT, SIGHUP, anything bash still gets to run this trap for --
           # stops the session FIRST, and waits for it, and only then releases
-          # what the session depends on. Releasing first ran `detach`, pulled
+          # what the session depends on. Releasing first ran `postStop`, pulled
           # the network pin and deleted the root under a session that was still
           # running. On the ordinary path the payload has already exited and
           # been waited for, $session is empty, and there is nothing to stop.
@@ -845,7 +854,7 @@ let
             kill -TERM "$session" 2>/dev/null || true
             wait "$session" 2>/dev/null || true
           fi
-          release_session "$machine" "$root" ${cache}/detach-"$machine"
+          release_session "$machine" ${cache}
         }
         trap cleanup EXIT
         # Explicitly, rather than trusting bash to run the EXIT trap from inside
@@ -893,8 +902,8 @@ let
         # business to be told about.
         #
         # Resolved here, as root, after the trap is armed and the machine name
-        # exists, so a source can be made per session and released by `detach`
-        # if a later step fails. Not from `attach` itself: a bind mount is an
+        # exists, so a source can be made per session and released by
+        # `postStop` if a later step fails. Not from `postStart`: a bind mount is an
         # argument to nspawn, and by the time there is a namespace the mount
         # table has been made.
         attach_binds=""
@@ -1026,7 +1035,7 @@ let
         # STARTED IN THE BACKGROUND, AND WAITED FOR AT THE END. The launcher
         # used to block here for the whole session, which left no moment in
         # which to touch the namespace nspawn had just made -- and that moment
-        # is precisely what `attach` needs: after the namespace exists, before
+        # is precisely what `postStart` needs: after the namespace exists, before
         # the workload can reach anything through it.
         #
         # stdin is handed over explicitly because bash gives an asynchronous
@@ -1040,7 +1049,7 @@ let
         # the keyboard instead of stopping on SIGTTIN.
         exec 3<&0
         ${systemdRun} --scope --quiet --unit="$machine" --slice=machine.slice \
-          --property=DevicePolicy=closed ${deviceProps} ${resourceProps} -- \
+          --property=DevicePolicy=closed ${deviceProps} ${scopeProps} -- \
           ${nspawn} -q --keep-unit --directory="$root" --machine="$machine" \
             --hostname=${lib.escapeShellArg c.container} \
             --console=autopipe \
@@ -1150,13 +1159,13 @@ let
         # nothing to race. Everything flong attaches itself -- pasta, for one --
         # is attached after this returns, and a consumer that provisions egress
         # of its own before installing anything has given the property away.
-        ${lib.optionalString (c.attach != "") ''
+        ${lib.optionalString (c.postStart != "") ''
         # A subshell, so that the hook's own `exit` is the hook's verdict and
         # not the launcher's: `exit 0` ends the hook rather than skipping
         # straight past the wait below, and anything non-zero lands in the trap
-        # through `set -e`, which kills the scope because $attached is still 0.
+        # through `set -e`, which kills the scope because $ready is still 0.
         (
-          ${c.attach}
+          ${c.postStart}
         )
         ''}
         ${lib.optionalString (c.network != null) ''
@@ -1197,7 +1206,7 @@ let
         #
         # MKDIR, AND NEVER TOUCH. Whatever is walked beneath /proc/<pid>/root
         # is the session's, and an ABSOLUTE symlink met on that walk resolves
-        # against the CALLER's root -- so a /run/flong-attached planted as
+        # against the CALLER's root -- so a /run/flong-ready planted as
         # `-> /etc/something` would have root on the host create or touch that
         # host path: the class of runc's /proc/self/exe escape. Today nothing
         # in a session can write /run, since it is nspawn's root-owned tmpfs;
@@ -1205,11 +1214,11 @@ let
         # final component and fails with EEXIST on anything already there, a
         # dangling symlink included -- and a failure here fails the launch, and
         # the trap kills the session, rather than carrying on without a marker.
-        mkdir "/proc/$leader/root/run/flong-attached" || {
-          echo "${name}: could not mark $machine attached; something is already at /run/flong-attached" >&2
+        mkdir "/proc/$leader/root/run/flong-ready" || {
+          echo "${name}: could not mark $machine ready; something is already at /run/flong-ready" >&2
           exit 1
         }
-        attached=1
+        ready=1
         ''}
 
         rc=0
@@ -1353,52 +1362,41 @@ in
           '';
         };
 
-        attach = lib.mkOption {
+        postStart = lib.mkOption {
           type = lib.types.lines;
           default = "";
           example = ''
             nsenter --net="$netns" nft -f /etc/my-ruleset.nft
           '';
           description = ''
-            Shell run on the host as root once nspawn has started, with the
-            session's network namespace in scope: `$leader` is the container's
-            leader pid and `$netns` the path to its network namespace
-            (`/proc/<leader>/ns/net`), both exported. `$machine`, `$root`,
-            `$uid`, `$gid`, `$home`, `$workspace`, `$extra_binds`,
-            `$extra_binds_ro` and `$attach_binds` -- `attachBinds` resolved,
-            as `SOURCE:DESTINATION` lines -- are in scope too.
+            Shell run on the host as root, once per session, as soon as the
+            session's namespaces exist -- **before** `network` is attached and
+            **before** the payload starts. The payload waits for it.
 
-            Without `privateNetwork` a session shares the host's network
-            namespace, and `$netns` names *that*: a hook that installs a
-            ruleset there is steering the host.
+            `$leader` is the session's pid 1 as seen from the host and `$netns`
+            its network namespace (`/proc/$leader/ns/net`), both exported.
+            `$machine`, `$root`, `$uid`, `$gid`, `$home`, `$workspace`,
+            `$extra_binds`, `$extra_binds_ro` and `$attach_binds` are in scope
+            too. Without `privateNetwork` a session
+            shares the host's network namespace, and `$netns` names *that*: a
+            hook that installs a ruleset there is steering the host.
 
-            Unlike `guard`, which runs before anything exists, this is the
-            moment a session's namespace can be steered from outside: `guard`
-            runs before prepare, before the identity check, before there is a
-            machine name and before the cleanup trap, so anything it creates
-            leaks whenever a later step fails, and the namespace it would want
-            is not there yet.
+            **The ordering is the contract, and it is the security property.**
+            Whatever this installs into the namespace is in place before
+            anything gives it egress: a `privateNetwork` namespace starts with
+            `lo` up and an empty route table, so until egress exists the
+            workload has nowhere to go and there is no window to race. flong
+            attaches `network` only after this returns. A consumer that
+            provisions egress of its own first -- from `guard`, or from the top
+            of this hook -- has given the property away without any error.
 
-            **The ordering is the contract, and it is the whole security
-            property.** Whatever this installs into the namespace is in place
-            *before* anything provisions egress. A `--private-network`
-            namespace starts with `lo` up and an empty route table, so until
-            egress exists the workload has nowhere to go: there is no window to
-            race, and so no handshake, wrapper or readiness protocol is needed.
-            flong attaches its own `network` after this returns for exactly
-            that reason. A consumer that provisions egress of its own first --
-            from `guard`, or from the top of this hook -- has silently given
-            the property away: measured, 12 of 12 connections unsteered.
+            A non-zero exit ends the session: the scope is killed and the
+            launcher exits non-zero. So does a leader that never appears.
+            Runs in a subshell, so `exit 0` ends this hook and not the launch.
 
-            A non-zero exit ends the session rather than letting it run
-            unsteered: the scope is killed, and the launcher exits non-zero.
-
-            The leader is polled for, because `systemd-run` returns 26-30 ms
-            before there is a namespace. The payload -- `attachWrap`, `command`
-            and the workload -- waits until this hook, and any `network`, has
-            finished: not for safety, which the ordering gives, but so that a
-            short payload cannot finish before the hook has run and turn a
-            session that succeeded into a launch that failed.
+            Unlike systemd's `ExecStartPost`, the main process is not yet
+            running: it is held until this hook and any `network` have
+            finished.
           '';
         };
 
@@ -1409,7 +1407,7 @@ in
           description = ''
             Shell printing `SOURCE:DESTINATION` lines, each bound read-write
             into the session: a host path of the hook's choosing, at a path
-            inside of the hook's choosing. This is how `attach` gets a socket
+            inside of the hook's choosing. This is how `postStart` gets a socket
             or a single file into the sandbox, which `extraBinds` cannot do --
             that takes directories only, binds each at its own path, is
             resolved as the caller, and is announced to the payload.
@@ -1417,9 +1415,9 @@ in
             Runs on the host as root, after `guard`, once the session has a
             machine name and its cleanup trap is armed, with `$machine`,
             `$root`, `$uid`, `$gid`, `$home` and `$workspace` in scope -- so a
-            source can be made for this session alone, and `detach` will be
+            source can be made for this session alone, and `postStop` will be
             called to release it even if the launch fails after this point.
-            It runs before nspawn and not from `attach`, because a bind mount
+            It runs before nspawn and not from `postStart`, because a bind mount
             is an argument to nspawn: by the time there is a namespace, the
             mount table has been made. A source that must exist before the
             session starts -- a listening socket -- is this snippet's to create.
@@ -1455,37 +1453,33 @@ in
             one the workload could have declined to run; this one is between
             the workload and its own pid 1.
 
-            It starts after `attach` has finished, like the rest of the
+            It starts after `postStart` has finished, like the rest of the
             payload, so it is not needed to close any window: use it for a
             launcher that wants to *be* the workload's parent.
           '';
         };
 
-        detach = lib.mkOption {
+        postStop = lib.mkOption {
           type = lib.types.lines;
           default = "";
           example = ''rm -f "/run/my-gate/$machine.sock"'';
           description = ''
-            Shell run on the host as root when a session ends, to release
-            whatever `attachBinds` and `attach` made outside it. `$machine` is
-            in scope, exported, and nothing else is -- deliberately, because
-            this runs on two paths and the second has nothing else left: the
-            launcher's cleanup trap runs it for a session that ended, and the
-            next launch of the same container runs it from its sweep for a
-            session whose launcher was SIGKILLed, where the machine name is all
-            that survives.
+            Shell run on the host as root after a session ends, to release
+            whatever the other root hooks made outside it. `$machine` is set,
+            exported, and nothing else is.
 
-            Each session records its own teardown, so the sweep runs the one
-            belonging to the session it is releasing -- not its own, which
-            differs whenever several launchers drive one container or a
-            rebuild has changed this snippet since.
+            It runs on two paths: from the launcher's exit trap once the
+            session has stopped, and -- for a session whose launcher was
+            SIGKILLed -- from the sweep of a later launch of the same
+            container, where the machine name is all that survives. Each
+            session records its own `postStop`, so the sweep runs the one
+            belonging to the session it releases, even when another launcher
+            or a rebuilt one does the sweeping.
 
-            It must therefore be keyed on `$machine` alone, and it must be
-            safe to run for a session whose state is already gone. It runs
-            under `set -euo pipefail` with `launcherInputs` on `PATH`; a
-            non-zero exit is reported and otherwise ignored, because what
-            follows it is flong's own release and a consumer's teardown must
-            not be what stops that.
+            So it must depend on `$machine` alone and succeed when what it
+            releases is already gone. It runs under `set -euo pipefail` with
+            `path` on `PATH`; a non-zero exit is reported and otherwise
+            ignored, because flong's own release follows it.
           '';
         };
 
@@ -1511,7 +1505,7 @@ in
             and no host configuration, and hands the sandbox sockets rather than
             packets.
 
-            Attached after `attach` returns, never before, which is what makes
+            Attached after `postStart` returns, never before, which is what makes
             the hook's ordering hold. A session with a network also has a
             namespace pin under /run/flong/netns and a pasta process outside
             its scope, both released by the cleanup trap and, for a killed
@@ -1606,31 +1600,34 @@ in
           '';
         };
 
-        properties = lib.mkOption {
-          type = lib.types.attrsOf lib.types.str;
+        scopeConfig = lib.mkOption {
+          type = lib.types.attrsOf utils.systemdUtils.unitOptions.unitOption;
           default = { };
           example = { MemoryMax = "8G"; CPUQuota = "400%"; };
           description = ''
-            systemd properties applied to the session's scope, as
-            `--property=NAME=VALUE`. See
+            Settings for the session's scope unit, as `serviceConfig` takes
+            them for a service: a bool is written `true` or `false`, and a list
+            is one assignment per element. Passed to `systemd-run --scope` as
+            `--property=NAME=VALUE`, after flong's own `DevicePolicy=closed`
+            and the declaration's `allowedDevices`. See
             {manpage}`systemd.resource-control(5)`.
 
-            Worth setting because a session's root, its TMPDIR and every
-            overlay upper live under /run, which is RAM: `MemoryMax` is what
-            makes a payload that fills one the session's problem rather than
-            the host's.
+            A session's root, its TMPDIR and every overlay upper layer live
+            under /run, which is RAM: `MemoryMax` makes a payload that fills
+            them the session's problem rather than the host's.
           '';
         };
 
-        launcherInputs = lib.mkOption {
+        path = lib.mkOption {
           type = lib.types.listOf lib.types.package;
           default = [ ];
-          description = "Extra packages on PATH for `guard` and `workspace`.";
-        };
-        payloadInputs = lib.mkOption {
-          type = lib.types.listOf lib.types.package;
-          default = [ ];
-          description = "Extra packages on PATH for `command`.";
+          description = ''
+            Packages on `PATH` for every hook that runs on the host: the
+            caller-run `workspace`, the root-run `guard`, `postStart` and
+            `postStop`. Not for `command`, which runs inside the session with
+            the container's own `PATH`: a tool the workload needs belongs in
+            the container's `environment.systemPackages`.
+          '';
         };
 
         launcher = lib.mkOption {

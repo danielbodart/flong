@@ -200,7 +200,7 @@
       container = "netless";
       user = "alice";
       workspace = ''realpath /srv/work'';
-      launcherInputs = [ pkgs.nftables pkgs.netcat pkgs.procps ];
+      path = [ pkgs.nftables pkgs.netcat pkgs.procps ];
 
       # What the caller asked for, so that FLONG_EXTRA_BINDS has something in
       # it for the hook's binds to be absent from.
@@ -224,13 +224,13 @@
 
       # Releases what attachBinds made, and says so. Keyed on $machine alone,
       # because on the sweep's path that is all there is.
-      detach = ''
+      postStop = ''
         pkill -f "hook-sock-$machine" || true
         rm -f "/run/hook-file-$machine" "/run/hook-sock-$machine"
-        echo "$machine" >> /tmp/detached
+        echo "$machine" >> /tmp/stopped
       '';
 
-      attach = ''
+      postStart = ''
         # The binds reach the hook resolved, so it knows where it put them.
         grep -q ":/run/hook/sock$" <<< "$attach_binds"
 
@@ -244,7 +244,7 @@
           readlink "$netns"
           nsenter --net="$netns" cat /proc/net/route | tail -n +2 | wc -l
           echo "$machine"
-        } > /tmp/attach-facts
+        } > /tmp/poststart-facts
 
         # And something installed through it, for the session to fail to undo.
         nsenter --net="$netns" nft \
@@ -277,7 +277,7 @@
       container = "netless";
       user = "alice";
       workspace = ''realpath /srv/work'';
-      launcherInputs = [ pkgs.nftables ];
+      path = [ pkgs.nftables ];
 
       network = {
         # 18124 is listening on the host too, and is not named: it is the
@@ -286,7 +286,7 @@
         forwardPorts = [ { hostPort = 18200; containerPort = 18201; } ];
       };
 
-      attach = ''
+      postStart = ''
         # How much egress the namespace had while the hook held it. pasta is
         # attached after this returns, so the answer must be none.
         nsenter --net="$netns" cat /proc/net/route | tail -n +2 | wc -l \
@@ -299,26 +299,26 @@
 
       # Records that it ran, and whether the session was still running when
       # it did -- which it must not be, whichever way the launcher ended.
-      detach = ''
+      postStop = ''
         if /run/current-system/sw/bin/systemctl is-active --quiet "$machine.scope"; then
-          echo "live-at-detach" >> /tmp/detached
+          echo "live-at-poststop" >> /tmp/stopped
         fi
-        echo "$machine" >> /tmp/detached
+        echo "$machine" >> /tmp/stopped
       '';
 
       command = ''set -- bash -c "$1"'';
     };
 
     # A hook that plants what a workload would, if it could ever write the
-    # session's /run: an absolute symlink where the attach marker goes. Walked
+    # session's /run: an absolute symlink where the ready marker goes. Walked
     # beneath /proc/<pid>/root, that resolves against the HOST's root -- so
     # the launcher must refuse it, not follow it to /tmp/escaped.
     flong.plantedmarker = {
       container = "netless";
       user = "alice";
       workspace = ''realpath /srv/work'';
-      attach = ''
-        ln -s /tmp/escaped "/proc/$leader/root/run/flong-attached"
+      postStart = ''
+        ln -s /tmp/escaped "/proc/$leader/root/run/flong-ready"
       '';
       command = ''set -- sleep 300'';
     };
@@ -330,7 +330,7 @@
       container = "netless";
       user = "alice";
       workspace = ''realpath /srv/work'';
-      attach = ''
+      postStart = ''
         echo "the hook refuses this session" >&2
         exit 1
       '';
@@ -342,7 +342,14 @@
 
       # Applied to the session's scope. A limit rather than a nicety: the
       # session root, TMPDIR and every overlay upper are in /run, which is RAM.
-      properties.MemoryMax = "1G";
+      # The rest are there for their types, which are the ones `serviceConfig`
+      # takes: an integer, a bool and a list.
+      scopeConfig = {
+        MemoryMax = "1G";
+        TasksMax = 512;
+        MemoryZSwapWriteback = false;
+        IPAddressDeny = [ "192.0.2.1" "192.0.2.2" ];
+      };
 
       # Not a git checkout, which is the point: the default asks git, and a
       # fast container is not obliged to be a repository.
@@ -577,7 +584,7 @@
           # assumed.
           machine.succeed("${hooked} 'true'")
           uid, host_ns, session_ns, routes, name = \
-              machine.succeed("cat /tmp/attach-facts").split()
+              machine.succeed("cat /tmp/poststart-facts").split()
           assert uid == "0", uid
           assert session_ns != host_ns, f"{session_ns} == {host_ns}"
           assert routes == "0", f"the namespace had {routes} routes at hook time"
@@ -589,11 +596,11 @@
           out = machine.succeed("${hooked} 'echo $FLONG_WRAPPED'")
           assert out.strip().startswith("netless-"), out
 
-      with subtest("the attach marker is a directory the launcher made"):
-          out = machine.succeed("${hooked} 'stat -c \"%F %U\" /run/flong-attached'")
+      with subtest("the ready marker is a directory the launcher made"):
+          out = machine.succeed("${hooked} 'stat -c \"%F %U\" /run/flong-ready'")
           assert out.strip() == "directory root", out
 
-      with subtest("an entry already at the marker's path fails the attach, and is not followed"):
+      with subtest("an entry already at the marker's path fails the launch, and is not followed"):
           # mkdir, not touch: an absolute symlink under /proc/<pid>/root
           # resolves against the host's root, so following it would have root
           # create a host path of the session's choosing.
@@ -646,20 +653,20 @@
           assert "dport 19999 drop" in rules, rules
           machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
 
-      with subtest("a session's teardown runs when it ends"):
-          machine.succeed("rm -f /tmp/detached")
+      with subtest("postStop runs when a session ends"):
+          machine.succeed("rm -f /tmp/stopped")
           machine.succeed("${hooked} 'true'")
-          name = machine.succeed("cat /tmp/attach-facts").split()[4]
-          assert machine.succeed("cat /tmp/detached").split() == [name]
+          name = machine.succeed("cat /tmp/poststart-facts").split()[4]
+          assert machine.succeed("cat /tmp/stopped").split() == [name]
           machine.fail(f"test -e /run/hook-file-{name}")
           machine.fail(f"test -e /run/hook-sock-{name}")
           machine.fail(f"pgrep -f hook-sock-{name}")
 
       with subtest("and when its launcher was killed, from the next launch's sweep"):
           # No trap survives SIGKILL, so the sweep has to -- and it has to run
-          # the dead session's teardown rather than its own: the launch that
+          # the dead session's postStop rather than its own: the launch that
           # sweeps here is `netless`, over the same container, and has none.
-          machine.succeed("rm -f /tmp/detached")
+          machine.succeed("rm -f /tmp/stopped")
           machine.succeed("${hooked} 'sleep 300' >/dev/null 2>&1 &")
           name = machine.wait_until_succeeds(
               "ls -d /run/flong/netless-*/s-netless-*").strip().split("/s-")[-1]
@@ -669,12 +676,12 @@
           machine.succeed(f"systemctl kill -s KILL {name}.scope")
           machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
           # Nothing has run it yet, and what it releases is still there.
-          machine.fail("test -e /tmp/detached")
+          machine.fail("test -e /tmp/stopped")
           machine.succeed(f"test -e /run/hook-file-{name}")
           machine.succeed(f"pgrep -f hook-sock-{name}")
 
           machine.succeed("${netless} 'true'")
-          assert machine.succeed("cat /tmp/detached").split() == [name]
+          assert machine.succeed("cat /tmp/stopped").split() == [name]
           machine.fail(f"test -e /run/hook-file-{name}")
           machine.fail(f"pgrep -f hook-sock-{name}")
           machine.fail(f"ls -d /run/flong/netless-*/s-{name}")
@@ -855,9 +862,10 @@
 
       with subtest("SIGTERM to the launcher ends the session before releasing it"):
           # The launcher owns its session: asked to stop, it stops the scope
-          # and waits, and only then runs detach, pulls the pin and removes the
-          # root. Releasing first did all three under a session still running.
-          machine.succeed("rm -f /tmp/detached")
+          # and waits, and only then runs postStop, pulls the pin and removes
+          # the root. Releasing first did all three under a session still
+          # running.
+          machine.succeed("rm -f /tmp/stopped")
           machine.succeed("${networked} 'sleep 300' >/dev/null 2>&1 &")
           name = machine.wait_until_succeeds(
               "ls /run/flong/netns | grep -v pid").strip()
@@ -871,8 +879,8 @@
           machine.fail(f"test -e /run/flong/netns/{name}.pid")
           machine.wait_until_fails(pasta_for(name + " "))
           machine.fail(f"ls -d /run/flong/netless-*/s-{name}")
-          assert machine.succeed("cat /tmp/detached").split() == [name], \
-              machine.succeed("cat /tmp/detached")
+          assert machine.succeed("cat /tmp/stopped").split() == [name], \
+              machine.succeed("cat /tmp/stopped")
 
       for port in (18123, 18124, 19999):
           machine.succeed(f"systemctl stop listen-{port}")
@@ -887,7 +895,7 @@
           machine.fail("machinectl list --no-legend | grep -q netless-")
           machine.succeed("test -z \"$(find /run/flong -maxdepth 2 -name 's-netless-*')\"")
 
-      with subtest("the scope is in machine.slice and carries its properties"):
+      with subtest("the scope is in machine.slice and carries its scopeConfig"):
           # Both facts in one read, and from the host deliberately: the session
           # has a cgroup namespace of its own, so from inside it the limit is on
           # an ancestor it cannot see and /sys/fs/cgroup/memory.max says "max".
@@ -895,6 +903,13 @@
           limit = machine.wait_until_succeeds(
               "cat /sys/fs/cgroup/machine.slice/demo-*.scope/memory.max").strip()
           assert limit == str(1024 * 1024 * 1024), limit
+          scope = machine.succeed(
+              "basename /sys/fs/cgroup/machine.slice/demo-*.scope").strip()
+          props = machine.succeed(
+              f"systemctl show {scope} -p TasksMax -p MemoryZSwapWriteback -p IPAddressDeny")
+          assert "TasksMax=512" in props, props
+          assert "MemoryZSwapWriteback=no" in props, props
+          assert "IPAddressDeny=192.0.2.1/32 192.0.2.2/32" in props, props
           # And nothing of that session survives it, which the subtests after
           # this one assume.
           machine.wait_until_succeeds("test -z \"$(find /run/flong -maxdepth 2 -name 's-*')\"")
