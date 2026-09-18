@@ -26,28 +26,28 @@
           assertions =
             let
               lib = nixpkgs.lib;
+              configWith = extra:
+                (lib.nixosSystem {
+                  inherit system;
+                  modules = [
+                    ./module.nix
+                    {
+                      boot.isContainer = true;
+                      system.stateVersion = "24.05";
+                      containers.box = {
+                        privateNetwork = true;
+                        config.system.stateVersion = "24.05";
+                      };
+                      flong.box = {
+                        user = "root";
+                        command = [ "true" ];
+                      };
+                    }
+                    extra
+                  ];
+                }).config;
               flongFailures = extra:
-                let
-                  config = (lib.nixosSystem {
-                    inherit system;
-                    modules = [
-                      ./module.nix
-                      {
-                        boot.isContainer = true;
-                        system.stateVersion = "24.05";
-                        containers.box = {
-                          privateNetwork = true;
-                          config.system.stateVersion = "24.05";
-                        };
-                        flong.box = {
-                          user = "root";
-                          command = "set -- true";
-                        };
-                      }
-                      extra
-                    ];
-                  }).config;
-                in
+                let config = configWith extra; in
                 lib.filter (m: lib.hasPrefix "flong" m)
                   (map (a: lib.trim a.message)
                     (lib.filter (a: ! a.assertion) config.assertions));
@@ -89,6 +89,16 @@
                 containers.box.tmpfs = [ "/tmp/with space" ];
               } == [ ]
               || throw "assertions: a bind or tmpfs path holding whitespace, ':' or '\\' is refused";
+            # `command` is an argument list: neither a shell string nor an
+            # empty list evaluates.
+            assert ! (builtins.tryEval (builtins.deepSeq
+              (configWith { flong.box.command = lib.mkForce "set -- true"; }).flong.box.command
+              true)).success
+              || throw "assertions: a string command was accepted";
+            assert ! (builtins.tryEval (builtins.deepSeq
+              (configWith { flong.box.command = lib.mkForce [ ]; }).flong.box.command
+              true)).success
+              || throw "assertions: an empty command was accepted";
             pkgs.runCommand "assertions" { } "touch $out";
 
           # The version script decides what every release is called, so it is

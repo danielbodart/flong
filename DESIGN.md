@@ -21,11 +21,60 @@ warm on one machine.
    name is `<container>-<launcher pid>-<random>`.
 7. Write the session's `resolv.conf` (with `network`), create mount points,
    arm the exit trap.
-8. `preStart`, as root; then read the binds and wrapper it declared.
-9. Start `systemd-run --scope … systemd-nspawn …` in the background.
-10. Find the session's leader, run `postStart`, then start pasta (with `network`),
-    then create the readiness marker.
-11. Wait for the session. The exit trap runs `postStop` and releases the rest.
+8. Start `systemd-run --scope … systemd-nspawn …` in the background.
+9. Find the session's leader, run `postStart`, then start pasta (with `network`),
+   then create the readiness marker.
+10. Wait for the session. The exit trap runs `postStop` and releases the rest.
+
+## Data is data; shell is for what only launch knows
+
+flong follows NixOS's own pattern. A service exposes typed options and its
+module generates the shell that acts on them; a raw `lines` hook is plumbing
+that modules generate into, and an escape hatch. In nixpkgs,
+`systemd.services.<name>.postStart` is `types.lines` (systemd-unit-options),
+and the nixos-containers module generates its `container@` unit's `postStart`
+from typed options such as `hostAddress`, `localAddress` and `extraVeths`,
+rather than asking its user for shell.
+
+So nothing is declared by running a command:
+
+- **`command` is an argument list**, `nonEmptyListOf str`: a program and its
+  fixed arguments, to which the launcher's arguments are appended. Anything
+  that needs a script is a package of its own, named by `lib.getExe`.
+- **Every mount known at evaluation is the declaration's**: `bindMounts` and
+  `tmpfs` on `containers.<name>`, read as the typed records they are. There is
+  no hook before nspawn starts, because nothing a session is given at start is
+  unknown at evaluation except the caller's directories, which `workspace` and
+  `binds` compute.
+- **`postStart` and `postStop` are `types.lines`**, exactly as systemd's are.
+  They are what a module such as frisket's adapter generates into, and several
+  modules' snippets merge, ordered with `mkBefore` and `mkAfter`.
+- **`workspace`, `binds` and `guard` are shell** because what they answer is
+  known only at launch (the repository around the caller's working directory,
+  what travels with it) or is a decision (whether this caller may launch).
+
+## `command` is exec'd through the container's environment
+
+The payload script `cd`s into the workspace and runs
+`bash -c '. /etc/set-environment; exec "$@"'` with `command` and the launcher's
+arguments as that bash's positional parameters. None of them is ever the text
+of a script, so a space, `;`, `$` or glob in any argument arrives as that
+character.
+
+It goes through `/etc/set-environment` rather than being exec'd directly
+because that file is where the container's `PATH` comes from: its system
+profile, `/etc/profiles/per-user/$USER` for the user's `packages`, and every
+variable the declaration exports. nspawn's `--setenv=PATH` names the system
+profile alone, so a bare name from the user's `packages` would not be found
+without it. An absolute path, such as `lib.getExe` of a package, runs as it is:
+the store is shared.
+
+`systemd-run` is given `--expand-environment=no`. Otherwise it expands `$NAME`
+and `${NAME}` in the command line it runs, as `ExecStart=` does, and in
+systemd 261 it does so under `--scope` too, against the launcher's environment,
+which is root's. Measured: a launcher argument of `$(touch …)` did not reach
+the payload at all. A workspace or bind path holding a `$` is on that command
+line as well.
 
 ## Sessions are copies of a prepared root
 
@@ -152,7 +201,7 @@ verdict and nothing more: `exit 0` allows the launch rather than ending the
 launcher with nothing launched, and an assignment to `$workspace` cannot change
 what is mounted after it was judged.
 
-## Every bind is one record, filled in by three parties
+## Every bind is one record, filled in by two parties
 
 Every bind flong makes has the shape of the declaration's `bindMounts` entry: a
 mount point, a host path that defaults to it, and read-only unless it says
@@ -160,34 +209,31 @@ otherwise. What differs is who fills the record in, and when:
 
 | source | filled in by | when | shape |
 |---|---|---|---|
-| `containers.<name>.bindMounts` | the admin, in Nix | evaluation | any host path, at any mount point |
+| `containers.<name>.bindMounts` | the admin, in Nix | evaluation | any file, at any mount point |
 | `workspace`, `binds` | the caller | launch, before `guard` | a directory, at its own path |
-| `flong-bind` in `preStart` | root | launch, after `guard`, before nspawn | any file, at any mount point |
-
-**The caller's binds and root's stay separate.** One bind hook would have to
-run as one party, and either choice breaks something. Run as root, it reads an
-attacker-shaped directory with root's privilege (git in a hostile checkout)
-and probes paths on the caller's behalf. Run as the caller, it cannot make a
-root-owned socket or file, and it runs before `guard` and before the trap, so
-nothing could release a per-session source when a later step fails. So the
-caller's binds run as the caller and are judged by `guard`. Root's are made
-only after `guard` has passed, so a refused caller creates nothing, and after
-the trap is armed, so `postStop` releases what they name. The split is part of
-the security model; what the three sources share is the record.
 
 The rest follows from who fills it in:
 
 - **Advertised or not.** The caller's binds are the session's working set, and
   the payload is told about them in `FLONG_BINDS` so an agent can be given
-  `--add-dir`. Root's binds are plumbing at fixed paths the payload already
-  knows, and are not reported.
+  `--add-dir`. The declaration's binds are at fixed paths the container's own
+  configuration already knows, and are not reported.
 - **Same path or not.** The caller's binds are mounted at their own paths, so a
   caller cannot choose where inside the session a directory lands: not over
   `/etc`, and not over `/run/current-system`, where nspawn's `getent`-based
   `--uid` lookup would read it. A path in an error message also means the same
-  thing on both sides. The admin and root choose the mount point.
+  thing on both sides. The admin chooses the mount point.
 - **Directories or any file.** The caller's are directories, because that is
-  what `--add-dir` takes. Root binds a socket or a single file as readily.
+  what `--add-dir` takes. The declaration binds a socket or a single file as
+  readily.
+
+A read-only bind costs a socket nothing: `connect()` is not a write to the
+filesystem, so a socket bound read-only still connects, which is why Docker's
+`docker.sock:ro` works. A file bound read-only refuses writes and `chmod` with
+`EROFS` even when the payload owns it. In a new user namespace the bind is
+locked read-only, so `unshare -Urm` cannot remount it. Bind the specific path,
+never a shared parent: with a directory bound, the payload can list and write
+everything in it.
 
 ## Mounts
 
@@ -206,9 +252,9 @@ The rest follows from who fills it in:
   from the lower one.
 - **Static mounts are the declaration's.** Every mount known at evaluation,
   bind or tmpfs, is declared on `containers.<name>`, in the vocabulary NixOS
-  already has for it. flong adds only what is known at launch (the workspace,
-  the caller's `binds`, a root hook's binds) or has no declaration form
-  (`overlays`, whose upper layer flong places and owns).
+  already has for it. flong adds only what is known at launch (the workspace
+  and the caller's `binds`) or has no declaration form (`overlays`, whose upper
+  layer flong places and owns).
 - **Mount order.** nspawn sorts custom mounts by destination, so a tmpfs can
   mask part of a bind mount and a bind mount can reach through a tmpfs. A
   single socket can be exposed from an otherwise masked directory this way.
@@ -266,6 +312,8 @@ than one that fails to build.
   stderr and can write escape sequences to a shared terminal, as any program
   the caller runs can.
 - **`--hostname=<container>`**, because the machine name changes per session.
+- **`systemd-run --expand-environment=no`**, so every argument reaches nspawn
+  as data; see `command` above.
 - **OSC 666 `vte.container.*` termprops** tell a VTE terminal it is attached to
   a container, as toolbox and distrobox do. ST-terminated, since VTE rejects
   the BEL form. Written only when stdout is a terminal, and reset on exit.
@@ -343,56 +391,19 @@ failing `postStop` is reported and does not stop the rest of the release.
 `guard` runs before the session exists: before prepare, before the machine
 name and before the exit trap. Anything it creates leaks if a later step
 fails, and the network namespace it would configure does not exist yet.
-`preStart` runs once the machine name exists and the trap is armed, before
-nspawn starts. `postStart` runs after nspawn has created the namespace.
-`postStop` runs after the session. All three run in subshells, so a hook's
-`exit` is only its verdict.
+`postStart` runs after nspawn has created the namespace, once the machine name
+exists and the trap is armed, so whatever it makes for the session (frisket's
+listeners, for one) can be named for `$machine` and is released by `postStop`
+on every path. `postStop` runs after the session. `guard` and `postStart` run
+in subshells and `postStop` in a script of its own, so a hook's `exit` is only
+its verdict.
 
-They take the names of a systemd service's stages because they run at the same
-moments and fail the same way: a failed `ExecStartPre` or `ExecStartPost` stops
-the unit, and `ExecStopPost` runs however the unit ended. One difference is
-deliberate and stronger than systemd's: during `ExecStartPost` the main process
-is already running, while a session's payload is held until `postStart` has
-returned.
-
-### `preStart`
-
-`preStart` makes what a session needs from root that has to exist before the
-session does: a listening socket, a file issued for this session. It runs
-before nspawn because a bind mount is an nspawn argument; by the time the
-namespace exists the mount table is built. It runs after the machine name
-exists and the trap is armed, so a per-session source can be named for the
-session and is released by `postStop` on every path.
-
-It declares binds and a wrapper by calling `flong-bind` and `flong-wrap`, which
-append NUL-separated records to a root-owned file named in the hook's
-environment. The launcher reads the file once the hook returns. Not stdout: a
-stray `echo`, an `install -v` or a backgrounded listener that inherits stdout
-cannot corrupt the list or hold the launch open, and no path needs a separator
-it cannot contain. They are commands on `PATH` rather than shell functions, so
-a helper the hook runs can declare a bind too.
-
-A root bind is read-only unless it says `--rw`, like every other bind except
-the workspace. That costs a socket nothing: `connect()` is not a write to the
-filesystem, so a socket bound read-only still connects, which is why Docker's
-`docker.sock:ro` works. A file bound read-only refuses writes and `chmod` with
-`EROFS` even when the payload owns it, so a per-session file handed to the
-payload needs no copy owned by someone else. In a new user namespace the bind
-is locked read-only, so `unshare -Urm` cannot remount it.
-
-The source may be any kind of file, at any path inside; it is resolved with
-`realpath` and must exist. Bind the specific path, never a shared parent: with
-a directory bound, the payload can list and write other sessions' entries.
-These binds are not reported to the payload, since they are plumbing at fixed
-paths it already knows.
-
-`flong-wrap` places a command between the session's pid 1 and the payload.
-That is the only place a wrapper can go: `command` already runs inside as
-`user`, so a gate expressed there is one the payload's own shell could skip.
-Several calls nest in call order, the first outermost, so two modules that each
-wrap the payload compose. The wrapper is fixed before nspawn starts, and needs
-no gate of its own; in a session with `postStart` or `network` it starts after
-the readiness marker, like the rest of the payload.
+`postStart` and `postStop` take the names, and the type, of a systemd
+service's: they run at the same moments and fail the same way. A failed
+`ExecStartPost` stops the unit, and `ExecStopPost` runs however the unit ended.
+One difference is deliberate and stronger than systemd's: during
+`ExecStartPost` the main process is already running, while a session's payload
+is held until `postStart` has returned.
 
 ## `postStart`
 
@@ -452,8 +463,8 @@ empty routing table, and the launcher then failed to pin a namespace that no
 longer existed; separately, a hook failed with `nsenter: cannot open
 /proc/<pid>/ns/net`.
 
-So in a session with `postStart` or `network`, a wait between tini and everything
-else (a wrapper, `command`, the payload) polls for the directory
+So in a session with `postStart` or `network`, a wait between tini and the
+payload polls for the directory
 `/run/flong-ready`, every 5 ms for up to 10 s. The launcher creates it
 through `/proc/<leader>/root` once `postStart` and pasta are done. This is a
 readiness marker, not a security boundary; the ordering above is the boundary.
@@ -548,8 +559,8 @@ held with `::1` alone. UDP timed out both ways.
 
 nspawn gets `--resolv-conf=off`. Under `--private-network` the default `auto`
 already leaves the file alone, but a copy mode would write after the custom
-bind mounts, with `O_TRUNC`, through whatever a bind (a `flong-bind`, for
-example) had placed at that path. A private session without `network` has no
+bind mounts, with `O_TRUNC`, through whatever a bind (a declared bind of
+`/etc/resolv.conf`, for example) had placed at that path. A private session without `network` has no
 `resolv.conf`, because it has nowhere to send a query. A session on the host's
 network gets nspawn's own.
 
@@ -580,8 +591,8 @@ use") and is killed rather than run without its network.
   payload that fills them the session's problem, not the host's. It takes the
   value type `serviceConfig` takes, rendered the same way, so a setting means
   what it would in a unit file.
-- **A payload `PATH` option.** `/etc/set-environment` sets `PATH` before the
-  payload is exec'd, so packages added only to `command`'s script would reach
-  `command` and not the program it runs. The workload's tools belong in the
-  container's `environment.systemPackages`; `path` is for the host-side hooks
-  only.
+- **A payload `PATH` option.** The payload's `PATH` is the one
+  `/etc/set-environment` sets, so the workload's tools belong in the
+  container's `environment.systemPackages` or the user's `packages`, and a
+  program outside them is named by absolute path, with `lib.getExe`. `path` is
+  for the host-side hooks only.

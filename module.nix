@@ -49,79 +49,22 @@ let
       (builtins.split "[[:space:]]+" f))
     declared.extraFlags;
 
-  # WHAT A preStart DECLARES, AND HOW. Each appends NUL-separated records to
-  # the file $FLONG_RECORDS names, which the launcher makes before the hook
-  # and reads once it returns -- so no path or argument needs a separator
-  # it cannot hold. Outside a preStart there is no such file, and they
-  # refuse.
+  # THE PAYLOAD IS AN ARGUMENT LIST. `command` is data -- a program and its
+  # arguments -- with the launcher's own arguments appended, and no word of
+  # either is ever read as shell: a space, a `;` or a `$(...)` is that
+  # character, in that argument, whichever list it came from.
   #
-  # flong-bind [--rw] HOSTPATH MOUNTPOINT: read-only unless --rw. The host
-  # path is resolved now and must exist, and may be any kind of file: a
-  # directory, a single file, a socket. A read-only bind of a socket still
-  # connects -- connect() on a socket is not a write to the filesystem --
-  # which is why Docker's docker.sock:ro works, and why read-only costs a
-  # socket nothing. The mount point is a path inside and must be absolute.
-  flongBind = pkgs.writeShellApplication {
-    name = "flong-bind";
-    runtimeInputs = [ pkgs.coreutils ];
-    text = ''
-      mode=ro
-      if [ "''${1:-}" = --rw ]; then
-        mode=rw
-        shift
-      fi
-      if [ "$#" -ne 2 ]; then
-        echo "usage: flong-bind [--rw] HOSTPATH MOUNTPOINT" >&2
-        exit 2
-      fi
-      records=''${FLONG_RECORDS:-}
-      if [ -z "$records" ] || [ ! -f "$records" ]; then
-        echo "flong-bind: only a launcher's preStart can declare a bind" >&2
-        exit 1
-      fi
-      # The x keeps a trailing newline in the path from being taken with the
-      # one realpath ends its output with.
-      host_path=$(realpath -e -- "$1" && printf x) || exit 1
-      host_path=''${host_path%$'\n'x}
-      case $2 in
-        /*) ;;
-        *)
-          echo "flong-bind: mount point is not absolute: $2" >&2
-          exit 1
-          ;;
-      esac
-      printf 'bind\0%s\0%s\0%s\0' "$mode" "$host_path" "$2" >> "$records"
-    '';
-  };
-
-  # flong-wrap COMMAND [ARG...]: the payload is exec'd through this command,
-  # inside the session, after the ready gate. Called more than once, the
-  # wrappers nest in call order, the first outermost.
-  flongWrap = pkgs.writeShellApplication {
-    name = "flong-wrap";
-    runtimeInputs = [ pkgs.coreutils ];
-    text = ''
-      if [ "$#" -eq 0 ]; then
-        echo "usage: flong-wrap COMMAND [ARG...]" >&2
-        exit 2
-      fi
-      records=''${FLONG_RECORDS:-}
-      if [ -z "$records" ] || [ ! -f "$records" ]; then
-        echo "flong-wrap: only a launcher's preStart can declare a wrapper" >&2
-        exit 1
-      fi
-      {
-        printf 'wrap\0%s\0' "$#"
-        printf '%s\0' "$@"
-      } >> "$records"
-    '';
-  };
-
-  preStartTools = pkgs.symlinkJoin {
-    name = "flong-prestart-tools";
-    paths = [ flongBind flongWrap ];
-  };
-
+  # Exec'd THROUGH THE CONTAINER'S /etc/set-environment, which is what gives
+  # the payload the container's PATH -- its per-user profile, its system
+  # profile -- and every variable its declaration exports. So a bare name is
+  # found where the container would find it, and an absolute path, such as
+  # `lib.getExe` of a package, runs as it is.
+  #
+  # EXEC, so the payload becomes this process rather than a child of it, and
+  # tini can signal it directly. set-environment is sourced inside a `bash -c`
+  # because it expands unset variables, which would abort under the `set -u`
+  # this script runs with. The command and the arguments reach that bash as
+  # its positional parameters, never as its script.
   mkPayload = name: c: pkgs.writeShellApplication {
     name = "flong-payload-${name}";
     runtimeInputs = [ pkgs.coreutils ];
@@ -130,16 +73,13 @@ let
       shift
       cd "$workspace" || exit 1
 
-      # Leaves the command to run in "$@".
-      ${c.command}
-
-      # EXEC, so the payload becomes this process rather than a child of it,
-      # and tini can signal it directly. set-environment is sourced inside a
-      # `bash -c` because it expands unset variables, which would abort under
-      # the `set -u` this script runs with.
+      # `command` is quoted to survive THIS shell as data, so what shellcheck
+      # would say about a '$' or a trailing backslash inside single quotes is
+      # true and intended.
+      # shellcheck disable=SC2016,SC1003
       exec bash -c '. /etc/set-environment
                     exec "$@"' \
-           flong "$@"
+           flong ${lib.escapeShellArgs c.command} "$@"
     '';
   };
 
@@ -455,8 +395,7 @@ let
       # that is nspawn's own root-owned tmpfs, where nothing in the session
       # could make it first.
       #
-      # Between tini and everything else, so a wrapper, `command` and the
-      # workload all start after it.
+      # Between tini and the payload, so `command` starts after it.
       gate = pkgs.writeShellApplication {
         name = "flong-gate";
         runtimeInputs = [ pkgs.coreutils ];
@@ -535,8 +474,8 @@ let
           printf -v "$1" '%s' "''${value//:/"$bs:"}"
         }
 
-        # One way to run a consumer's snippet, shared by `workspace` and the
-        # two bind lists, so they cannot drift in how much privilege they get.
+        # One way to run a caller's snippet, shared by `workspace` and
+        # `binds`, so they cannot drift in how much privilege they get.
         #
         # The gid comes from the passwd database rather than from SUDO_GID,
         # which pkexec does not set -- and defaulting it to the uid is only
@@ -743,8 +682,6 @@ let
           # yet. Only a store path is run: the record is written by root into a
           # root-owned directory, and it is still not the place to take a
           # command from.
-          # What preStart declared, if the launcher died before reading it.
-          rm -f "$dir/prestart-$machine"
           if [ -e "$record" ]; then
             post_stop=$(cat "$record")
             case $post_stop in
@@ -1043,9 +980,9 @@ let
         # these are runtime values, and word-splitting a path is how a
         # directory with a space in it becomes two broken mounts.
         bind_flags=()
-        # MODE HOSTPATH MOUNTPOINT
+        # MODE PATH, bound at its own path.
         add_bind() {
-          local flag source="" target=""
+          local flag path=""
           case $1 in
             ro) flag=--bind-ro ;;
             rw) flag=--bind ;;
@@ -1054,72 +991,14 @@ let
               exit 1
               ;;
           esac
-          nspawn_path source "$2"
-          nspawn_path target "$3"
-          bind_flags+=("$flag=$source:$target")
+          nspawn_path path "$2"
+          bind_flags+=("$flag=$path:$path")
         }
-        add_bind "$workspace_mode" "$workspace" "$workspace"
+        add_bind "$workspace_mode" "$workspace"
         while IFS= read -r b; do
           [ -n "$b" ] || continue
-          add_bind "''${b##*:}" "''${b%:*}" "''${b%:*}"
+          add_bind "''${b##*:}" "''${b%:*}"
         done <<< "$binds"
-
-        # The command the payload is exec'd through, empty unless preStart
-        # names one with flong-wrap. An array, for the reason the binds are:
-        # a word with a space in it is a word, not two.
-        wrap=()
-        ${lib.optionalString (c.preStart != "") ''
-        # ROOT'S PER-SESSION RESOURCES, AND THEIR BINDS. Here, as root, once
-        # the trap is armed and the machine name exists, so what preStart
-        # makes can be named for this session and released by postStop even
-        # if a later step fails. Before nspawn, because a bind mount is an
-        # argument to nspawn: by the time there is a namespace, the mount
-        # table has been made.
-        #
-        # The binds and the wrapper are declared by calling flong-bind and
-        # flong-wrap, which append records to a root-owned file named in the
-        # hook's environment, read once the hook has returned. Not stdout:
-        # anything the hook prints, or a listener it backgrounds, is the
-        # hook's own business and cannot corrupt the list or hold the launch.
-        # And they are commands on PATH rather than shell functions, so a
-        # helper the hook runs can declare one too.
-        #
-        # None of these binds reach FLONG_BINDS, which is how the payload
-        # learns what the CALLER asked to have mounted: these are plumbing at
-        # fixed paths.
-        records=${cache}/prestart-$machine
-        rm -f "$records"
-        : > "$records"
-        # A subshell, as the other root hooks have, so its `exit` is only its
-        # verdict; non-zero ends the launch through `set -e`.
-        (
-          :
-          export FLONG_RECORDS="$records"
-          PATH=${preStartTools}/bin:$PATH
-          ${c.preStart}
-        )
-        mapfile -d "" record < "$records"
-        rm -f "$records"
-        i=0
-        while [ "$i" -lt "''${#record[@]}" ]; do
-          case ''${record[i]} in
-            bind)
-              add_bind "''${record[i+1]}" "''${record[i+2]}" "''${record[i+3]}"
-              i=$((i + 4))
-              ;;
-            wrap)
-              # Appended in call order, so the first call is the outermost:
-              # each wrapper execs the rest of its argument list.
-              wrap+=("''${record[@]:i+2:record[i+1]}")
-              i=$((i + 2 + record[i+1]))
-              ;;
-            *)
-              echo "${name}: preStart left a record flong did not write" >&2
-              exit 1
-              ;;
-          esac
-        done
-        ''}
 
         # --keep-unit, or nspawn makes a scope of its own and these properties
         # apply to nothing. tini rather than --as-pid2, whose stub reaps
@@ -1180,12 +1059,22 @@ let
         # redirections", which would silently empty `echo prompt | launcher` --
         # the case --console=autopipe is here for.
         #
+        # --expand-environment=no, because systemd-run otherwise expands
+        # "$NAME" and "''${NAME}" in the command it is given, as ExecStart=
+        # does -- under --scope too, in systemd 261, where systemd-run does it
+        # itself, against the LAUNCHER's environment, which is root's. Every
+        # argument here is data: measured, a launcher argument of
+        # `$(touch ...)` did not reach the payload at all, and a `$HOME` would
+        # have arrived as root's home. A workspace or bind path holding a `$`
+        # is on this command line too.
+        #
         # A script has no job control, so `&` does not put this in a process
         # group of its own: nspawn stays in the launcher's, which is the
         # terminal's foreground group, so an interactive session still reads
         # the keyboard instead of stopping on SIGTTIN.
         exec 3<&0
-        ${systemdRun} --scope --quiet --unit="$machine" --slice=machine.slice \
+        ${systemdRun} --scope --quiet --expand-environment=no \
+          --unit="$machine" --slice=machine.slice \
           --property=DevicePolicy=closed ${deviceProps} ${scopeProps} -- \
           ${nspawn} -q --keep-unit --directory="$root" --machine="$machine" \
             --hostname=${lib.escapeShellArg c.container} \
@@ -1204,7 +1093,6 @@ let
             --setenv=XDG_RUNTIME_DIR="$runtime_dir" \
             --setenv=FLONG_BINDS="$binds" \
             ${pkgs.tini}/bin/tini -g -- ${gateCmd} \
-            ''${wrap[@]+"''${wrap[@]}"} \
             ${lib.getExe payload} "$workspace" "$@" <&3 &
         session=$!
 
@@ -1495,52 +1383,22 @@ in
         };
 
         command = lib.mkOption {
-          type = lib.types.lines;
+          type = lib.types.nonEmptyListOf lib.types.str;
+          example = lib.literalExpression ''[ (lib.getExe pkgs.hello) "--greeting=hello from a session" ]'';
           description = ''
-            Shell run as `user` inside the container with the launcher's
-            arguments in "$@". Must leave the command to run in "$@", normally
-            by ending in a `set -- ...`, which is then exec'd.
-          '';
-        };
+            The payload, as an argument list: the program, then its fixed
+            arguments. The launcher's own arguments are appended, and it is
+            exec'd as `user` in the workspace. No element of either list is
+            read by a shell, so a space, a `;` or a `$` in one is passed as it
+            is.
 
-        preStart = lib.mkOption {
-          type = lib.types.lines;
-          default = "";
-          example = ''
-            my-gate listen "/run/my-gate/$machine.sock"
-            flong-bind "/run/my-gate/$machine.sock" /run/gate.sock
-            flong-wrap /run/current-system/sw/bin/my-gate-client --session "$machine"
-          '';
-          description = ''
-            Shell run on the host as root, once per session, before nspawn
-            starts: once `guard` has passed and the session has a machine name
-            and a cleanup trap, so whatever this makes can be named for the
-            session and `postStop` will release it even if the launch fails
-            later. `$machine`, `$root`, `$uid`, `$gid`, `$home`, `$workspace`,
-            `$workspace_mode` and `$binds` are in scope.
-
-            Two commands on its `PATH` declare what the session gets from it:
-
-            - `flong-bind [--rw] HOSTPATH MOUNTPOINT` binds a host path at a
-              path inside, read-only unless `--rw`. The host path may be a
-              directory, a file or a socket; it is resolved with `realpath`
-              and must exist. The mount point must be absolute. A socket bound
-              read-only still connects. These binds are not advertised to the
-              payload.
-            - `flong-wrap COMMAND [ARG...]` execs the payload through a
-              command inside the session, between its pid 1 and `command`.
-              Called more than once, the wrappers nest in call order, the
-              first outermost.
-
-            Both write to a root-owned file named in this hook's environment,
-            read once it returns, so a helper it runs can call them too, and
-            nothing it prints matters. Runs in a subshell under
-            `set -euo pipefail`, with `path` on `PATH`; a non-zero exit ends
-            the launch.
-
-            Bind the specific path and never a shared parent: with a whole
-            directory bound, a workload can list and write its neighbours'
-            entries.
+            It is exec'd after the container's `/etc/set-environment` has been
+            sourced, so a bare name is looked up on the container's `PATH` --
+            its `environment.systemPackages`, the user's `packages` -- and
+            the payload inherits every variable the container exports. An
+            absolute path, such as `lib.getExe` of a package, is run as it
+            is. Anything that needs a script is a package of its own, named
+            here by `lib.getExe`.
           '';
         };
 
@@ -1588,7 +1446,7 @@ in
           example = ''rm -f "/run/my-gate/$machine.sock"'';
           description = ''
             Shell run on the host as root after a session ends, to release
-            whatever the other root hooks made outside it. `$machine` is set,
+            whatever `postStart` made outside it. `$machine` is set,
             exported, and nothing else is.
 
             It runs on two paths: from the launcher's exit trap once the
@@ -1736,9 +1594,9 @@ in
           description = ''
             Packages on `PATH` for every hook that runs on the host: the
             caller-run `workspace` and `binds`, and the root-run `guard`,
-            `preStart`, `postStart` and `postStop`. Not for `command`, which runs inside the session with
-            the container's own `PATH`: a tool the workload needs belongs in
-            the container's `environment.systemPackages`.
+            `postStart` and `postStop`. Not for `command`, which runs inside
+            the session with the container's own `PATH`: a tool the workload
+            needs belongs in the container's `environment.systemPackages`.
           '';
         };
 

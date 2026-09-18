@@ -22,9 +22,8 @@ registered with machined, and deleted on exit. The **launcher** is the
 generated script `flong.<name>.launcher` that starts a session; it runs as
 root. The **workspace** is the host directory bind-mounted into the session at
 its own path and used as its working directory. The **payload** is the process
-`command` selects. **Hooks** are the shell options the launcher runs at fixed
-points: `workspace`, `binds`, `guard`, `preStart`, `postStart` and
-`postStop`.
+`command` names. **Hooks** are the shell options the launcher runs at fixed
+points: `workspace`, `binds`, `guard`, `postStart` and `postStop`.
 
 ## Examples
 
@@ -52,7 +51,7 @@ Declare the container with NixOS's own option, then name it in `flong`:
 
   flong.sandbox = {
     user = "alice";                  # uid, gid and home are read from the container
-    command = ''set -- cargo "$@"''; # the launcher's arguments arrive in "$@"
+    command = [ "cargo" ];           # the launcher's arguments are appended
     binds = ''                       # more of the caller's directories, read-only unless :rw
       [ -d "$workspace/../shared-crates" ] && printf '%s:rw\n' "$workspace/../shared-crates"
       printf '%s\n' /srv/reference
@@ -72,6 +71,7 @@ user-mode networking through [pasta](https://passt.top): outbound connections,
 DNS, published ports, and the host loopback ports you list.
 
 ```nix
+{ lib, pkgs, ... }:
 {
   containers.agent = {
     privateNetwork = true;
@@ -83,7 +83,7 @@ DNS, published ports, and the host loopback ports you list.
 
   flong.agent = {
     user = "alice";
-    command = ''set -- "$@"'';
+    command = [ (lib.getExe pkgs.codex) ];
     network = {
       hostPorts = [ 5432 ];            # the host's 127.0.0.1:5432, at the session's 127.0.0.1:5432
       forwardPorts = [                 # published: host port 8080 on every address -> session port 3000
@@ -96,26 +96,17 @@ DNS, published ports, and the host loopback ports you list.
 
 `network = { };` gives outbound access and no host ports.
 
-### A session with root hooks
+### A session with a root hook
 
-Added to the previous example. `preStart` runs as root before the session
-starts: here it makes a log directory for this session alone, binds it in
-read-write, and wraps the payload in a one-hour `timeout`. `postStart` runs as
-root once the session's network namespace exists and before it has any route
-out, so firewall rules installed there are in place before the payload's first
-packet.
+Added to the previous example. `postStart` runs as root once the session's
+network namespace exists and before it has any route out, so firewall rules
+installed there are in place before the payload's first packet.
 
 ```nix
 { pkgs, ... }:
 {
   flong.agent = {
     path = [ pkgs.nftables ];
-    preStart = ''
-      mkdir -p "/var/log/agent/$machine"
-      chown "$uid:$gid" "/var/log/agent/$machine"
-      flong-bind --rw "/var/log/agent/$machine" /var/log/session
-      flong-wrap /run/current-system/sw/bin/timeout 1h
-    '';
     postStart = ''
       nsenter --net="$netns" nft -f ${./egress.nft}
     '';
@@ -146,22 +137,23 @@ grants more (devices, credentials, another user's sockets), use `guard`.
 
 ## Options
 
-All under `flong.<name>`. Hooks are shell snippets, run under
-`set -euo pipefail`. Mounts known at evaluation (`bindMounts`, `tmpfs`) belong
-on the `containers.<name>` declaration; flong adds only what is known at
-launch.
+All under `flong.<name>`. What is known at evaluation is data: `command` is an
+argument list, and every mount known then (`bindMounts`, `tmpfs`) belongs on
+the `containers.<name>` declaration. Hooks are shell snippets, run under
+`set -euo pipefail`, for what is known only at launch. `postStart` and
+`postStop` are `lines`, like systemd's: several modules' snippets concatenate,
+ordered with `mkBefore` and `mkAfter`.
 
 | option | default | meaning |
 |---|---|---|
 | `container` | `<name>` | The `containers.<name>` declaration to run. |
 | `user` | *required* | Account inside the container that everything in the session runs as. Its uid, gid and home are read from the prepared root's `/etc/passwd`. |
-| `command` | *required* | Runs as `user` inside, in the workspace, with the launcher's arguments in `"$@"`. Must leave the command to exec in `"$@"`. |
+| `command` | *required* | The payload's argument list, e.g. `[ "cargo" ]` or `[ (lib.getExe pkgs.hello) ]`. The launcher's arguments are appended, and it is exec'd as `user` in the workspace, with the container's `PATH` and variables from its `/etc/set-environment`. No element is read by a shell. |
 | `workspace` | `git -C "$PWD" rev-parse --show-toplevel` | Prints the directory to bind-mount at its own path and `cd` into: `PATH`, read-write, or `PATH:ro`. |
 | `binds` | `""` | Prints more directories to bind-mount, each at its own path, one per line: `PATH`, read-only, or `PATH:rw`. |
 | `guard` | `""` | Decides whether the caller may launch. Non-zero exit refuses. |
-| `preStart` | `""` | Makes per-session resources before the session starts, and declares binds with `flong-bind` and a wrapper with `flong-wrap`. |
 | `postStart` | `""` | Configures the session once its namespaces exist, before `network` is attached and before the payload starts. Non-zero exit ends the session. |
-| `postStop` | `""` | Releases what the other root hooks made, after the session ends. |
+| `postStop` | `""` | Releases what `postStart` made, after the session ends. |
 | `overlays` | `{ }` | `{ target = lower; }`: an overlayfs whose writes go to an upper layer deleted with the session. |
 | `network` | `null` | User-mode networking through pasta. Requires `privateNetwork = true`. |
 | `network.forwardPorts` | `[ ]` | Published ports, shaped like `containers.<name>.forwardPorts`, bound on every host address. |
@@ -182,24 +174,15 @@ In launch order:
 | `workspace` | invoking user (`SUDO_UID` or `PKEXEC_UID`), else root | first | launcher arguments in `"$@"` |
 | `binds` | the same | after `workspace` | `"$@"`, `$workspace`, `$workspace_mode` (`ro` or `rw`) |
 | `guard` | root, in a subshell | before anything is made | `$workspace`, `$workspace_mode`, `$binds` (one `PATH:ro` or `PATH:rw` per line) |
-| `preStart` | root, in a subshell | before nspawn starts | `$machine`, `$root`, `$uid`, `$gid`, `$home`, and the above; `flong-bind` and `flong-wrap` on `PATH` |
-| `postStart` | root, in a subshell | once the namespaces exist, before `network` and the payload | `$leader` (the session's pid 1), `$netns` (`/proc/$leader/ns/net`), and the above |
+| `postStart` | root, in a subshell | once the namespaces exist, before `network` and the payload | `$leader` (the session's pid 1), `$netns` (`/proc/$leader/ns/net`), `$machine`, `$root`, `$uid`, `$gid`, `$home`, and the above |
 | `postStop` | root | after the session, or from a later launch's sweep | `$machine` only |
 
-A non-zero exit from `workspace`, `binds`, `guard` or `preStart` refuses the
-launch; from `postStart` it ends the session; from `postStop` it is reported.
+A non-zero exit from `workspace`, `binds` or `guard` refuses the launch; from
+`postStart` it ends the session; from `postStop` it is reported.
 
 `workspace` and `binds` print paths that are resolved with `realpath`, must be
 directories, and may not contain `:` or a newline. A trailing `:ro` or `:rw` is
 always the mode.
-
-In `preStart`:
-
-- `flong-bind [--rw] HOSTPATH MOUNTPOINT` binds a host directory, file or
-  socket at an absolute path inside, read-only unless `--rw`. A socket bound
-  read-only still connects. These binds are not reported to the payload.
-- `flong-wrap COMMAND [ARG...]` execs the payload through a command inside the
-  session. Several calls nest, the first outermost.
 
 `postStart` is where rules go that must be in place before the payload has
 egress: the payload waits for it, and `network` is attached after it returns.
