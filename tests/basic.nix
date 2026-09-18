@@ -750,6 +750,48 @@
           assert via4.strip() == "192.0.2.53", out
           assert via6.strip() == "192.0.2.53", out
 
+      with subtest("a family the host has no nameserver in is neither forwarded nor listed"):
+          # pasta sends a family's queries to the host's first nameserver of
+          # that family, and for a family with none it has only the unspecified
+          # address. The resolver here answers on 127.0.0.1 AND ::1, so a query
+          # that reaches the host's loopback through the missing family shows
+          # up as an answer rather than as a failure. Each direction in turn,
+          # through the missing family's forward address and the unspecified
+          # one, over UDP and TCP.
+          machine.succeed("cp /etc/resolv.conf /tmp/resolv.conf.both")
+          try:
+              for kept, forward, missing, unspecified, flag in (
+                  ("127.0.0.1", "169.254.1.1", "100::1", "::", "-6"),
+                  ("::1", "100::1", "169.254.1.1", "0.0.0.0", "-4"),
+              ):
+                  machine.succeed(f"printf 'nameserver {kept}\nsearch flong.test\n' > /etc/resolv.conf")
+                  probes = "; ".join(
+                      f"dig {flag} {proto} +short +time=1 +tries=1 @{addr} dns.flong.test 2>&1"
+                      for addr in (missing, unspecified) for proto in ("+notcp", "+tcp"))
+                  machine.succeed("${networked} '"
+                      "cat /etc/resolv.conf; echo ---; "
+                      "getent ahostsv4 dns.flong.test; echo ---; "
+                      + probes + "; echo probed; sleep 300' > /tmp/dns-single 2>&1 &")
+                  name = machine.wait_until_succeeds("ls /run/flong/netns | grep -v pid").strip()
+                  machine.wait_until_succeeds("grep -qx probed /tmp/dns-single", timeout=60)
+                  pasta = machine.succeed(
+                      f"tr '\\0' ' ' < /proc/$(cat /run/flong/netns/{name}.pid)/cmdline")
+                  machine.succeed(f"systemctl kill -s KILL {name}.scope")
+                  machine.wait_until_succeeds("test -z \"$(ls -A /run/flong/netns)\"")
+
+                  out = machine.succeed("cat /tmp/dns-single")
+                  resolv, resolved, reached = out.split("---")
+                  assert [l for l in resolv.splitlines() if l.startswith("nameserver")] == \
+                      [f"nameserver {forward}"], out
+                  assert f"--dns-forward {forward}" in pasta, pasta
+                  assert missing not in pasta, pasta
+                  # The family that is there works, so the probes below fail
+                  # for want of a way to the host and not of a network.
+                  assert "192.0.2.53" in resolved, out
+                  assert "192.0.2.53" not in reached, out
+          finally:
+              machine.succeed("cp /tmp/resolv.conf.both /etc/resolv.conf")
+
       with subtest("a forwarded port reaches the session from the host"):
           # And a second listener on a port that is not forwarded, left up past
           # the one-second scan with which pasta's default `auto` would have

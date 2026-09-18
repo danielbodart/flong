@@ -734,9 +734,11 @@ let
         # pasta sends a family's queries to the host's first nameserver of
         # that family, and for a family with none it has only the unspecified
         # address to send them to -- which Linux, asked to connect there,
-        # takes as its own loopback: port 53 on the host's, named in
-        # `hostPorts` or not. So a family pasta has nowhere to send is not
-        # one the session is given. `search`, `domain` and `options` come
+        # takes as its own loopback. Measured, with a host naming 127.0.0.1
+        # alone and 100::1 forwarded anyway: a TCP query to 100::1 was
+        # answered by the resolver on the host's ::1, a port `hostPorts` never
+        # named, and the same the other way round; UDP timed out. So a family
+        # pasta has nowhere to send is neither forwarded nor listed. `search`, `domain` and `options` come
         # across as they are, so a short name means in here what it means
         # out there.
         #

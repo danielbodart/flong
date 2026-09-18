@@ -142,7 +142,12 @@ turned up that the plan did not have:
   Measured, in both families, against a dnsmasq bound to `127.0.0.1` and `::1`
   alone. A family is forwarded only if the host names a nameserver in it: for
   one with none, pasta's only target is the unspecified address, which Linux
-  takes as the host's own loopback. nspawn is told `--resolv-conf=off` rather
+  takes as the host's own loopback — measured with a throwaway variant that
+  forwarded the missing family anyway, where a TCP query to it was answered by
+  the host's loopback resolver in the other family, on a port `hostPorts` never
+  named; UDP timed out. The test holds the host to one family at a time and
+  finds the other neither forwarded nor listed, and unreachable through its
+  address or the unspecified one. nspawn is told `--resolv-conf=off` rather
   than left to arrive there from `auto`. A private session without `network`
   keeps no `resolv.conf`. What it does not do is follow the host: both reads
   are once, at launch, so a host that moves networks keeps a live session on
@@ -268,7 +273,10 @@ The network section is in, each property asserted rather than assumed:
 - A networked session resolves a name, and a short one through the host's
   search domain, from a resolver bound only to the host's loopback, in both
   families; its `resolv.conf` names pasta's addresses and carries the host's
-  `search` and `options`. A private session without `network` has none.
+  `search` and `options`. A private session without `network` has none. A
+  host naming a nameserver in one family only gives the session that family
+  alone: the other is not forwarded, not listed, and reaches no port 53 on the
+  host's loopback through its forward address or the unspecified one.
 - A clean exit and a SIGKILLed launcher both release the pin and pasta — the
   second through a sweep by a different launcher over the same container.
 - `detach` runs on both paths, the sweep running the dead session's own.
