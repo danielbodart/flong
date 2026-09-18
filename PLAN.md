@@ -78,8 +78,13 @@ asserted rather than assumed:
 
 - A session with no `network` has only `lo`, and no route in either family.
 - A `postStart` hook runs as root, is handed a namespace that is not the host's,
-  and finds no route in it; its `attachBinds` are inside and absent from
-  `FLONG_BINDS`.
+  and finds no route in it. `preStart`'s binds are inside and absent from
+  `FLONG_BINDS`; a file bound read-only refuses a write and a `chmod` with
+  `EROFS` though the payload owns it, and a socket bound read-only still
+  connects.
+- Every bind is read-only unless it says otherwise, proved by `EROFS` rather
+  than `EACCES`. A guard's `exit 0` allows the launch, and its assignments do
+  not reach the launcher.
 - The payload cannot list or flush a hook's ruleset, add a link or add a route,
   including inside `unshare -Ur`, where it holds `CAP_NET_ADMIN` again; the
   rule is intact from outside afterwards.
@@ -103,4 +108,4 @@ asserted rather than assumed:
 - The capability and privilege flags are refused in `extraFlags`, checked by
   the evaluation-only `assertions` check along with the network assertions.
 
-The suite runs in about 50 s of test script with KVM. Keep it affordable.
+The suite runs in about 65 s of test script with KVM. Keep it affordable.

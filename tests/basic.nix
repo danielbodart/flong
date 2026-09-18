@@ -223,33 +223,52 @@
       # for the hook's binds to be absent from.
       binds = ''printf '%s:rw\n' /srv/companion'';
 
-      # A file and a socket, each from a host path named for this session, each
-      # at a fixed path inside that is nothing like its source. The listener
-      # is backgrounded with its output elsewhere, or the substitution this runs
-      # in would wait for it.
-      attachBinds = ''
+      # Per-session plumbing, each from a host path named for this session
+      # and at a fixed path inside that is nothing like its source: a file,
+      # read-only by default; a file bound --rw; a socket, read-only, which
+      # must still connect; and a file whose source holds a space, a colon
+      # and a backslash. The files and the socket are owned by the payload's
+      # user, so a write that fails is refused by the mount and not by
+      # permissions. The listener keeps what it is sent in a file of its own;
+      # its output is redirected only so that the test's own shell, waiting
+      # on the launcher's output, does not wait on the listener as well.
+      preStart = ''
         printf 'for-%s\n' "$machine" > "/run/hook-file-$machine"
-        nc -lkU "/run/hook-sock-$machine" </dev/null >/dev/null 2>&1 &
+        : > "/run/hook-rw-$machine"
+        printf 'odd-for-%s\n' "$machine" > "/run/hook: odd\\-$machine"
+        chown "$uid:$gid" "/run/hook-file-$machine" "/run/hook-rw-$machine"
+        nc -lkU "/run/hook-sock-$machine" </dev/null >>/tmp/hook-sock-received 2>/dev/null &
         for _ in $(seq 100); do
           [ -S "/run/hook-sock-$machine" ] && break
           sleep 0.05
         done
-        printf '%s\n' \
-          "/run/hook-file-$machine:/run/hook/file" \
-          "/run/hook-sock-$machine:/run/hook/sock"
+        chown "$uid:$gid" "/run/hook-sock-$machine"
+
+        flong-bind "/run/hook-file-$machine" /run/hook/file
+        flong-bind --rw "/run/hook-rw-$machine" /run/hook/rw
+        flong-bind "/run/hook-sock-$machine" /run/hook/sock
+        flong-bind "/run/hook: odd\\-$machine" "/run/hook/odd: dest"
+
+        # Exec'd between tini and the payload, inside the session, and nested
+        # in call order: the first is outermost, so the second's ORDER is the
+        # one the payload sees. env is in every NixOS closure, so this needs
+        # nothing declared to prove it ran.
+        flong-wrap /run/current-system/sw/bin/env "FLONG_WRAPPED=$machine" ORDER=outer
+        flong-wrap /run/current-system/sw/bin/env ORDER=inner
       '';
 
-      # Releases what attachBinds made, and says so. Keyed on $machine alone,
+      # Releases what preStart made, and says so. Keyed on $machine alone,
       # because on the sweep's path that is all there is.
       postStop = ''
         pkill -f "hook-sock-$machine" || true
-        rm -f "/run/hook-file-$machine" "/run/hook-sock-$machine"
+        rm -f "/run/hook-file-$machine" "/run/hook-rw-$machine" \
+          "/run/hook: odd\\-$machine" "/run/hook-sock-$machine"
         echo "$machine" >> /tmp/stopped
       '';
 
       postStart = ''
-        # The binds reach the hook resolved, so it knows where it put them.
-        grep -q ":/run/hook/sock$" <<< "$attach_binds"
+        # The caller's binds reach the hook, as they reached the guard.
+        [ "$binds" = /srv/companion:rw ]
 
         # Everything the hook is promised, written down for the test to read
         # back: who it runs as, that the namespace it was handed is not the
@@ -270,20 +289,16 @@
            add rule inet flong out tcp dport 19999 drop'
       '';
 
-      # Exec'd between tini and the payload, inside the session. env is in
-      # every NixOS closure, so this needs nothing declared to prove it ran.
-      attachWrap = ''printf '%s\n' /run/current-system/sw/bin/env "FLONG_WRAPPED=$machine"'';
-
       command = ''set -- bash -c "$1"'';
     };
 
-    # An attach bind naming a colon, which --bind cannot express. The source
-    # exists, so this is the refusal and not a missing path.
-    flong.badattachbind = {
+    # A preStart bind with a relative mount point, which flong-bind refuses
+    # before anything is started.
+    flong.badprestart = {
       container = "netless";
       user = "alice";
       workspace = ''realpath /srv/work'';
-      attachBinds = ''printf '%s\n' "/srv/odd:name:/run/odd"'';
+      preStart = ''flong-bind /srv/work relative/path'';
       command = ''set -- true'';
     };
 
@@ -537,7 +552,7 @@
       netless = lib.getExe nodes.machine.flong.netless.launcher;
       hooked = lib.getExe nodes.machine.flong.hooked.launcher;
       badHook = lib.getExe nodes.machine.flong.badhook.launcher;
-      badAttachBind = lib.getExe nodes.machine.flong.badattachbind.launcher;
+      badPreStart = lib.getExe nodes.machine.flong.badprestart.launcher;
       plantedMarker = lib.getExe nodes.machine.flong.plantedmarker.launcher;
       networked = lib.getExe nodes.machine.flong.networked.launcher;
       # The container's own closure, for the one nspawn this file runs itself:
@@ -688,11 +703,13 @@
           assert routes == "0", f"the namespace had {routes} routes at hook time"
           assert name.startswith("netless-"), name
 
-      with subtest("the hook wraps the payload"):
+      with subtest("preStart wraps the payload, and two wrappers nest outermost first"):
           # Between tini and the payload, so it is the workload's own parent
           # rather than something the workload's shell could decline to run.
-          out = machine.succeed("${hooked} 'echo $FLONG_WRAPPED'")
-          assert out.strip().startswith("netless-"), out
+          out = machine.succeed("${hooked} 'echo $FLONG_WRAPPED $ORDER'")
+          wrapped, order = out.split()
+          assert wrapped.startswith("netless-"), out
+          assert order == "inner", out
 
       with subtest("the ready marker is a directory the launcher made"):
           out = machine.succeed("${hooked} 'stat -c \"%F %U\" /run/flong-ready'")
@@ -709,20 +726,53 @@
           machine.fail("machinectl list --no-legend | grep -q netless-")
           machine.succeed("test -z \"$(find /run/flong -maxdepth 2 -name 's-netless-*')\"")
 
-      with subtest("the hook's binds are inside, and the payload is not told about them"):
-          # A file and a socket, which `binds` cannot carry, each at a path
-          # the hook chose rather than at its own.
-          out = machine.succeed("${hooked} 'cat /run/hook/file; test -S /run/hook/sock && echo socket'")
+      with subtest("preStart's binds are inside, and the payload is not told about them"):
+          # Files and a socket, which `binds` cannot carry, each at a path
+          # the hook chose rather than at its own -- one of them from a path
+          # holding a space, a colon and a backslash.
+          out = machine.succeed("${hooked} 'cat /run/hook/file; test -S /run/hook/sock && echo socket; cat \"/run/hook/odd: dest\"'")
           assert "for-netless-" in out, out
           assert "socket" in out, out
+          assert "odd-for-netless-" in out, out
           # FLONG_BINDS says what the CALLER asked to have mounted, and the
           # hook's plumbing is not that.
           out = machine.succeed("${hooked} 'echo $FLONG_BINDS'")
           assert out.strip() == "/srv/companion:rw", out
 
-      with subtest("an attach bind naming ':' is refused, like a caller's bind"):
-          err = machine.fail("${badAttachBind} 2>&1")
-          assert "attach bind names" in err, err
+      with subtest("the payload cannot write through a read-only file bind, though it owns the file"):
+          # EROFS for the write and for the chmod alike: the mount refuses
+          # both, whoever owns the file. The --rw bind beside it takes a write.
+          out = machine.succeed("${hooked} '"
+              "stat -c %U /run/hook/file; findmnt -no OPTIONS /run/hook/file; "
+              "{ echo forged >> /run/hook/file; } 2>&1 || true; "
+              "chmod u+x /run/hook/file 2>&1 || true; "
+              "cat /run/hook/file; "
+              "echo written >> /run/hook/rw && cat /run/hook/rw'")
+          lines = out.splitlines()
+          assert lines[0] == "alice", out
+          assert lines[1].split(",")[0] == "ro", out
+          assert "Read-only file system" in lines[2], out
+          assert "Read-only file system" in lines[3], out
+          assert lines[4].startswith("for-netless-"), out
+          assert lines[5] == "written", out
+
+      with subtest("a socket bound read-only still connects"):
+          # As Docker's docker.sock:ro does: connect() is not a write to the
+          # filesystem, so a read-only mount does not refuse it.
+          machine.succeed("rm -f /tmp/hook-sock-received")
+          out = machine.succeed("${hooked} '"
+              "findmnt -no OPTIONS /run/hook/sock; "
+              "echo through-a-read-only-bind | nc -NU /run/hook/sock && echo sent'")
+          options, sent = out.split()
+          assert options.split(",")[0] == "ro", out
+          assert sent == "sent", out
+          machine.wait_until_succeeds("grep -qx through-a-read-only-bind /tmp/hook-sock-received")
+
+      with subtest("flong-bind refuses a relative mount point, and nothing starts"):
+          err = machine.fail("${badPreStart} 2>&1")
+          assert "mount point is not absolute" in err, err
+          machine.fail("machinectl list --no-legend | grep -q netless-")
+          machine.succeed("test -z \"$(find /run/flong -maxdepth 2 -name 's-netless-*' -o -maxdepth 2 -name 'prestart-*')\"")
 
       with subtest("the workload cannot change what the hook installed, even after unshare -U"):
           machine.succeed("${hooked} \"bash $(readlink -f /etc/flong-tamper)\" >/tmp/tamper.out 2>&1 &")
@@ -1228,7 +1278,9 @@
           assert "through-the-tmpfs" in out, out
 
       with subtest("nothing is left behind"):
-          machine.succeed("test -z \"$(find /run/flong -maxdepth 2 -name 's-*' 2>/dev/null)\"")
+          # Session roots, and the records beside them: which postStop is a
+          # session's, and what its preStart declared.
+          machine.succeed("test -z \"$(find /run/flong -maxdepth 2 \\( -name 's-*' -o -name 'poststop-*' -o -name 'prestart-*' \\) 2>/dev/null)\"")
           # nspawn's own leftovers, at the paths it actually uses: a directory
           # per machine holding the unix-export tmpfs, and the mount tunnel
           # under propagate/<machine>.

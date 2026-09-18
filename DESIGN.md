@@ -21,7 +21,7 @@ warm on one machine.
    name is `<container>-<launcher pid>-<random>`.
 7. Write the session's `resolv.conf` (with `network`), create mount points,
    arm the exit trap.
-8. `attachBinds`, then `attachWrap`, as root.
+8. `preStart`, as root; then read the binds and wrapper it declared.
 9. Start `systemd-run --scope … systemd-nspawn …` in the background.
 10. Find the session's leader, run `postStart`, then start pasta (with `network`),
     then create the readiness marker.
@@ -137,11 +137,7 @@ guard is security code that will. A trailing `:ro` or `:rw` is always a mode.
 The workspace is the exception, read-write unless it says `:ro`, because it is
 what the session was started to work on. `$binds` and `FLONG_BINDS` spell the
 mode out on every entry, so neither the guard nor the payload has to know the
-default. The caller's binds are directories only, bound at their own paths:
-they are the session's working set, which the payload is told about so that an
-agent can be given `--add-dir`, and a caller cannot choose where inside the
-session a path lands, so cannot put a directory over `/etc` or
-`/run/current-system`.
+default.
 
 `guard` runs second, as root, with `$workspace` set. It judges the directory
 that will be mounted, rather than re-deriving one from `$PWD` and agreeing with
@@ -155,6 +151,43 @@ caller has already run `workspace`, as themselves, which gains them nothing.
 verdict and nothing more: `exit 0` allows the launch rather than ending the
 launcher with nothing launched, and an assignment to `$workspace` cannot change
 what is mounted after it was judged.
+
+## Every bind is one record, filled in by three parties
+
+Every bind flong makes has the shape of the declaration's `bindMounts` entry: a
+mount point, a host path that defaults to it, and read-only unless it says
+otherwise. What differs is who fills the record in, and when:
+
+| source | filled in by | when | shape |
+|---|---|---|---|
+| `containers.<name>.bindMounts` | the admin, in Nix | evaluation | any host path, at any mount point |
+| `workspace`, `binds` | the caller | launch, before `guard` | a directory, at its own path |
+| `flong-bind` in `preStart` | root | launch, after `guard`, before nspawn | any file, at any mount point |
+
+**The caller's binds and root's stay separate.** One bind hook would have to
+run as one party, and either choice breaks something. Run as root, it reads an
+attacker-shaped directory with root's privilege (git in a hostile checkout)
+and probes paths on the caller's behalf. Run as the caller, it cannot make a
+root-owned socket or file, and it runs before `guard` and before the trap, so
+nothing could release a per-session source when a later step fails. So the
+caller's binds run as the caller and are judged by `guard`. Root's are made
+only after `guard` has passed, so a refused caller creates nothing, and after
+the trap is armed, so `postStop` releases what they name. The split is part of
+the security model; what the three sources share is the record.
+
+The rest follows from who fills it in:
+
+- **Advertised or not.** The caller's binds are the session's working set, and
+  the payload is told about them in `FLONG_BINDS` so an agent can be given
+  `--add-dir`. Root's binds are plumbing at fixed paths the payload already
+  knows, and are not reported.
+- **Same path or not.** The caller's binds are mounted at their own paths, so a
+  caller cannot choose where inside the session a directory lands: not over
+  `/etc`, and not over `/run/current-system`, where nspawn's `getent`-based
+  `--uid` lookup would read it. A path in an error message also means the same
+  thing on both sides. The admin and root choose the mount point.
+- **Directories or any file.** The caller's are directories, because that is
+  what `--add-dir` takes. Root binds a socket or a single file as readily.
 
 ## Mounts
 
@@ -305,19 +338,63 @@ root, and the sweep runs that one. Only a `/nix/store` path is executed. Only
 `$machine` is passed, because on the sweep's path nothing else survives. A
 failing `postStop` is reported and does not stop the rest of the release.
 
-## `postStart`
+## The root hooks
 
 `guard` runs before the session exists: before prepare, before the machine
 name and before the exit trap. Anything it creates leaks if a later step
 fails, and the network namespace it would configure does not exist yet.
-`postStart` runs after nspawn has created the namespace.
+`preStart` runs once the machine name exists and the trap is armed, before
+nspawn starts. `postStart` runs after nspawn has created the namespace.
+`postStop` runs after the session. All three run in subshells, so a hook's
+`exit` is only its verdict.
 
-The root hooks take the names of a systemd service's stages, `postStart` and
-`postStop`, because they run at the same moments and fail the same way: a
-failed `ExecStartPost` stops the unit, and `ExecStopPost` runs however the unit
-ended. One difference is deliberate and stronger than systemd's: during
-`ExecStartPost` the main process is already running, while a session's payload
-is held until `postStart` has returned.
+They take the names of a systemd service's stages because they run at the same
+moments and fail the same way: a failed `ExecStartPre` or `ExecStartPost` stops
+the unit, and `ExecStopPost` runs however the unit ended. One difference is
+deliberate and stronger than systemd's: during `ExecStartPost` the main process
+is already running, while a session's payload is held until `postStart` has
+returned.
+
+### `preStart`
+
+`preStart` makes what a session needs from root that has to exist before the
+session does: a listening socket, a file issued for this session. It runs
+before nspawn because a bind mount is an nspawn argument; by the time the
+namespace exists the mount table is built. It runs after the machine name
+exists and the trap is armed, so a per-session source can be named for the
+session and is released by `postStop` on every path.
+
+It declares binds and a wrapper by calling `flong-bind` and `flong-wrap`, which
+append NUL-separated records to a root-owned file named in the hook's
+environment. The launcher reads the file once the hook returns. Not stdout: a
+stray `echo`, an `install -v` or a backgrounded listener that inherits stdout
+cannot corrupt the list or hold the launch open, and no path needs a separator
+it cannot contain. They are commands on `PATH` rather than shell functions, so
+a helper the hook runs can declare a bind too.
+
+A root bind is read-only unless it says `--rw`, like every other bind except
+the workspace. That costs a socket nothing: `connect()` is not a write to the
+filesystem, so a socket bound read-only still connects, which is why Docker's
+`docker.sock:ro` works. A file bound read-only refuses writes and `chmod` with
+`EROFS` even when the payload owns it, so a per-session file handed to the
+payload needs no copy owned by someone else. In a new user namespace the bind
+is locked read-only, so `unshare -Urm` cannot remount it.
+
+The source may be any kind of file, at any path inside; it is resolved with
+`realpath` and must exist. Bind the specific path, never a shared parent: with
+a directory bound, the payload can list and write other sessions' entries.
+These binds are not reported to the payload, since they are plumbing at fixed
+paths it already knows.
+
+`flong-wrap` places a command between the session's pid 1 and the payload.
+That is the only place a wrapper can go: `command` already runs inside as
+`user`, so a gate expressed there is one the payload's own shell could skip.
+Several calls nest in call order, the first outermost, so two modules that each
+wrap the payload compose. The wrapper is fixed before nspawn starts, and needs
+no gate of its own; in a session with `postStart` or `network` it starts after
+the readiness marker, like the rest of the payload.
+
+## `postStart`
 
 ### Finding the leader
 
@@ -346,10 +423,10 @@ the top of the hook) loses the property without any error. Measured: 12 of 12
 connections bypassed the rules.
 
 The hook runs in a subshell, so `exit` ends the hook, not the launcher. A
-non-zero exit, a leader that never appears, or a launcher killed before
-attaching all leave a session with nothing installed; the trap kills its scope
-with SIGKILL. A session whose `network` failed to attach is killed the same
-way.
+non-zero exit, a leader that never appears, or a launcher killed before the
+hook finished all leave a session with nothing installed; the trap kills its
+scope with SIGKILL. A session whose `network` failed to attach is killed the
+same way.
 
 ### What stops the payload undoing it
 
@@ -376,7 +453,7 @@ longer existed; separately, a hook failed with `nsenter: cannot open
 /proc/<pid>/ns/net`.
 
 So in a session with `postStart` or `network`, a wait between tini and everything
-else (`attachWrap`, `command`, the payload) polls for the directory
+else (a wrapper, `command`, the payload) polls for the directory
 `/run/flong-ready`, every 5 ms for up to 10 s. The launcher creates it
 through `/proc/<leader>/root` once `postStart` and pasta are done. This is a
 readiness marker, not a security boundary; the ordering above is the boundary.
@@ -390,22 +467,6 @@ Today nothing in a session can write `/run`, which is nspawn's root-owned
 tmpfs; `mkdir` does not depend on that. It never follows its final component
 and fails with `EEXIST` on anything already there, including a dangling
 symlink. Failure fails the launch.
-
-### `attachBinds` and `attachWrap`
-
-`attachBinds` exists because `binds` takes directories only, binds each at
-its own path, runs as the caller, and is reported to the payload. A hook needs
-a socket or a single file, from a path of its choosing, at a fixed path inside,
-and the payload has no need to be told. It runs before nspawn because a bind
-mount is an nspawn argument: by the time the namespace exists the mount table
-is built. It runs after the machine name exists and the trap is armed, so a
-per-session source is released on every path. Bind the specific path, never a
-shared parent: with a directory bound, the payload can list and write other
-sessions' entries.
-
-`attachWrap` places a command between the session's pid 1 and the payload.
-That is the only place a wrapper can go: `command` already runs inside as
-`user`, so a gate expressed there is one the payload's own shell could skip.
 
 ## `network`
 
@@ -487,7 +548,7 @@ held with `::1` alone. UDP timed out both ways.
 
 nspawn gets `--resolv-conf=off`. Under `--private-network` the default `auto`
 already leaves the file alone, but a copy mode would write after the custom
-bind mounts, with `O_TRUNC`, through whatever a bind (an `attachBinds` line, for
+bind mounts, with `O_TRUNC`, through whatever a bind (a `flong-bind`, for
 example) had placed at that path. A private session without `network` has no
 `resolv.conf`, because it has nowhere to send a query. A session on the host's
 network gets nspawn's own.

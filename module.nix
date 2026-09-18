@@ -49,6 +49,79 @@ let
       (builtins.split "[[:space:]]+" f))
     declared.extraFlags;
 
+  # WHAT A preStart DECLARES, AND HOW. Each appends NUL-separated records to
+  # the file $FLONG_RECORDS names, which the launcher makes before the hook
+  # and reads once it returns -- so no path or argument needs a separator
+  # it cannot hold. Outside a preStart there is no such file, and they
+  # refuse.
+  #
+  # flong-bind [--rw] HOSTPATH MOUNTPOINT: read-only unless --rw. The host
+  # path is resolved now and must exist, and may be any kind of file: a
+  # directory, a single file, a socket. A read-only bind of a socket still
+  # connects -- connect() on a socket is not a write to the filesystem --
+  # which is why Docker's docker.sock:ro works, and why read-only costs a
+  # socket nothing. The mount point is a path inside and must be absolute.
+  flongBind = pkgs.writeShellApplication {
+    name = "flong-bind";
+    runtimeInputs = [ pkgs.coreutils ];
+    text = ''
+      mode=ro
+      if [ "''${1:-}" = --rw ]; then
+        mode=rw
+        shift
+      fi
+      if [ "$#" -ne 2 ]; then
+        echo "usage: flong-bind [--rw] HOSTPATH MOUNTPOINT" >&2
+        exit 2
+      fi
+      records=''${FLONG_RECORDS:-}
+      if [ -z "$records" ] || [ ! -f "$records" ]; then
+        echo "flong-bind: only a launcher's preStart can declare a bind" >&2
+        exit 1
+      fi
+      # The x keeps a trailing newline in the path from being taken with the
+      # one realpath ends its output with.
+      host_path=$(realpath -e -- "$1" && printf x) || exit 1
+      host_path=''${host_path%$'\n'x}
+      case $2 in
+        /*) ;;
+        *)
+          echo "flong-bind: mount point is not absolute: $2" >&2
+          exit 1
+          ;;
+      esac
+      printf 'bind\0%s\0%s\0%s\0' "$mode" "$host_path" "$2" >> "$records"
+    '';
+  };
+
+  # flong-wrap COMMAND [ARG...]: the payload is exec'd through this command,
+  # inside the session, after the ready gate. Called more than once, the
+  # wrappers nest in call order, the first outermost.
+  flongWrap = pkgs.writeShellApplication {
+    name = "flong-wrap";
+    runtimeInputs = [ pkgs.coreutils ];
+    text = ''
+      if [ "$#" -eq 0 ]; then
+        echo "usage: flong-wrap COMMAND [ARG...]" >&2
+        exit 2
+      fi
+      records=''${FLONG_RECORDS:-}
+      if [ -z "$records" ] || [ ! -f "$records" ]; then
+        echo "flong-wrap: only a launcher's preStart can declare a wrapper" >&2
+        exit 1
+      fi
+      {
+        printf 'wrap\0%s\0' "$#"
+        printf '%s\0' "$@"
+      } >> "$records"
+    '';
+  };
+
+  preStartTools = pkgs.symlinkJoin {
+    name = "flong-prestart-tools";
+    paths = [ flongBind flongWrap ];
+  };
+
   mkPayload = name: c: pkgs.writeShellApplication {
     name = "flong-payload-${name}";
     runtimeInputs = [ pkgs.coreutils ];
@@ -670,6 +743,8 @@ let
           # yet. Only a store path is run: the record is written by root into a
           # root-owned directory, and it is still not the place to take a
           # command from.
+          # What preStart declared, if the launcher died before reading it.
+          rm -f "$dir/prestart-$machine"
           if [ -e "$record" ]; then
             post_stop=$(cat "$record")
             case $post_stop in
@@ -970,8 +1045,15 @@ let
         bind_flags=()
         # MODE HOSTPATH MOUNTPOINT
         add_bind() {
-          local flag=--bind source="" target=""
-          if [ "$1" = ro ]; then flag=--bind-ro; fi
+          local flag source="" target=""
+          case $1 in
+            ro) flag=--bind-ro ;;
+            rw) flag=--bind ;;
+            *)
+              echo "${name}: a bind's mode is neither ro nor rw: $1" >&2
+              exit 1
+              ;;
+          esac
           nspawn_path source "$2"
           nspawn_path target "$3"
           bind_flags+=("$flag=$source:$target")
@@ -982,94 +1064,61 @@ let
           add_bind "''${b##*:}" "''${b%:*}" "''${b%:*}"
         done <<< "$binds"
 
-        # THE HOOK'S OWN BINDS, which `binds` cannot carry: that takes
-        # directories only, binds each at its own path, is resolved as the
-        # caller, and is advertised to the payload. These are the launcher's
-        # plumbing -- a socket, a single file -- bound from a host path of the
-        # hook's choosing to a fixed path inside, and not the workload's
-        # business to be told about.
-        #
-        # Resolved here, as root, after the trap is armed and the machine name
-        # exists, so a source can be made per session and released by
-        # `postStop` if a later step fails. Not from `postStart`: a bind mount is an
-        # argument to nspawn, and by the time there is a namespace the mount
-        # table has been made.
-        attach_binds=""
-        ${lib.optionalString (c.attachBinds != "") ''
-        # SOURCE:DESTINATION, one per line, refused -- not guessed at -- if
-        # either side names a ':' or a newline, which is the refusal
-        # resolve_binds makes and for the same reason: --bind has no escaping
-        # to fall back on. The source is resolved and must exist, and it may be
-        # any kind of file; the destination is a path inside and must be
-        # absolute.
-        resolve_attach_binds() {
-          local line src dest out=""
-          while IFS= read -r line; do
-            [ -n "$line" ] || continue
-            src=''${line%%:*}
-            dest=''${line#*:}
-            case $line in
-              *:*:* | *"$nl"*)
-                echo "${name}: attach bind names ':' or a newline: $line" >&2
-                exit 1
-                ;;
-              *:*) ;;
-              *)
-                echo "${name}: attach bind is not SOURCE:DESTINATION: $line" >&2
-                exit 1
-                ;;
-            esac
-            src=$(realpath -e -- "$src") || exit 1
-            # Again after resolving, because a symlink can lead somewhere the
-            # line itself did not name.
-            case $src in
-              *:* | *"$nl"*)
-                echo "${name}: attach bind names ':' or a newline: $src" >&2
-                exit 1
-                ;;
-            esac
-            case $dest in
-              /*) ;;
-              *)
-                echo "${name}: attach bind destination is not absolute: $dest" >&2
-                exit 1
-                ;;
-            esac
-            out=$out$src:$dest$nl
-          done <<< "$1"
-          printf '%s' "$out"
-        }
-
-        attach_binds_raw=$(
-          ${c.attachBinds}
-        ) || exit 1
-        attach_binds=$(resolve_attach_binds "$attach_binds_raw") || exit 1
-        ''}
-        # Onto the nspawn command line and nowhere else: not joined into
-        # FLONG_BINDS, which is how the payload learns what the CALLER
-        # asked to have mounted.
-        while IFS= read -r b; do
-          [ -n "$b" ] || continue
-          bind_flags+=("--bind=$b")
-        done <<< "$attach_binds"
-
-        # The command the payload is exec'd through, empty unless a consumer
-        # named one. An array rather than a string, for the reason the extra
-        # binds are one: a word with a space in it is a word, not two.
+        # The command the payload is exec'd through, empty unless preStart
+        # names one with flong-wrap. An array, for the reason the binds are:
+        # a word with a space in it is a word, not two.
         wrap=()
-        ${lib.optionalString (c.attachWrap != "") ''
-        # Resolved out here, as root, and spliced onto the nspawn command line
-        # before the payload -- which is the only place a wrapper can go. The
-        # consumer's `command` is already inside the sandbox and already
-        # running as ${c.user}, so anything expressed there is something the
-        # workload's own shell could have declined to run.
-        wrap_words=$(
-          ${c.attachWrap}
-        ) || exit 1
-        while IFS= read -r wrap_word; do
-          [ -n "$wrap_word" ] || continue
-          wrap+=("$wrap_word")
-        done <<< "$wrap_words"
+        ${lib.optionalString (c.preStart != "") ''
+        # ROOT'S PER-SESSION RESOURCES, AND THEIR BINDS. Here, as root, once
+        # the trap is armed and the machine name exists, so what preStart
+        # makes can be named for this session and released by postStop even
+        # if a later step fails. Before nspawn, because a bind mount is an
+        # argument to nspawn: by the time there is a namespace, the mount
+        # table has been made.
+        #
+        # The binds and the wrapper are declared by calling flong-bind and
+        # flong-wrap, which append records to a root-owned file named in the
+        # hook's environment, read once the hook has returned. Not stdout:
+        # anything the hook prints, or a listener it backgrounds, is the
+        # hook's own business and cannot corrupt the list or hold the launch.
+        # And they are commands on PATH rather than shell functions, so a
+        # helper the hook runs can declare one too.
+        #
+        # None of these binds reach FLONG_BINDS, which is how the payload
+        # learns what the CALLER asked to have mounted: these are plumbing at
+        # fixed paths.
+        records=${cache}/prestart-$machine
+        rm -f "$records"
+        : > "$records"
+        # A subshell, as the other root hooks have, so its `exit` is only its
+        # verdict; non-zero ends the launch through `set -e`.
+        (
+          :
+          export FLONG_RECORDS="$records"
+          PATH=${preStartTools}/bin:$PATH
+          ${c.preStart}
+        )
+        mapfile -d "" record < "$records"
+        rm -f "$records"
+        i=0
+        while [ "$i" -lt "''${#record[@]}" ]; do
+          case ''${record[i]} in
+            bind)
+              add_bind "''${record[i+1]}" "''${record[i+2]}" "''${record[i+3]}"
+              i=$((i + 4))
+              ;;
+            wrap)
+              # Appended in call order, so the first call is the outermost:
+              # each wrapper execs the rest of its argument list.
+              wrap+=("''${record[@]:i+2:record[i+1]}")
+              i=$((i + 2 + record[i+1]))
+              ;;
+            *)
+              echo "${name}: preStart left a record flong did not write" >&2
+              exit 1
+              ;;
+          esac
+        done
         ''}
 
         # --keep-unit, or nspawn makes a scope of its own and these properties
@@ -1454,6 +1503,47 @@ in
           '';
         };
 
+        preStart = lib.mkOption {
+          type = lib.types.lines;
+          default = "";
+          example = ''
+            my-gate listen "/run/my-gate/$machine.sock"
+            flong-bind "/run/my-gate/$machine.sock" /run/gate.sock
+            flong-wrap /run/current-system/sw/bin/my-gate-client --session "$machine"
+          '';
+          description = ''
+            Shell run on the host as root, once per session, before nspawn
+            starts: once `guard` has passed and the session has a machine name
+            and a cleanup trap, so whatever this makes can be named for the
+            session and `postStop` will release it even if the launch fails
+            later. `$machine`, `$root`, `$uid`, `$gid`, `$home`, `$workspace`,
+            `$workspace_mode` and `$binds` are in scope.
+
+            Two commands on its `PATH` declare what the session gets from it:
+
+            - `flong-bind [--rw] HOSTPATH MOUNTPOINT` binds a host path at a
+              path inside, read-only unless `--rw`. The host path may be a
+              directory, a file or a socket; it is resolved with `realpath`
+              and must exist. The mount point must be absolute. A socket bound
+              read-only still connects. These binds are not advertised to the
+              payload.
+            - `flong-wrap COMMAND [ARG...]` execs the payload through a
+              command inside the session, between its pid 1 and `command`.
+              Called more than once, the wrappers nest in call order, the
+              first outermost.
+
+            Both write to a root-owned file named in this hook's environment,
+            read once it returns, so a helper it runs can call them too, and
+            nothing it prints matters. Runs in a subshell under
+            `set -euo pipefail`, with `path` on `PATH`; a non-zero exit ends
+            the launch.
+
+            Bind the specific path and never a shared parent: with a whole
+            directory bound, a workload can list and write its neighbours'
+            entries.
+          '';
+        };
+
         postStart = lib.mkOption {
           type = lib.types.lines;
           default = "";
@@ -1468,9 +1558,10 @@ in
             `$leader` is the session's pid 1 as seen from the host and `$netns`
             its network namespace (`/proc/$leader/ns/net`), both exported.
             `$machine`, `$root`, `$uid`, `$gid`, `$home`, `$workspace`,
-            `$workspace_mode`, `$binds` and `$attach_binds` are in scope too. Without `privateNetwork` a session
-            shares the host's network namespace, and `$netns` names *that*: a
-            hook that installs a ruleset there is steering the host.
+            `$workspace_mode` and `$binds` are in scope too. Without
+            `privateNetwork` a session shares the host's network namespace,
+            and `$netns` names *that*: a hook that installs a ruleset there is
+            steering the host.
 
             **The ordering is the contract, and it is the security property.**
             Whatever this installs into the namespace is in place before
@@ -1488,65 +1579,6 @@ in
             Unlike systemd's `ExecStartPost`, the main process is not yet
             running: it is held until this hook and any `network` have
             finished.
-          '';
-        };
-
-        attachBinds = lib.mkOption {
-          type = lib.types.lines;
-          default = "";
-          example = ''printf '%s\n' "/run/my-gate/$machine.sock:/run/gate.sock"'';
-          description = ''
-            Shell printing `SOURCE:DESTINATION` lines, each bound read-write
-            into the session: a host path of the hook's choosing, at a path
-            inside of the hook's choosing. This is how `postStart` gets a socket
-            or a single file into the sandbox, which `binds` cannot do --
-            that takes directories only, binds each at its own path, is
-            resolved as the caller, and is announced to the payload.
-
-            Runs on the host as root, after `guard`, once the session has a
-            machine name and its cleanup trap is armed, with `$machine`,
-            `$root`, `$uid`, `$gid`, `$home` and `$workspace` in scope -- so a
-            source can be made for this session alone, and `postStop` will be
-            called to release it even if the launch fails after this point.
-            It runs before nspawn and not from `postStart`, because a bind mount
-            is an argument to nspawn: by the time there is a namespace, the
-            mount table has been made. A source that must exist before the
-            session starts -- a listening socket -- is this snippet's to create.
-
-            The source is resolved with `realpath` and must exist; it may be
-            any kind of file. The destination must be absolute. A line naming
-            a `:` or a newline on either side is refused, as `binds`
-            refuses one. Bind the specific path and never a shared parent:
-            with a whole directory bound, a workload can list and write its
-            neighbours' entries.
-
-            Not advertised to the payload: nothing here reaches
-            `FLONG_BINDS`, which says what the *caller* asked for.
-          '';
-        };
-
-        attachWrap = lib.mkOption {
-          type = lib.types.lines;
-          default = "";
-          example = ''printf '%s\n' /run/current-system/sw/bin/my-gate --session "$machine"'';
-          description = ''
-            Shell printing a command, one argument per line, that the payload
-            is exec'd through inside the session. Empty output -- the default
-            -- execs the payload directly.
-
-            Runs on the host as root, before nspawn, with `$machine`, `$root`,
-            `$uid`, `$gid`, `$home` and `$workspace` in scope. What it prints
-            is a path *inside* the container and its arguments, spliced onto
-            the nspawn command line between `tini` and the payload.
-
-            That position is the point of it. `command` is already inside the
-            sandbox and already running as `user`, so a gate expressed there is
-            one the workload could have declined to run; this one is between
-            the workload and its own pid 1.
-
-            It starts after `postStart` has finished, like the rest of the
-            payload, so it is not needed to close any window: use it for a
-            launcher that wants to *be* the workload's parent.
           '';
         };
 
@@ -1596,8 +1628,8 @@ in
             and no host configuration, and hands the sandbox sockets rather than
             packets.
 
-            Attached after `postStart` returns, never before, which is what makes
-            the hook's ordering hold. A session with a network also has a
+            Attached after `postStart` returns, never before, which is what
+            makes the hook's ordering hold. A session with a network also has a
             namespace pin under /run/flong/netns and a pasta process outside
             its scope, both released by the cleanup trap and, for a killed
             session, by the next launch's sweep. A session without one has
@@ -1703,8 +1735,8 @@ in
           default = [ ];
           description = ''
             Packages on `PATH` for every hook that runs on the host: the
-            caller-run `workspace`, the root-run `guard`, `postStart` and
-            `postStop`. Not for `command`, which runs inside the session with
+            caller-run `workspace` and `binds`, and the root-run `guard`,
+            `preStart`, `postStart` and `postStop`. Not for `command`, which runs inside the session with
             the container's own `PATH`: a tool the workload needs belongs in
             the container's `environment.systemPackages`.
           '';
