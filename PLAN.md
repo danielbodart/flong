@@ -41,35 +41,26 @@ No lock. The prepare/copy race costs the launch that loses it, loudly — `cp -a
 fails and `set -e` ends that launch — where a `flock` across prepare-and-copy
 would cost every launch of a tool that advertises 117 ms.
 
-## 4. A root hook, after the namespace exists
+## ~~4. A root hook, after the namespace exists~~
 
-`guard` is the only root snippet flong has, and it runs before prepare, before
-the identity check, before `$machine` exists and before the cleanup trap — so
-anything it creates leaks whenever a later step fails, and it cannot see the
-namespace, which does not exist yet.
+Done, as `attach`. nspawn is started in the background — stdin handed over
+explicitly, since bash gives an asynchronous command `/dev/null` otherwise — and
+the launcher polls for the leader: `machinectl show --property=Leader` first,
+then a recursive walk of the scope's cgroups, both judged by the same test.
 
-Add a hook that runs as root on the host *after* nspawn has started, with
-`$machine`, the leader pid, the namespace path, `$uid`, `$gid`, `$home`,
-`$workspace` and the resolved extra binds in scope. It can add binds of its own
-(task 8).
+That test is not "a pid whose `ns/net` differs from the host's". A container
+without `privateNetwork` shares the host's, so that finds no leader there; and
+"any pid in a namespace of its own" also matches a workload that ran
+`unshare -Upf`, whose pid 1 a hook must never be handed. The leader is pid 1 of
+the pid namespace exactly one level below the launcher's, which `NSpid` in
+`/proc/<pid>/status` spells out.
 
-Finding the namespace means finding the leader. Under `--keep-unit` the scope's
-own `cgroup.procs` is empty — nspawn splits into `payload/` and `supervisor/` —
-so a cgroup walk must recurse and take the pid whose `ns/net` differs from the
-host's. `machinectl show --property=Leader` agrees with it. Measured at 26–30 ms
-after `systemd-run` returns, against a payload that starts at 58–65 ms.
-
-**The hook's contract is an ordering, and it is the whole security property.**
-The hook must install its rules into the namespace *before* it provisions any
-egress — before the dummy route, before pasta. With `--private-network` the
-namespace has `lo` up and an empty route table, so until something adds egress,
-the workload has nowhere to go and cannot race anything. Measured: rules at
-0.070 s with egress attached three seconds later and no barrier of any kind gave
-0 unsteered connections out of 20, with 12 of 12 attempts before it failing
-`Network is unreachable`. The other order loses every time: 12 of 12 unsteered.
-
-This is why flong needs no handshake, no wrapper and no readiness protocol. The
-window between the payload starting and the hook finishing contains no network.
+The hook runs in a subshell, so its `exit` is its verdict. A non-zero one — or
+a leader that never appears — kills the scope: a session whose hook did not
+finish has nothing installed and nobody left to install it. The ordering
+contract is in the option description, the README and the comment beside the
+call. The test asserts the hook runs as root, is handed a namespace that is not
+the host's, and finds it with an empty route table.
 
 ## 5. Let the hook wrap the payload
 

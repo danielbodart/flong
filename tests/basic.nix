@@ -126,7 +126,7 @@
       autoStart = false;
       privateNetwork = true;
 
-      config = {
+      config = { pkgs, ... }: {
         system.stateVersion = "24.05";
         users.users.alice = {
           isNormalUser = true;
@@ -135,6 +135,9 @@
           home = "/home/alice";
         };
         users.groups.users.gid = 100;
+        # So that a session can TRY to read and flush what the hook installed.
+        # nc, curl, unshare and nsenter are in every NixOS closure already.
+        environment.systemPackages = [ pkgs.nftables ];
       };
     };
 
@@ -142,6 +145,51 @@
       user = "alice";
       workspace = ''realpath /srv/work'';
       command = ''set -- bash -c "$1"'';
+    };
+
+    # The same container with a root hook on it, which is the only way to reach
+    # a session's namespace from outside.
+    flong.hooked = {
+      container = "netless";
+      user = "alice";
+      workspace = ''realpath /srv/work'';
+      launcherInputs = [ pkgs.nftables ];
+
+      attach = ''
+        # Everything the hook is promised, written down for the test to read
+        # back: who it runs as, that the namespace it was handed is not the
+        # host's, and -- the ordering that is the whole point -- that there is
+        # no egress in it at the moment the hook has it.
+        {
+          id -u
+          readlink /proc/self/ns/net
+          readlink "$netns"
+          nsenter --net="$netns" cat /proc/net/route | tail -n +2 | wc -l
+          echo "$machine"
+        } > /tmp/attach-facts
+
+        # And something installed through it, for the session to fail to undo.
+        nsenter --net="$netns" nft \
+          'add table inet flong
+           add chain inet flong out { type filter hook output priority 0; policy accept; }
+           add rule inet flong out tcp dport 19999 drop'
+      '';
+
+      command = ''set -- bash -c "$1"'';
+    };
+
+    # A hook that refuses. The payload would outlive the launcher if nothing
+    # killed it, which is exactly what must not happen to a session whose hook
+    # never finished.
+    flong.badhook = {
+      container = "netless";
+      user = "alice";
+      workspace = ''realpath /srv/work'';
+      attach = ''
+        echo "the hook refuses this session" >&2
+        exit 1
+      '';
+      command = ''set -- sleep 300'';
     };
 
     flong.demo = {
@@ -262,6 +310,8 @@
       badExtraBind = lib.getExe nodes.machine.flong.badextrabind.launcher;
       badUsername = lib.getExe nodes.machine.flong.badusername.launcher;
       netless = lib.getExe nodes.machine.flong.netless.launcher;
+      hooked = lib.getExe nodes.machine.flong.hooked.launcher;
+      badHook = lib.getExe nodes.machine.flong.badhook.launcher;
       # The container's own closure, for the one nspawn this file runs itself:
       # the prepared root has no PATH of its own until nspawn is given one.
       closure = nodes.machine.containers.demo.path;
@@ -360,6 +410,30 @@
           assert "eth0" in out, out
           out = machine.succeed("${netless} 'ls /sys/class/net'")
           assert out.split() == ["lo"], out
+
+      with subtest("the root hook runs as root, in the session's namespace, before any egress"):
+          # The hook is the only moment a session's namespace can be steered
+          # from outside, and what makes it safe is that it happens before the
+          # namespace has anywhere to go: an empty route table at hook time is
+          # the ordering the whole design rests on, asserted rather than
+          # assumed.
+          machine.succeed("${hooked} 'true'")
+          uid, host_ns, session_ns, routes, name = \
+              machine.succeed("cat /tmp/attach-facts").split()
+          assert uid == "0", uid
+          assert session_ns != host_ns, f"{session_ns} == {host_ns}"
+          assert routes == "0", f"the namespace had {routes} routes at hook time"
+          assert name.startswith("netless-"), name
+
+      with subtest("a session whose hook refuses does not run"):
+          # The payload is `sleep 300`: if the launcher merely gave up, the
+          # session would outlive it -- systemd-run makes the workload a child
+          # of the scope, not of the launcher -- and would be running with
+          # nothing installed in its namespace and nobody left to install it.
+          err = machine.fail("${badHook} 2>&1")
+          assert "the hook refuses this session" in err, err
+          machine.fail("machinectl list --no-legend | grep -q netless-")
+          machine.succeed("test -z \"$(find /run/flong -maxdepth 2 -name 's-netless-*')\"")
 
       with subtest("the scope is in machine.slice and carries its properties"):
           # Both facts in one read, and from the host deliberately: the session

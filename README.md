@@ -115,6 +115,7 @@ Declare the container with NixOS's own option, then point a flong at it:
 | `tmpfs` | list of paths | `[ ]` | made container-local and empty; merged with the container's own `tmpfs` |
 | `overlays` | `{ target = lower; }` | `{ }` | lower readable, writes discarded |
 | `properties` | `{ NAME = value; }` | `{ }` | systemd properties for the session's scope, e.g. `MemoryMax` |
+| `attach` | lines | `""` | shell run on the host as root once the session's namespace exists, with it in `$netns`; whatever it installs is in place before any egress |
 | `launcherInputs` `payloadInputs` | packages | `[ ]` | extra `PATH` for `guard`/`workspace` and for `command` |
 | `launcher` | package | *read-only* | the generated launcher; run it as root |
 
@@ -329,6 +330,40 @@ directory that actually gets mounted rather than re-deriving one from `$PWD`.
 It stays root because a gate the caller could `ptrace` is not a gate. Note that
 a refused caller has already reached `workspace`, which matters only if yours
 has side effects.
+
+### `attach`: steering a session from outside
+
+`guard` runs before the session exists, so it cannot touch the one thing a
+launcher most wants to steer: the session's network namespace. `attach` runs
+as root on the host *after* nspawn has made it, with the leader's pid in
+`$leader`, the namespace in `$netns`, and `$machine`, `$uid`, `$gid`, `$home`,
+`$workspace` and the extra binds all in scope:
+
+```nix
+containers.agent.privateNetwork = true;
+
+flong.agent = {
+  launcherInputs = [ pkgs.nftables ];
+  attach = ''
+    nsenter --net="$netns" nft -f ${./steer.nft}
+  '';
+};
+```
+
+**The contract is an ordering, and it is the whole security property.**
+Whatever `attach` installs is in place before anything gives the namespace
+egress. A `privateNetwork` namespace starts with `lo` up and an empty route
+table, so until egress exists the workload has nowhere to go and nothing to
+race: no handshake, no readiness protocol, no window. flong attaches its own
+network only after `attach` returns. Provision egress of your own *first* — from
+`guard`, or at the top of the hook — and the property is gone without anything
+failing: measured, 12 connections out of 12 went round the rules.
+
+A hook that exits non-zero ends the session rather than leaving it running
+unsteered; so does a leader that never appears. Without `privateNetwork` the
+session shares the host's namespace and `$netns` names that one, so a hook that
+installs rules there is steering the host.
+
 
 ## Limitations
 

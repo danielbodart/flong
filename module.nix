@@ -558,12 +558,32 @@ let
           mkdir -p "$root$runtime_dir"
         fi
 
+        ${lib.optionalString (c.attach != "") ''
+        # Set before the trap is armed rather than beside the launch, because
+        # the trap runs for every exit after this line and reads it.
+        attached=0
+        ''}
+
         # NOT exec: that would replace the shell and discard the trap with it.
         # shellcheck disable=SC2329  # invoked by the trap, not by name.
         cleanup() {
           if [ -t 1 ]; then
             printf '\033]666;vte.container.\033\134'
           fi
+          ${lib.optionalString (c.attach != "") ''
+          # A SESSION WHOSE HOOK NEVER FINISHED MUST NOT BE LEFT RUNNING.
+          # `attach` is the whole security property, and it is an ordering: what
+          # it installs is in place before anything gives the namespace egress.
+          # A session that gets past it without it -- a hook that exited
+          # non-zero, a leader that never appeared, a launcher killed in
+          # between -- is a session with nothing installed and nothing left to
+          # install it, so it goes. Once the hook has run this is 1 and the
+          # scope is left alone, which is what keeps SIGTERM on a launcher
+          # meaning what it has always meant here: the session survives it.
+          if [ "$attached" = 0 ]; then
+            ${systemctl} kill -s KILL "$machine.scope" 2>/dev/null || true
+          fi
+          ''}
           # Nothing to do on the path nspawn exits by itself -- it removes all
           # three -- and everything to do on the paths where it does not, which
           # is every signal the scope does not survive. The spelling is nspawn's
@@ -652,7 +672,23 @@ let
         # number to keep concurrent sessions apart, and nspawn would otherwise
         # use it as the hostname -- so a session would see a different hostname
         # every time, where a declared container sees networking.hostName.
-        rc=0
+        #
+        # STARTED IN THE BACKGROUND, AND WAITED FOR AT THE END. The launcher
+        # used to block here for the whole session, which left no moment in
+        # which to touch the namespace nspawn had just made -- and that moment
+        # is precisely what `attach` needs: after the namespace exists, before
+        # the workload can reach anything through it.
+        #
+        # stdin is handed over explicitly because bash gives an asynchronous
+        # command /dev/null for stdin "in the absence of any explicit
+        # redirections", which would silently empty `echo prompt | launcher` --
+        # the case --console=autopipe is here for.
+        #
+        # A script has no job control, so `&` does not put this in a process
+        # group of its own: nspawn stays in the launcher's, which is the
+        # terminal's foreground group, so an interactive session still reads
+        # the keyboard instead of stopping on SIGTTIN.
+        exec 3<&0
         ${systemdRun} --scope --quiet --unit="$machine" --slice=machine.slice \
           --property=DevicePolicy=closed ${deviceProps} ${resourceProps} -- \
           ${nspawn} -q --keep-unit --directory="$root" --machine="$machine" \
@@ -673,7 +709,109 @@ let
             --setenv=FLONG_EXTRA_BINDS="$(joined "$extra_binds")" \
             --setenv=FLONG_EXTRA_BINDS_RO="$(joined "$extra_binds_ro")" \
             ${pkgs.tini}/bin/tini -g -- \
-            ${lib.getExe payload} "$workspace" "$@" || rc=$?
+            ${lib.getExe payload} "$workspace" "$@" <&3 &
+        session=$!
+
+        ${lib.optionalString (c.attach != "") ''
+        # THE LEADER IS POLLED FOR, NOT ASSUMED. systemd-run returns as soon as
+        # the scope is started, which is before nspawn has unshared anything:
+        # measured, a leader appears 26-30 ms after it returns, against a
+        # payload that starts at 58-65 ms. Reading once and giving up would
+        # therefore fail most of the time, and reading once and trusting the
+        # answer would hand the hook the pid of something that is not in a
+        # namespace of its own yet.
+        #
+        # Which is why both answers are checked the same way rather than
+        # trusted: the leader is pid 1 of a pid namespace one level below the
+        # launcher's own, which NSpid in /proc/<pid>/status spells out -- the
+        # pid at every level from this one down.
+        #
+        # Not "a pid whose net namespace is not the host's", which is the test
+        # that suggests itself: a container without privateNetwork shares the
+        # host's, so that would find no leader at all there. And not "any pid
+        # in a namespace of its own" either: the payload is one too, and a
+        # workload that runs `unshare -Upf` makes a namespace of its own whose
+        # pid 1 is two levels down, not one. A hook handed THAT pid would
+        # steer a namespace the workload built for the purpose.
+        own_depth=$(grep '^NSpid:' /proc/self/status)
+        read -ra own_ids <<< "''${own_depth#NSpid:}"
+        own_depth=''${#own_ids[@]}
+        is_leader() {
+          local line ids
+          [ -n "''${1:-}" ] || return 1
+          line=$(grep '^NSpid:' "/proc/$1/status" 2>/dev/null) || return 1
+          read -ra ids <<< "''${line#NSpid:}"
+          [ "''${#ids[@]}" -eq "$((own_depth + 1))" ] && [ "''${ids[-1]}" = 1 ]
+        }
+
+        # machinectl is the primary: nspawn registers its own leader with
+        # machined, so there is nothing to derive. The cgroup walk behind it
+        # answers for the window before that registration lands, and it has to
+        # RECURSE -- under --keep-unit the scope's own cgroup.procs is EMPTY,
+        # because nspawn puts its supervisor in supervisor/ and pid 1 in
+        # payload/, so a reader of the scope's own file finds nothing at all and
+        # concludes there is no session.
+        find_leader() {
+          local pid cg f seen=0 try
+          for ((try = 0; try < 1000; try++)); do
+            pid=$(${machinectl} show "$machine" --property=Leader --value 2>/dev/null) || pid=""
+            if is_leader "$pid"; then printf '%s' "$pid"; return 0; fi
+            cg=$(${systemctl} show --property=ControlGroup --value "$machine.scope" 2>/dev/null) || cg=""
+            if [ -n "$cg" ]; then
+              seen=1
+              for f in "/sys/fs/cgroup$cg"/cgroup.procs \
+                       "/sys/fs/cgroup$cg"/*/cgroup.procs \
+                       "/sys/fs/cgroup$cg"/*/*/cgroup.procs; do
+                [ -e "$f" ] || continue
+                while IFS= read -r pid; do
+                  if is_leader "$pid"; then
+                    printf '%s' "$pid"; return 0
+                  fi
+                done < "$f"
+              done
+            elif [ "$seen" = 1 ]; then
+              # The scope was there and is not any more: a session that failed
+              # to start, rather than one still starting. Waiting out the rest
+              # of the timeout would only make the failure slower.
+              return 1
+            fi
+            sleep 0.005
+          done
+          return 1
+        }
+
+        leader=$(find_leader) || {
+          echo "${name}: $machine started no namespace to attach to" >&2
+          exit 1
+        }
+        netns=/proc/$leader/ns/net
+        # Exported for the reason $workspace is: a hook that reaches for a
+        # helper rather than doing the work inline needs them in its
+        # environment, and which of the two it wants is its business. nspawn
+        # passes only what --setenv names, so this reaches the host side and
+        # stops there.
+        export leader netns
+
+        # THE HOOK, AND THE ORDERING THAT IS ITS WHOLE POINT. Whatever this
+        # installs into the namespace is in place before anything provisions
+        # egress: with --private-network the namespace has `lo` up and an empty
+        # route table, so until egress exists the workload has nowhere to go and
+        # nothing to race. Everything flong attaches itself -- pasta, for one --
+        # is attached after this returns, and a consumer that provisions egress
+        # of its own before installing anything has given the property away.
+        #
+        # A subshell, so that the hook's own `exit` is the hook's verdict and
+        # not the launcher's: `exit 0` ends the hook rather than skipping
+        # straight past the wait below, and anything non-zero lands in the trap
+        # through `set -e`, which kills the scope because $attached is still 0.
+        (
+          ${c.attach}
+        )
+        attached=1
+        ''}
+
+        rc=0
+        wait "$session" || rc=$?
         exit "$rc"
       '';
     };
@@ -807,6 +945,50 @@ in
             Shell run as `user` inside the container with the launcher's
             arguments in "$@". Must leave the command to run in "$@", normally
             by ending in a `set -- ...`, which is then exec'd.
+          '';
+        };
+
+        attach = lib.mkOption {
+          type = lib.types.lines;
+          default = "";
+          example = ''
+            nsenter --net="$netns" nft -f /etc/my-ruleset.nft
+          '';
+          description = ''
+            Shell run on the host as root once nspawn has started, with the
+            session's network namespace in scope: `$leader` is the container's
+            leader pid and `$netns` the path to its network namespace
+            (`/proc/<leader>/ns/net`), both exported. `$machine`, `$root`,
+            `$uid`, `$gid`, `$home`, `$workspace`, `$extra_binds` and
+            `$extra_binds_ro` are in scope too.
+
+            Without `privateNetwork` a session shares the host's network
+            namespace, and `$netns` names *that*: a hook that installs a
+            ruleset there is steering the host.
+
+            Unlike `guard`, which runs before anything exists, this is the
+            moment a session's namespace can be steered from outside: `guard`
+            runs before prepare, before the identity check, before there is a
+            machine name and before the cleanup trap, so anything it creates
+            leaks whenever a later step fails, and the namespace it would want
+            is not there yet.
+
+            **The ordering is the contract, and it is the whole security
+            property.** Whatever this installs into the namespace is in place
+            *before* anything provisions egress. A `--private-network`
+            namespace starts with `lo` up and an empty route table, so until
+            egress exists the workload has nowhere to go: there is no window to
+            race, and so no handshake, wrapper or readiness protocol is needed.
+            flong attaches its own `network` after this returns for exactly
+            that reason. A consumer that provisions egress of its own first --
+            from `guard`, or from the top of this hook -- has silently given
+            the property away: measured, 12 of 12 connections unsteered.
+
+            A non-zero exit ends the session rather than letting it run
+            unsteered: the scope is killed, and the launcher exits non-zero.
+
+            The leader is polled for, because `systemd-run` returns 26-30 ms
+            before there is a namespace and the payload starts at 58-65 ms.
           '';
         };
 
