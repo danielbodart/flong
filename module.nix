@@ -414,8 +414,16 @@ let
           owner=''${stale#${c.container}-}; owner=''${owner%%-*}
           [ -d "/proc/$owner" ] && continue
           ${machinectl} show "$stale" >/dev/null 2>&1 && continue
-          umount "/run/systemd/nspawn/unix-export/$stale" 2>/dev/null || true
-          rm -rf "$d" "/run/systemd/nspawn/unix-export/$stale"
+          # /run/systemd/nspawn/<machine>/unix-export, which is where nspawn
+          # puts it: runtime_directory_make(scope, "systemd/nspawn", machine)
+          # and then "unix-export" joined inside. Looking for the pre-257
+          # spelling, /run/systemd/nspawn/unix-export/<machine>, matched
+          # nothing, so every killed session leaked its tmpfs. The mount tunnel
+          # next to it leaks the same way, and nspawn removes both on the exit
+          # this session never had.
+          umount "/run/systemd/nspawn/$stale/unix-export" 2>/dev/null || true
+          rm -rf "$d" "/run/systemd/nspawn/$stale" \
+            "/run/systemd/nspawn/propagate/$stale"
         done
 
         # Tell the terminal what it is looking at, the way toolbox and distrobox
@@ -492,8 +500,14 @@ let
           if [ -t 1 ]; then
             printf '\033]666;vte.container.\033\134'
           fi
-          umount "/run/systemd/nspawn/unix-export/$machine" 2>/dev/null || true
-          rm -rf "$root" "/run/systemd/nspawn/unix-export/$machine"
+          # Nothing to do on the path nspawn exits by itself -- it removes all
+          # three -- and everything to do on the paths where it does not, which
+          # is every signal the scope does not survive. The spelling is nspawn's
+          # own: <machine> under /run/systemd/nspawn, with unix-export inside
+          # it, and the mount tunnel under propagate/<machine>.
+          umount "/run/systemd/nspawn/$machine/unix-export" 2>/dev/null || true
+          rm -rf "$root" "/run/systemd/nspawn/$machine" \
+            "/run/systemd/nspawn/propagate/$machine"
         }
         trap cleanup EXIT
 

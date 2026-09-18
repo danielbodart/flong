@@ -1,7 +1,7 @@
 # Exercises every option that changes what the container sees: the workspace
 # override, a read-write bind, a tmpfs mask over part of that bind, an overlay,
-# the extra binds in both modes, the privilege drop, the NOPASSWD grant and the
-# session cleanup.
+# the extra binds in both modes, the privilege drop, the NOPASSWD grant, the
+# session cleanup and the sweep that reclaims what a killed session left.
 { lib, ... }:
 
 {
@@ -262,9 +262,24 @@
       badExtraBind = lib.getExe nodes.machine.flong.badextrabind.launcher;
       badUsername = lib.getExe nodes.machine.flong.badusername.launcher;
       netless = lib.getExe nodes.machine.flong.netless.launcher;
+      # The container's own closure, for the one nspawn this file runs itself:
+      # the prepared root has no PATH of its own until nspawn is given one.
+      closure = nodes.machine.containers.demo.path;
     in
     ''
       machine.wait_for_unit("multi-user.target")
+
+      # A session in the background, identified by the directory it makes: the
+      # machine name carries the launcher's pid and a random number, so nothing
+      # outside the launcher can know it in advance.
+      def start_session(command):
+          machine.succeed(f"${launcher} '{command}' >/dev/null 2>&1 &")
+          return machine.wait_until_succeeds(
+              "ls -d /run/flong/demo-*/s-demo-*").strip().split("/s-")[-1]
+
+      # The launcher's own pid, out of the middle of <container>-<pid>-<random>.
+      def launcher_pid(name):
+          return name.split("-")[1]
 
       with subtest("runs as the declared user, in the declared workspace"):
           out = machine.succeed("${launcher} 'id -un; pwd; cat marker'")
@@ -349,6 +364,39 @@
           # And nothing of that session survives it, which the subtests after
           # this one assume.
           machine.wait_until_succeeds("test -z \"$(find /run/flong -maxdepth 2 -name 's-*')\"")
+
+      with subtest("a SIGKILLed session's machine name can be used again"):
+          # nspawn mounts a tmpfs at /run/systemd/nspawn/<machine>/unix-export
+          # and removes it on the way out. A SIGKILL leaves it, and nspawn
+          # refuses to start a machine of that name over it -- so what the
+          # sweep unmounts has to be the path nspawn actually used, which is
+          # not the one it used before systemd 257.
+          name = start_session("sleep 300")
+          machine.wait_until_succeeds(f"mountpoint -q /run/systemd/nspawn/{name}/unix-export")
+          # The launcher first and with SIGKILL, so no trap runs, and then the
+          # scope, which is what actually holds nspawn: the order matters,
+          # because a launcher that outlives its scope cleans up after it.
+          machine.succeed(f"kill -9 {launcher_pid(name)}")
+          machine.succeed(f"systemctl kill -s KILL {name}.scope")
+          machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
+          machine.succeed(f"mountpoint -q /run/systemd/nspawn/{name}/unix-export")
+
+          # A root of its own to start over, because the prepared one is shared
+          # with every later subtest and nspawn writes to the tree it is given.
+          machine.succeed("cp -a $(echo /run/flong/demo-*/prepared) /tmp/reuse-root")
+          reuse = (f"systemd-nspawn -q --machine={name} --directory=/tmp/reuse-root"
+                   " --bind-ro=/nix/store --bind-ro=/nix/var/nix/db"
+                   " ${closure}/sw/bin/true")
+          # The failure this is really about, so the sweep below is not proving
+          # something that would have worked anyway.
+          err = machine.fail(f"{reuse} 2>&1")
+          assert "exists already" in err, err
+
+          # An unrelated launch is where the sweep runs.
+          machine.succeed("${launcher} 'true'")
+          machine.fail(f"test -e /run/systemd/nspawn/{name}")
+          machine.succeed(reuse)
+          machine.succeed("rm -rf /tmp/reuse-root")
 
       with subtest("a user the container does not have is refused"):
           err = machine.fail("${badUsername} 2>&1")
@@ -465,7 +513,16 @@
 
       with subtest("nothing is left behind"):
           machine.succeed("test -z \"$(find /run/flong -maxdepth 2 -name 's-*' 2>/dev/null)\"")
-          machine.succeed("test -z \"$(ls -A /run/systemd/nspawn/unix-export 2>/dev/null)\"")
+          # nspawn's own leftovers, at the paths it actually uses: a directory
+          # per machine holding the unix-export tmpfs, and the mount tunnel
+          # under propagate/<machine>.
+          # A killed session leaves a directory named for its machine here,
+          # holding the unix-export tmpfs, and a mount tunnel under
+          # propagate/. A machine name is <container>-<pid>-<random>, which is
+          # what tells one from `locks` and `propagate` -- nspawn's own two,
+          # which outlive every session.
+          machine.succeed("test -z \"$(ls -d /run/systemd/nspawn/*-*-* 2>/dev/null)\"")
+          machine.succeed("test -z \"$(ls -A /run/systemd/nspawn/propagate)\"")
 
       with subtest("the prepared root is reused rather than rebuilt"):
           before = machine.succeed("stat -c %Y /run/flong/demo-*/prepared").strip()
