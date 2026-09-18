@@ -116,6 +116,7 @@ Declare the container with NixOS's own option, then point a flong at it:
 | `overlays` | `{ target = lower; }` | `{ }` | lower readable, writes discarded |
 | `properties` | `{ NAME = value; }` | `{ }` | systemd properties for the session's scope, e.g. `MemoryMax` |
 | `attach` | lines | `""` | shell run on the host as root once the session's namespace exists, with it in `$netns`; whatever it installs is in place before any egress |
+| `attachBinds` | lines | `""` | shell printing `SOURCE:DESTINATION` lines, run as root before nspawn: a file or socket bound where the hook chooses, not announced to the payload |
 | `attachWrap` | lines | `""` | shell printing a command, one word per line, that the payload is exec'd through inside the session |
 | `launcherInputs` `payloadInputs` | packages | `[ ]` | extra `PATH` for `guard`/`workspace` and for `command` |
 | `launcher` | package | *read-only* | the generated launcher; run it as root |
@@ -364,6 +365,17 @@ A hook that exits non-zero ends the session rather than leaving it running
 unsteered; so does a leader that never appears. Without `privateNetwork` the
 session shares the host's namespace and `$netns` names that one, so a hook that
 installs rules there is steering the host.
+
+`attachBinds` is how a hook gets a socket or a single file into the session,
+which `extraBinds` cannot do: it prints `SOURCE:DESTINATION` lines, bound from a
+host path of its choosing to a fixed path inside, and nothing of them reaches
+`FLONG_EXTRA_BINDS` — they are the launcher's plumbing, not what the caller
+asked for. It runs as root before nspawn, because a bind mount is an argument
+to nspawn and the mount table is made by the time there is a namespace; but
+after the machine name exists and the cleanup trap is armed, so a source can be
+made per session and is released on every path. Bind the specific path and never
+a shared parent: with a whole directory bound, a workload can list and write
+its neighbours' entries.
 
 `attachWrap` prints a command, one word per line, that the payload is exec'd
 through — spliced between the session's pid 1 and the payload, which is the

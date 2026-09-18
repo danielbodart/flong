@@ -135,17 +135,14 @@ shape to document.
 
 `passt` joins `runtimeInputs`, along with `iproute2` for the pin.
 
-## 8. Per-session binds, source ≠ destination
+## ~~8. Per-session binds, source ≠ destination~~
 
-`extraBinds` cannot serve a hook: it takes directories only, binds at the same
-path on both sides, is resolved as the caller before `guard`, and is advertised
-to the payload through `FLONG_EXTRA_BINDS`. A hook needs to bind a file or a
-socket from a host path of its choosing to a fixed path inside, and not tell the
-workload about it.
-
-It must refuse `:` and newlines the way `resolve_binds` does. Bind the specific
-path, never a shared parent: with a whole directory bound, a workload could list
-and write its neighbours' entries — measured.
+Done, as `attachBinds`: `SOURCE:DESTINATION` lines, any kind of source, bound
+read-write and kept out of `FLONG_EXTRA_BINDS`. Run as root before nspawn rather
+than from `attach` — a bind mount is an argument to nspawn, so by the time the
+namespace exists the mount table is made — but after the trap is armed, so a
+per-session source is released on every path. Refuses `:` and newlines on
+either side, after resolving the source as well as before.
 
 ## 9. Capabilities
 

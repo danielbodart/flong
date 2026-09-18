@@ -625,6 +625,77 @@ let
           printf '%s' "$out"
         }
 
+        # THE HOOK'S OWN BINDS, which extraBinds cannot carry: that takes
+        # directories only, binds each at its own path, is resolved as the
+        # caller, and is advertised to the payload. These are the launcher's
+        # plumbing -- a socket, a single file -- bound from a host path of the
+        # hook's choosing to a fixed path inside, and not the workload's
+        # business to be told about.
+        #
+        # Resolved here, as root, after the trap is armed and the machine name
+        # exists, so a source can be made per session and released by `detach`
+        # if a later step fails. Not from `attach` itself: a bind mount is an
+        # argument to nspawn, and by the time there is a namespace the mount
+        # table has been made.
+        attach_binds=""
+        ${lib.optionalString (c.attachBinds != "") ''
+        # SOURCE:DESTINATION, one per line, refused -- not guessed at -- if
+        # either side names a ':' or a newline, which is the refusal
+        # resolve_binds makes and for the same reason: --bind has no escaping
+        # to fall back on. The source is resolved and must exist, and it may be
+        # any kind of file; the destination is a path inside and must be
+        # absolute.
+        resolve_attach_binds() {
+          local line src dest out=""
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            src=''${line%%:*}
+            dest=''${line#*:}
+            case $line in
+              *:*:* | *"$nl"*)
+                echo "${name}: attach bind names ':' or a newline: $line" >&2
+                exit 1
+                ;;
+              *:*) ;;
+              *)
+                echo "${name}: attach bind is not SOURCE:DESTINATION: $line" >&2
+                exit 1
+                ;;
+            esac
+            src=$(realpath -e -- "$src") || exit 1
+            # Again after resolving, because a symlink can lead somewhere the
+            # line itself did not name.
+            case $src in
+              *:* | *"$nl"*)
+                echo "${name}: attach bind names ':' or a newline: $src" >&2
+                exit 1
+                ;;
+            esac
+            case $dest in
+              /*) ;;
+              *)
+                echo "${name}: attach bind destination is not absolute: $dest" >&2
+                exit 1
+                ;;
+            esac
+            out=$out$src:$dest$nl
+          done <<< "$1"
+          printf '%s' "$out"
+        }
+
+        attach_binds_raw=$(
+          ${c.attachBinds}
+        ) || exit 1
+        attach_binds=$(resolve_attach_binds "$attach_binds_raw") || exit 1
+        ''}
+        # Onto the nspawn command line and nowhere else: not joined into
+        # FLONG_EXTRA_BINDS, which is how the payload learns what the CALLER
+        # asked to have mounted.
+        while IFS= read -r b; do
+          [ -n "$b" ] || continue
+          extra_flags+=("--bind=$b")
+        done <<< "$attach_binds"
+
         # The command the payload is exec'd through, empty unless a consumer
         # named one. An array rather than a string, for the reason the extra
         # binds are one: a word with a space in it is a word, not two.
@@ -979,8 +1050,9 @@ in
             session's network namespace in scope: `$leader` is the container's
             leader pid and `$netns` the path to its network namespace
             (`/proc/<leader>/ns/net`), both exported. `$machine`, `$root`,
-            `$uid`, `$gid`, `$home`, `$workspace`, `$extra_binds` and
-            `$extra_binds_ro` are in scope too.
+            `$uid`, `$gid`, `$home`, `$workspace`, `$extra_binds`,
+            `$extra_binds_ro` and `$attach_binds` -- `attachBinds` resolved,
+            as `SOURCE:DESTINATION` lines -- are in scope too.
 
             Without `privateNetwork` a session shares the host's network
             namespace, and `$netns` names *that*: a hook that installs a
@@ -1009,6 +1081,40 @@ in
 
             The leader is polled for, because `systemd-run` returns 26-30 ms
             before there is a namespace and the payload starts at 58-65 ms.
+          '';
+        };
+
+        attachBinds = lib.mkOption {
+          type = lib.types.lines;
+          default = "";
+          example = ''printf '%s\n' "/run/my-gate/$machine.sock:/run/gate.sock"'';
+          description = ''
+            Shell printing `SOURCE:DESTINATION` lines, each bound read-write
+            into the session: a host path of the hook's choosing, at a path
+            inside of the hook's choosing. This is how `attach` gets a socket
+            or a single file into the sandbox, which `extraBinds` cannot do --
+            that takes directories only, binds each at its own path, is
+            resolved as the caller, and is announced to the payload.
+
+            Runs on the host as root, after `guard`, once the session has a
+            machine name and its cleanup trap is armed, with `$machine`,
+            `$root`, `$uid`, `$gid`, `$home` and `$workspace` in scope -- so a
+            source can be made for this session alone, and `detach` will be
+            called to release it even if the launch fails after this point.
+            It runs before nspawn and not from `attach`, because a bind mount
+            is an argument to nspawn: by the time there is a namespace, the
+            mount table has been made. A source that must exist before the
+            session starts -- a listening socket -- is this snippet's to create.
+
+            The source is resolved with `realpath` and must exist; it may be
+            any kind of file. The destination must be absolute. A line naming
+            a `:` or a newline on either side is refused, as `extraBinds`
+            refuses one. Bind the specific path and never a shared parent:
+            with a whole directory bound, a workload can list and write its
+            neighbours' entries.
+
+            Not advertised to the payload: nothing here reaches
+            `FLONG_EXTRA_BINDS`, which says what the *caller* asked for.
           '';
         };
 

@@ -153,9 +153,32 @@
       container = "netless";
       user = "alice";
       workspace = ''realpath /srv/work'';
-      launcherInputs = [ pkgs.nftables ];
+      launcherInputs = [ pkgs.nftables pkgs.netcat ];
+
+      # What the caller asked for, so that FLONG_EXTRA_BINDS has something in
+      # it for the hook's binds to be absent from.
+      extraBinds = ''printf '%s\n' /srv/companion'';
+
+      # A file and a socket, each from a host path named for this session, each
+      # at a fixed path inside that is nothing like its source. The listener
+      # is backgrounded with its output elsewhere, or the substitution this runs
+      # in would wait for it.
+      attachBinds = ''
+        printf 'for-%s\n' "$machine" > "/run/hook-file-$machine"
+        nc -lkU "/run/hook-sock-$machine" </dev/null >/dev/null 2>&1 &
+        for _ in $(seq 100); do
+          [ -S "/run/hook-sock-$machine" ] && break
+          sleep 0.05
+        done
+        printf '%s\n' \
+          "/run/hook-file-$machine:/run/hook/file" \
+          "/run/hook-sock-$machine:/run/hook/sock"
+      '';
 
       attach = ''
+        # The binds reach the hook resolved, so it knows where it put them.
+        grep -q ":/run/hook/sock$" <<< "$attach_binds"
+
         # Everything the hook is promised, written down for the test to read
         # back: who it runs as, that the namespace it was handed is not the
         # host's, and -- the ordering that is the whole point -- that there is
@@ -180,6 +203,16 @@
       attachWrap = ''printf '%s\n' /run/current-system/sw/bin/env "FLONG_WRAPPED=$machine"'';
 
       command = ''set -- bash -c "$1"'';
+    };
+
+    # An attach bind naming a colon, which --bind cannot express. The source
+    # exists, so this is the refusal and not a missing path.
+    flong.badattachbind = {
+      container = "netless";
+      user = "alice";
+      workspace = ''realpath /srv/work'';
+      attachBinds = ''printf '%s\n' "/srv/odd:name:/run/odd"'';
+      command = ''set -- true'';
     };
 
     # A hook that refuses. The payload would outlive the launcher if nothing
@@ -316,6 +349,7 @@
       netless = lib.getExe nodes.machine.flong.netless.launcher;
       hooked = lib.getExe nodes.machine.flong.hooked.launcher;
       badHook = lib.getExe nodes.machine.flong.badhook.launcher;
+      badAttachBind = lib.getExe nodes.machine.flong.badattachbind.launcher;
       # The container's own closure, for the one nspawn this file runs itself:
       # the prepared root has no PATH of its own until nspawn is given one.
       closure = nodes.machine.containers.demo.path;
@@ -434,6 +468,21 @@
           # rather than something the workload's shell could decline to run.
           out = machine.succeed("${hooked} 'echo $FLONG_WRAPPED'")
           assert out.strip().startswith("netless-"), out
+
+      with subtest("the hook's binds are inside, and the payload is not told about them"):
+          # A file and a socket, which extraBinds cannot carry, each at a path
+          # the hook chose rather than at its own.
+          out = machine.succeed("${hooked} 'cat /run/hook/file; test -S /run/hook/sock && echo socket'")
+          assert "for-netless-" in out, out
+          assert "socket" in out, out
+          # FLONG_EXTRA_BINDS says what the CALLER asked to have mounted, and
+          # the hook's plumbing is not that.
+          out = machine.succeed("${hooked} 'echo $FLONG_EXTRA_BINDS'")
+          assert out.strip() == "/srv/companion", out
+
+      with subtest("an attach bind naming ':' is refused, like an extra bind"):
+          err = machine.fail("${badAttachBind} 2>&1")
+          assert "attach bind names" in err, err
 
       with subtest("a session whose hook refuses does not run"):
           # The payload is `sleep 300`: if the launcher merely gave up, the
