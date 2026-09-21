@@ -308,6 +308,7 @@
       user = "alice";
       workspace = ''realpath /srv/work'';
       network.forwardPorts = "auto";
+      network.hostLoopbackToSession = true;
       command = [ "bash" "-c" ];
     };
 
@@ -999,7 +1000,9 @@
       with subtest("with forwardPorts auto, whatever the session listens on reaches it from the host"):
           # Declared nowhere: pasta finds the listener in its once-a-second
           # scan and publishes the same port on the host.
-          machine.succeed("${autoPorts} 'echo from-auto | nc -N -l 18300' >/dev/null 2>&1 &")
+          # Listening on the session's loopback only, as a dev server does:
+          # reached because the host's loopback arrives on the session's.
+          machine.succeed("${autoPorts} 'echo from-auto | nc -N -l 127.0.0.1 18300' >/dev/null 2>&1 &")
           machine.wait_until_succeeds("nc -d -w 3 127.0.0.1 18300 | grep -q from-auto", timeout=30)
           machine.wait_until_succeeds("test -z \"$(ls -A /run/flong/netns)\"")
 

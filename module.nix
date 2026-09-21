@@ -217,7 +217,8 @@ let
           auto = net.forwardPorts == "auto";
         in
         "-t ${if auto then "auto" else spec (forwards "tcp")} -u ${if auto then "none" else spec (forwards "udp")}"
-        + " -T ${spec host} -U ${spec host}";
+        + " -T ${spec host} -U ${spec host}"
+        + lib.optionalString net.hostLoopbackToSession " --host-lo-to-ns-lo";
 
       overlayDir = p: ".overlay/" + lib.replaceStrings [ "/" ] [ "_" ] (lib.removePrefix "/" p);
 
@@ -1583,6 +1584,20 @@ in
                   a dev server started inside is reached from the host's
                   browser. A port another session already publishes is not,
                   and that session is not ended for it.
+                '';
+              };
+              hostLoopbackToSession = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = ''
+                  A forwarded connection from the host's loopback arrives on
+                  the session's loopback, rather than from the session's own
+                  address -- pasta's --host-lo-to-ns-lo. A dev server
+                  listening on 127.0.0.1 inside is then reached at
+                  localhost on the host. It also reaches anything else the
+                  session listens on only on its loopback, which is why pasta
+                  no longer does it by default; a connection from anywhere
+                  but the host's loopback is unaffected.
                 '';
               };
               hostPorts = lib.mkOption {
