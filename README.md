@@ -155,6 +155,7 @@ ordered with `mkBefore` and `mkAfter`.
 | `postStart` | `""` | Configures the session once its namespaces exist, before `network` is attached and before the payload starts. Non-zero exit ends the session. |
 | `postStop` | `""` | Releases what `postStart` made, after the session ends. |
 | `overlays` | `{ }` | `{ target = lower; }`: an overlayfs whose writes go to an upper layer deleted with the session. |
+| `masks` | `[ ]` | Paths replaced by an empty node nobody can read (nspawn's `--inaccessible`), to carve a file out of a bound directory. **Use with care**: it is a denylist, the path must exist at launch, and a file renamed over a masked one on the host shows through. Bind only what is needed where you can. |
 | `network` | `null` | User-mode networking through pasta. Requires `privateNetwork = true`. |
 | `network.forwardPorts` | `[ ]` | Published ports, shaped like `containers.<name>.forwardPorts`, bound on every host address; or `"auto"`, every TCP port the session listens on, while it does. |
 | `network.hostLoopbackToSession` | `false` | A forwarded connection from the host's loopback arrives on the session's loopback: a dev server on 127.0.0.1 inside is reached at localhost. |
@@ -198,6 +199,9 @@ already gone.
 - The workspace and the caller's binds are at their host paths. `command` gets
   the binds as `$FLONG_BINDS`, one `PATH:ro` or `PATH:rw` per line.
 - `/nix/store` is read-only; the system closure is at `/run/current-system`.
+- A directory missing on the way to a mount point inside the user's home is
+  made for the session, owned by the user, so a bind at `~/.cache/tool/data`
+  leaves `~/.cache/tool` writable. It is the session's own, and goes with it.
 - `TMPDIR` is `~/tmp`. `XDG_RUNTIME_DIR` is `/run/user/<uid>`, a 0700 tmpfs;
   name it in the declaration's `tmpfs` to change its options.
 - The hostname is the container's name. pid 1 is

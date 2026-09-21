@@ -86,6 +86,16 @@
       "d /srv/keep 0755 root root -"
       "f /srv/keep/marker 0644 root root - through-the-tmpfs"
 
+      # Masked by flong.demo's `masks`, inside the read-write bind of
+      # /srv/shared: one stays as it is, and one the host renames a new file
+      # over while a session is running.
+      "f /srv/shared/secret 0644 root root - should-be-masked"
+      "f /srv/shared/renamed 0644 root root - masked-at-launch"
+
+      # Where containers.demo's symlink in alice's home points, on the host.
+      # A launcher that followed it would make a directory in here.
+      "d /srv/escape-target 0755 root root -"
+
       # Exists, and names a character nspawn's --bind cannot express.
       "d /srv/odd:name 0755 root root -"
 
@@ -166,6 +176,10 @@
         isReadOnly = false;
       };
 
+      # Deep in alice's home, where the root has neither ~/deep nor
+      # ~/deep/er: the launcher makes both, and makes them hers.
+      bindMounts."/home/alice/deep/er/keep".hostPath = "/srv/keep";
+
       config = { pkgs, ... }: {
         system.stateVersion = "24.05";
         services.openssh.enable = false;
@@ -195,6 +209,10 @@
           "d /srv/by-tmpfiles 0755 root root -"
           "f /srv/by-tmpfiles/marker 0644 root root - made-by-tmpfiles"
           "L+ /srv/by-tmpfiles/link - - - - /srv/by-tmpfiles/marker"
+          # A symlink in the root's home to an absolute path, which from the
+          # launcher's side of nspawn is the host's.
+          "d /home/alice 0700 alice users -"
+          "L+ /home/alice/escape - - - - /srv/escape-target"
         ];
       };
     };
@@ -433,6 +451,9 @@
       # Readable from the lower directory; writes must not reach it.
       overlays."/opt/layered" = "/srv/lower";
 
+      # Carved out of the read-write bind of /srv/shared.
+      masks = [ "/srv/shared/secret" "/srv/shared/renamed" ];
+
       command = [ "bash" "-c" ];
     };
 
@@ -459,6 +480,24 @@
     # A second launcher over the SAME container, differing only in what its
     # workspace resolves to. The directory exists, so this is the colon being
     # refused rather than a missing path.
+    # An overlay whose mount point is through containers.demo's symlink.
+    flong.symlinkoverlay = {
+      container = "demo";
+      user = "alice";
+      workspace = ''realpath /srv/work'';
+      overlays."/home/alice/escape/inner" = "/srv/lower";
+      command = [ "true" ];
+    };
+
+    # A mask over a path the session does not have.
+    flong.badmask = {
+      container = "demo";
+      user = "alice";
+      workspace = ''realpath /srv/work'';
+      masks = [ "/srv/no-such-path" ];
+      command = [ "true" ];
+    };
+
     flong.badworkspace = {
       container = "demo";
       user = "alice";
@@ -589,6 +628,8 @@
       userPath = lib.getExe nodes.machine.flong.userpath.launcher;
       plantedMarker = lib.getExe nodes.machine.flong.plantedmarker.launcher;
       networked = lib.getExe nodes.machine.flong.networked.launcher;
+      badMask = lib.getExe nodes.machine.flong.badmask.launcher;
+      symlinkOverlay = lib.getExe nodes.machine.flong.symlinkoverlay.launcher;
       autoPorts = lib.getExe nodes.machine.flong.autoPorts.launcher;
       # The container's own closure, for the one nspawn this file runs itself:
       # the prepared root has no PATH of its own until nspawn is given one.
@@ -1340,6 +1381,38 @@
           # orders custom mounts by destination rather than by argument.
           out = machine.succeed("${launcher} 'cat /srv/nested/keep/marker'")
           assert "through-the-tmpfs" in out, out
+
+      with subtest("a symlink on the way to a mount point in home ends the launch, and makes nothing on the host"):
+          machine.fail("${symlinkOverlay}")
+          machine.fail("test -e /srv/escape-target/inner")
+
+      with subtest("a mask hides a file inside a read-write bind, and leaves the host's alone"):
+          out = machine.succeed("${launcher} 'cat /srv/shared/secret 2>&1 || echo refused; ls /srv/shared'")
+          assert "should-be-masked" not in out, out
+          assert "refused" in out, out
+          machine.fail("${launcher} 'echo x > /srv/shared/secret'")
+          assert "should-be-masked" in machine.succeed("cat /srv/shared/secret")
+
+      with subtest("a mask over a path the session does not have fails the launch"):
+          machine.fail("${badMask}")
+
+      with subtest("a file renamed over a masked one on the host shows through"):
+          # What `masks` warns of: the mask is on the file, and a rename on
+          # the host detaches it in the session's namespace.
+          machine.succeed("${launcher} 'cat /srv/shared/renamed 2>&1 || echo before-refused; sleep 6; cat /srv/shared/renamed 2>&1 || echo after-refused' > /tmp/renamed-out 2>&1 &")
+          machine.wait_until_succeeds("grep -q before-refused /tmp/renamed-out")
+          machine.succeed("printf renamed-in > /srv/shared/renamed.new && mv /srv/shared/renamed.new /srv/shared/renamed")
+          machine.wait_until_succeeds("grep -q -e renamed-in -e after-refused /tmp/renamed-out", timeout=30)
+          out = machine.succeed("cat /tmp/renamed-out")
+          assert "renamed-in" in out, out
+
+      with subtest("the directories on the way to a bind inside home are the payload's"):
+          out = machine.succeed("${launcher} 'stat -c %U /home/alice/deep /home/alice/deep/er; touch /home/alice/deep/er/beside && echo wrote; cat /home/alice/deep/er/keep/marker'")
+          assert out.split()[:2] == ["alice", "alice"], out
+          assert "wrote" in out, out
+          assert "through-the-tmpfs" in out, out
+          # Outside home, nspawn's as ever: the tmpfs mask's parents, /srv, root's.
+          assert machine.succeed("${launcher} 'stat -c %U /srv'").strip() == "root"
 
       with subtest("nothing is left behind"):
           # Session roots, and the record beside each of which postStop is

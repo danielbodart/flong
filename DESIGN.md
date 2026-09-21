@@ -255,6 +255,21 @@ everything in it.
   already has for it. flong adds only what is known at launch (the workspace
   and the caller's `binds`) or has no declaration form (`overlays`, whose upper
   layer flong places and owns).
+- **The way to a mount point is the user's, inside home.** nspawn makes a
+  bind's missing parents as root, so a bind at `~/.cache/tool/data` left
+  `~/.cache/tool` unwritable, and every program keeping state beside the bound
+  directory failed. The launcher makes each missing directory on the way to
+  every mount point itself, in the session root, and gives those under the
+  user's home to the user. Outside home it changes nothing. It walks component
+  by component and stops at a symlink, since it runs as root on the host side,
+  where a link in the root would resolve against the host.
+- **Masks are a last resort.** `masks` is nspawn's `--inaccessible`: the path
+  is over-mounted with an empty node of its kind. It is a flong option for the
+  reason `overlays` is -- NixOS has no word for it. It is a denylist, so it
+  fails open for anything it does not name; the path must exist at launch or
+  the launch fails; and it masks the file, not the name -- a host program that
+  renames a new file over the masked one detaches the mask in the session
+  (measured). Binding the parts wanted is always preferred.
 - **Mount order.** nspawn sorts custom mounts by destination, so a tmpfs can
   mask part of a bind mount and a bind mount can reach through a tmpfs. A
   single socket can be exposed from an otherwise masked directory this way.

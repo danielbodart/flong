@@ -108,6 +108,14 @@ let
           + ":" + nspawnPath m.mountPoint)
         declared.bindMounts;
 
+      # Where the declaration's binds land, for make_dirs: nspawn makes a
+      # bind's mount point, and the directories on the way to it, root's.
+      declaredMountPoints = lib.mapAttrsToList (_: m: m.mountPoint) declared.bindMounts;
+
+      # Over-mounted with an empty node nobody can read. nspawn's
+      # --inaccessible; spelt as a path the way --bind's are.
+      maskFlags = map (p: "--inaccessible=" + nspawnPath p) c.masks;
+
       # extraFlags means what it means to the container module, whose unit
       # expands the entries unquoted: each one is split on whitespace, so an
       # entry can carry several flags, or a flag and its value as two words.
@@ -251,7 +259,8 @@ let
       mountpointMkdirs = lib.concatStringsSep "\n        " (
         lib.concatMap
           (p: [
-            ''mkdir -p "$root"/${lib.escapeShellArg (overlayDir p)} "$root"${lib.escapeShellArg p}''
+            ''mkdir -p "$root"/${lib.escapeShellArg (overlayDir p)}''
+            ''make_mount_point ${lib.escapeShellArg p}''
             # The upper layer receives the payload's writes, so it belongs to
             # the payload's user. Note the MERGED directory still takes its
             # ownership from the lower one.
@@ -865,6 +874,58 @@ let
         mkdir -p "$root$home/tmp"
         chown "$uid:$gid" "$root$home/tmp"
         chmod 0700 "$root$home/tmp"
+
+        # THE WAY TO A MOUNT POINT IS THE PAYLOAD'S, INSIDE ITS HOME. A mount
+        # whose parent the root does not have gets one made for it -- by
+        # nspawn for a bind, by this launcher for the rest -- and made as
+        # root, so a bind at ~/.cache/tool/data left ~/.cache/tool, and
+        # ~/.cache if that was missing too, where the payload could write
+        # nothing: every program keeping state beside the bound directory was
+        # refused. Each directory missing on the way is made here instead, in
+        # the session's root, and inside $home given to the payload. It is
+        # the session's own and goes with it, as the root does. Outside $home
+        # nothing changes: root's there is the container's to decide.
+        #
+        # Component by component, and never through a symlink: this runs as
+        # root on the host side of nspawn, where a link in the root resolves
+        # against the host's filesystem. Meeting one is a failure, and each
+        # caller says what that means.
+        make_dirs() {
+          local cur part
+          case $1/ in
+            "$home"/*) ;;
+            *) return 0 ;;
+          esac
+          cur=$root$home
+          IFS=/ read -ra parts <<< "''${1#"$home"}"
+          for part in "''${parts[@]}"; do
+            [ -n "$part" ] || continue
+            cur=$cur/$part
+            if [ -L "$cur" ]; then
+              return 1
+            elif [ ! -e "$cur" ]; then
+              mkdir "$cur"
+              chown "$uid:$gid" "$cur"
+            fi
+          done
+        }
+        # A tmpfs or an overlay: this launcher makes its mount point, so a
+        # symlink on the way ends the launch -- `mkdir -p` would follow it out
+        # of the root. Outside $home, as before: the root is the closure's.
+        make_mount_point() {
+          make_dirs "$1" || {
+            echo "${name}: a symlink in the session root is on the way to $1" >&2
+            # Before the cleanup trap is armed, so released here.
+            release_session "$machine" ${cache}
+            exit 1
+          }
+          mkdir -p "$root$1"
+        }
+        # A bind's parents. nspawn makes its mount point, resolving inside the
+        # root, so a symlink here only means those are left to nspawn.
+        for path in ${lib.escapeShellArgs declaredMountPoints}; do
+          make_dirs "''${path%/*}" || true
+        done
         ${mountpointMkdirs}
         overlay_flags=()
         ${lib.optionalString (c.overlays != { }) ''
@@ -943,7 +1004,7 @@ let
           [ "$path" = "$runtime_dir" ] && want_runtime_dir=0
           nspawn_path path_nspawn "$path"
           tmpfs_flags+=("--tmpfs=$path_nspawn:''${options:-mode=0755,uid=$uid,gid=$gid}")
-          mkdir -p "$root$path"
+          make_mount_point "$path"
         done
         if [ "$want_runtime_dir" = 1 ]; then
           tmpfs_flags+=("--tmpfs=$runtime_dir:mode=0700,uid=$uid,gid=$gid")
@@ -1008,6 +1069,7 @@ let
 
         # The declaration's binds and extraFlags, one argument each.
         declared_flags=(${lib.escapeShellArgs declaredFlags})
+        mask_flags=(${lib.escapeShellArgs maskFlags})
 
         # The binds computed at launch, in an array for the same reason:
         # these are runtime values, and word-splitting a path is how a
@@ -1024,6 +1086,7 @@ let
               exit 1
               ;;
           esac
+          make_dirs "''${2%/*}" || true
           nspawn_path path "$2"
           bind_flags+=("$flag=$path:$path")
         }
@@ -1125,6 +1188,7 @@ let
             ''${bind_flags[@]+"''${bind_flags[@]}"} \
             ''${tmpfs_flags[@]+"''${tmpfs_flags[@]}"} \
             ''${overlay_flags[@]+"''${overlay_flags[@]}"} \
+            ''${mask_flags[@]+"''${mask_flags[@]}"} \
             ${uidFlag}=${c.user} \
             --setenv=PATH=${closure}/sw/bin \
             --setenv=TMPDIR="$home/tmp" \
@@ -1626,6 +1690,32 @@ in
 
             overlayfs reports changing device and inode numbers as a file is
             written, so this must not cover a path holding a sqlite database.
+          '';
+        };
+
+        masks = lib.mkOption {
+          type = lib.types.listOf (lib.types.strMatching "/.*");
+          default = [ ];
+          example = [ "/home/alice/.cache/tool/token" ];
+          description = ''
+            Paths in the session replaced by an empty node of the same kind
+            that nobody can read -- nspawn's `--inaccessible`. For carving one
+            file out of a directory a bind brings in whole.
+
+            USE WITH CARE. Prefer binding only what the session needs to
+            binding everything and masking the rest:
+
+            - A mask is a denylist. Whatever it does not name is in, so a file
+              the host's tool starts keeping beside the masked one next
+              release -- a second token, a refresh token -- is visible from
+              the day it appears.
+            - The path must exist when the session starts, or the launch
+              fails. A file that is written later, on the host, into a
+              directory that is bound through is not masked.
+            - It masks the file, not the name. A host program that replaces
+              the file by renaming a new one over it -- as many write a
+              credential -- detaches the mask in every running session, and
+              the new file shows through.
           '';
         };
 
