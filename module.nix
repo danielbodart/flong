@@ -441,7 +441,7 @@ let
     in
     pkgs.writeShellApplication {
       inherit name;
-      runtimeInputs = [ pkgs.coreutils pkgs.util-linux pkgs.e2fsprogs ]
+      runtimeInputs = [ pkgs.coreutils pkgs.gnused pkgs.util-linux pkgs.e2fsprogs ]
         ++ lib.optional (c.network != null) pkgs.passt
         ++ c.path;
       text = ''
@@ -461,6 +461,19 @@ let
         # unaffected. What this costs is that caller-controlled shell runs
         # before the gate -- but it runs AS the caller, in their own cwd, so
         # it buys them nothing they could not have run themselves.
+
+        # A TERMINAL IN RAW MODE DOES NOT RETURN THE CARRIAGE. nspawn puts
+        # the caller's terminal into raw mode for the session's console, and
+        # the hooks run while it is: every line they print -- postStart's,
+        # postStop's, this script's own -- would start where the last one
+        # ended, stepping across the screen. So each line written to a
+        # terminal ends in a carriage return as well; on a terminal that is
+        # not raw, \r\n looks exactly as \n does. Not for a file or a pipe,
+        # which gets what was written.
+        if [ -t 2 ]; then
+          exec {flong_stderr}>&2
+          exec 2> >(sed -u 's/$/\r/' >&"$flong_stderr")
+        fi
 
         # `workspace` is the only place this script touches attacker-shaped
         # input: it runs a shell -- a consumer's, which may well run git -- in
