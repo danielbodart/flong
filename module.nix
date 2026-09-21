@@ -203,6 +203,10 @@ let
       # hostPorts go out as TCP and UDP both: a port on the host's loopback is
       # the thing named, and a resolver there is as likely a reason to name one
       # as a database.
+      #
+      # forwardPorts "auto" is pasta's own: every second it reads what is
+      # listening in the session and publishes the same TCP port on the host,
+      # for as long as it is listening.
       pastaPorts = net:
         let
           spec = ports: if ports == [ ] then "none" else lib.concatStringsSep "," ports;
@@ -210,8 +214,10 @@ let
             (p: "${toString p.hostPort}:${toString (if p.containerPort == null then p.hostPort else p.containerPort)}")
             (lib.filter (p: p.protocol == protocol) net.forwardPorts);
           host = map toString net.hostPorts;
+          auto = net.forwardPorts == "auto";
         in
-        "-t ${spec (forwards "tcp")} -u ${spec (forwards "udp")} -T ${spec host} -U ${spec host}";
+        "-t ${if auto then "auto" else spec (forwards "tcp")} -u ${if auto then "none" else spec (forwards "udp")}"
+        + " -T ${spec host} -U ${spec host}";
 
       overlayDir = p: ".overlay/" + lib.replaceStrings [ "/" ] [ "_" ] (lib.removePrefix "/" p);
 
@@ -1544,7 +1550,7 @@ in
           type = lib.types.nullOr (lib.types.submodule {
             options = {
               forwardPorts = lib.mkOption {
-                type = lib.types.listOf (lib.types.submodule {
+                type = lib.types.either (lib.types.enum [ "auto" ]) (lib.types.listOf (lib.types.submodule {
                   options = {
                     protocol = lib.mkOption {
                       type = lib.types.enum [ "tcp" "udp" ];
@@ -1561,7 +1567,7 @@ in
                       description = "Port in the session; `hostPort` if null.";
                     };
                   };
-                });
+                }));
                 default = [ ];
                 description = ''
                   Ports on the host forwarded into the session, shaped exactly
@@ -1571,6 +1577,12 @@ in
                   A host port is one session's at a time. A second concurrent
                   session asking for the same one fails to attach its network,
                   and is ended rather than left running without it.
+
+                  `"auto"`: whatever TCP port the session listens on is
+                  published on the host at the same port, while it listens --
+                  a dev server started inside is reached from the host's
+                  browser. A port another session already publishes is not,
+                  and that session is not ended for it.
                 '';
               };
               hostPorts = lib.mkOption {

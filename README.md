@@ -156,7 +156,7 @@ ordered with `mkBefore` and `mkAfter`.
 | `postStop` | `""` | Releases what `postStart` made, after the session ends. |
 | `overlays` | `{ }` | `{ target = lower; }`: an overlayfs whose writes go to an upper layer deleted with the session. |
 | `network` | `null` | User-mode networking through pasta. Requires `privateNetwork = true`. |
-| `network.forwardPorts` | `[ ]` | Published ports, shaped like `containers.<name>.forwardPorts`, bound on every host address. |
+| `network.forwardPorts` | `[ ]` | Published ports, shaped like `containers.<name>.forwardPorts`, bound on every host address; or `"auto"`, every TCP port the session listens on, while it does. |
 | `network.hostPorts` | `[ ]` | Host loopback ports the session reaches at the same port on its own loopback, TCP and UDP. |
 | `scopeConfig` | `{ }` | Settings for the session's scope unit, typed as `serviceConfig`, e.g. `MemoryMax = "8G"`. |
 | `path` | `[ ]` | Packages on `PATH` for every hook that runs on the host. |

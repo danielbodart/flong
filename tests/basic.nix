@@ -302,6 +302,15 @@
     # A real network, through pasta, over the same private container -- with a
     # hook that installs a rule first, because the ordering between the two is
     # the property under test.
+    # Every port the session listens on, published while it listens.
+    flong.autoPorts = {
+      container = "netless";
+      user = "alice";
+      workspace = ''realpath /srv/work'';
+      network.forwardPorts = "auto";
+      command = [ "bash" "-c" ];
+    };
+
     flong.networked = {
       container = "netless";
       user = "alice";
@@ -579,6 +588,7 @@
       userPath = lib.getExe nodes.machine.flong.userpath.launcher;
       plantedMarker = lib.getExe nodes.machine.flong.plantedmarker.launcher;
       networked = lib.getExe nodes.machine.flong.networked.launcher;
+      autoPorts = lib.getExe nodes.machine.flong.autoPorts.launcher;
       # The container's own closure, for the one nspawn this file runs itself:
       # the prepared root has no PATH of its own until nspawn is given one.
       closure = nodes.machine.containers.demo.path;
@@ -985,6 +995,13 @@
                   assert "192.0.2.53" not in reached, out
           finally:
               machine.succeed("cp /tmp/resolv.conf.both /etc/resolv.conf")
+
+      with subtest("with forwardPorts auto, whatever the session listens on reaches it from the host"):
+          # Declared nowhere: pasta finds the listener in its once-a-second
+          # scan and publishes the same port on the host.
+          machine.succeed("${autoPorts} 'echo from-auto | nc -N -l 18300' >/dev/null 2>&1 &")
+          machine.wait_until_succeeds("nc -d -w 3 127.0.0.1 18300 | grep -q from-auto", timeout=30)
+          machine.wait_until_succeeds("test -z \"$(ls -A /run/flong/netns)\"")
 
       with subtest("a forwarded port reaches the session from the host"):
           # And a second listener on a port that is not forwarded, left up past
