@@ -465,9 +465,16 @@ longer existed; separately, a hook failed with `nsenter: cannot open
 
 So in a session with `postStart` or `network`, a wait between tini and the
 payload polls for the directory
-`/run/flong-ready`, every 5 ms for up to 10 s. The launcher creates it
+`/run/flong-ready` every 5 ms, for as long as it takes. The launcher creates it
 through `/proc/<leader>/root` once `postStart` and pasta are done. This is a
 readiness marker, not a security boundary; the ordering above is the boundary.
+
+There is no timeout. A hook can take as long as it needs, a person answering
+a question in it included. A hook that fails, and a launcher asked to stop,
+already end the session through the launcher's trap. The only case nothing
+ends is a launcher killed with SIGKILL mid-hook: its payload never starts, and
+the session sits idle until it is terminated. That is a leftover, not a hazard,
+and a limit would only trade it for failing every slow hook.
 
 The marker is created with `mkdir`, not `touch`. Paths walked beneath
 `/proc/<pid>/root` belong to the session, and an absolute symlink met on that

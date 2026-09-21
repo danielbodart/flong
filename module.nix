@@ -402,16 +402,23 @@ let
       # could make it first.
       #
       # Between tini and the payload, so `command` starts after it.
+      #
+      # NO TIMEOUT. However long the hook takes -- a person answering a
+      # question in it, say -- is how long the payload waits. What ends a
+      # session whose hook failed is the launcher's trap, at once, and a
+      # launcher asked to stop stops its session first. The one case nothing
+      # ends is a launcher SIGKILLed mid-hook: its payload never starts, so the
+      # session sits idle with nothing running in it until it is terminated,
+      # which is a leftover and not a hazard. A limit here would buy only that,
+      # and cost every hook slower than it.
       gate = pkgs.writeShellApplication {
         name = "flong-gate";
         runtimeInputs = [ pkgs.coreutils ];
         text = ''
-          for ((try = 0; try < 2000; try++)); do
-            [ -d /run/flong-ready ] && exec "$@"
+          until [ -d /run/flong-ready ]; do
             sleep 0.005
           done
-          echo "flong: the session never became ready" >&2
-          exit 1
+          exec "$@"
         '';
       };
       gateCmd = lib.optionalString steered (lib.getExe gate);
