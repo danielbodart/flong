@@ -89,6 +89,91 @@ let
     '';
   };
 
+  # A declared tmpfs entry is an nspawn --tmpfs argument, PATH[:OPTIONS],
+  # where the path may escape a ':' or a '\' with a backslash. The path
+  # is needed on its own, to make the mount point and to find the
+  # runtime directory, so it is read out here the way nspawn reads it.
+  # Both engines read the same declaration through it.
+  tmpfsEntriesOf = declared: map
+    (entry:
+      let
+        r = lib.foldl'
+          (acc: ch:
+            if acc.done then acc // { rest = acc.rest + ch; }
+            else if acc.escaped then acc // { path = acc.path + ch; escaped = false; }
+            else if ch == "\\" then acc // { escaped = true; }
+            else if ch == ":" then acc // { done = true; }
+            else acc // { path = acc.path + ch; })
+          { path = ""; rest = ""; escaped = false; done = false; }
+          (lib.stringToCharacters entry);
+      in
+      {
+        inherit (r) path;
+        # Empty when the entry names no options, and flong supplies them.
+        options = r.rest;
+      })
+    declared.tmpfs;
+
+  # EVERY PORT CLASS IS SPELT OUT, "none" included, because -t, -u, -T and
+  # -U all default to `auto` -- and `auto` forwards every port bound on the
+  # other side, which for -T means everything listening on the host's
+  # loopback. A session asks for what it gets, port by port.
+  #
+  # hostPorts go out as TCP and UDP both: a port on the host's loopback is
+  # the thing named, and a resolver there is as likely a reason to name one
+  # as a database.
+  #
+  # forwardPorts "auto" is pasta's own: every second it reads what is
+  # listening in the session and publishes the same TCP port on the host,
+  # for as long as it is listening.
+  #
+  # A list of words, one argument each: the nspawn launcher joins them
+  # with spaces, and the rootless one passes each as a pasta-arg.
+  pastaPortArgs = net:
+    let
+      spec = ports: if ports == [ ] then "none" else lib.concatStringsSep "," ports;
+      forwards = protocol: map
+        (p: "${toString p.hostPort}:${toString (if p.containerPort == null then p.hostPort else p.containerPort)}")
+        (lib.filter (p: p.protocol == protocol) net.forwardPorts);
+      host = map toString net.hostPorts;
+      auto = net.forwardPorts == "auto";
+    in
+    [ "-t" (if auto then "auto" else spec (forwards "tcp")) "-u" (if auto then "none" else spec (forwards "udp"))
+      "-T" (spec host) "-U" (spec host) ]
+    ++ lib.optional net.hostLoopbackToSession "--host-lo-to-ns-lo";
+
+  # A script of its own, rather than a snippet spliced into the launcher,
+  # because it is not always THIS launcher that runs it: the sweep runs
+  # inside whichever launch of the container comes next, and several
+  # launchers can drive one container. So each session records which
+  # teardown is its own, and the sweep runs that one -- including a
+  # superseded generation's, whose code this launcher no longer carries.
+  mkPostStopScript = name: c: pkgs.writeShellApplication {
+    name = "flong-poststop-${name}";
+    runtimeInputs = [ pkgs.coreutils pkgs.util-linux ] ++ c.path;
+    text = ''
+      # Exported, so a helper the snippet calls sees it as well.
+      export machine=$1
+      ${c.postStop}
+    '';
+  };
+
+  # The rootless engine's native launcher: flong-launch, flong-sweeper and
+  # flong-init. Built from this nixpkgs, so its bubblewrap is the host's.
+  flongLauncher = import ./launcher { inherit pkgs; };
+
+  # The rootless engine, kept in a file of its own until the nspawn one is
+  # deleted. It is given the module's config, not a declaration's, and the
+  # helpers both engines share.
+  rootless = import ./rootless.nix {
+    inherit config lib pkgs;
+    shared = { inherit mkPayload tmpfsEntriesOf pastaPortArgs mkPostStopScript flongLauncher dnsForward4 dnsForward6; };
+  };
+
+  # Whether any declaration runs rootless: the host checks and the holder
+  # unit exist only then.
+  anyRootless = lib.any (c: c.engine == "rootless") (lib.attrValues cfg);
+
   mkLauncher = name: c:
     let
       declared = config.containers.${c.container};
@@ -121,29 +206,7 @@ let
       # entry can carry several flags, or a flag and its value as two words.
       declaredFlags = declaredBindFlags ++ extraFlagWords declared;
 
-      # A declared tmpfs entry is an nspawn --tmpfs argument, PATH[:OPTIONS],
-      # where the path may escape a ':' or a '\' with a backslash. The path
-      # is needed on its own, to make the mount point and to find the
-      # runtime directory, so it is read out here the way nspawn reads it.
-      tmpfsEntries = map
-        (entry:
-          let
-            r = lib.foldl'
-              (acc: ch:
-                if acc.done then acc // { rest = acc.rest + ch; }
-                else if acc.escaped then acc // { path = acc.path + ch; escaped = false; }
-                else if ch == "\\" then acc // { escaped = true; }
-                else if ch == ":" then acc // { done = true; }
-                else acc // { path = acc.path + ch; })
-              { path = ""; rest = ""; escaped = false; done = false; }
-              (lib.stringToCharacters entry);
-          in
-          {
-            inherit (r) path;
-            # Empty when the entry names no options, and flong supplies them.
-            options = r.rest;
-          })
-        declared.tmpfs;
+      tmpfsEntries = tmpfsEntriesOf declared;
 
       # allowedDevices is a unit property rather than an nspawn flag, and is
       # translated here.
@@ -202,31 +265,6 @@ let
       # Where a session's namespace is pinned for pasta. Beside the caches and
       # not in one, because a cache is swept whole and this is a mount.
       pinDir = "/run/flong/netns";
-
-      # EVERY PORT CLASS IS SPELT OUT, "none" included, because -t, -u, -T and
-      # -U all default to `auto` -- and `auto` forwards every port bound on the
-      # other side, which for -T means everything listening on the host's
-      # loopback. A session asks for what it gets, port by port.
-      #
-      # hostPorts go out as TCP and UDP both: a port on the host's loopback is
-      # the thing named, and a resolver there is as likely a reason to name one
-      # as a database.
-      #
-      # forwardPorts "auto" is pasta's own: every second it reads what is
-      # listening in the session and publishes the same TCP port on the host,
-      # for as long as it is listening.
-      pastaPorts = net:
-        let
-          spec = ports: if ports == [ ] then "none" else lib.concatStringsSep "," ports;
-          forwards = protocol: map
-            (p: "${toString p.hostPort}:${toString (if p.containerPort == null then p.hostPort else p.containerPort)}")
-            (lib.filter (p: p.protocol == protocol) net.forwardPorts);
-          host = map toString net.hostPorts;
-          auto = net.forwardPorts == "auto";
-        in
-        "-t ${if auto then "auto" else spec (forwards "tcp")} -u ${if auto then "none" else spec (forwards "udp")}"
-        + " -T ${spec host} -U ${spec host}"
-        + lib.optionalString net.hostLoopbackToSession " --host-lo-to-ns-lo";
 
       overlayDir = p: ".overlay/" + lib.replaceStrings [ "/" ] [ "_" ] (lib.removePrefix "/" p);
 
@@ -439,21 +477,7 @@ let
       };
       gateCmd = lib.optionalString steered (lib.getExe gate);
 
-      # A script of its own, rather than a snippet spliced into the launcher,
-      # because it is not always THIS launcher that runs it: the sweep runs
-      # inside whichever launch of the container comes next, and several
-      # launchers can drive one container. So each session records which
-      # teardown is its own, and the sweep runs that one -- including a
-      # superseded generation's, whose code this launcher no longer carries.
-      postStopScript = pkgs.writeShellApplication {
-        name = "flong-poststop-${name}";
-        runtimeInputs = [ pkgs.coreutils pkgs.util-linux ] ++ c.path;
-        text = ''
-          # Exported, so a helper the snippet calls sees it as well.
-          export machine=$1
-          ${c.postStop}
-        '';
-      };
+      postStopScript = mkPostStopScript name c;
     in
     pkgs.writeShellApplication {
       inherit name;
@@ -1324,7 +1348,7 @@ let
         touch "$pin"
         mount --bind "$netns" "$pin"
         pasta --quiet --config-net --netns "$pin" --runas 0 --pid "$pin.pid" \
-          ${pastaPorts c.network} --no-map-gw \
+          ${lib.concatStringsSep " " (pastaPortArgs c.network)} --no-map-gw \
           ''${dns_forward[@]+"''${dns_forward[@]}"}
         ''}
 
@@ -1378,6 +1402,33 @@ in
             The `containers.<name>` declaration this runs: its closure,
             `bindMounts`, `tmpfs`, `extraFlags`, `allowedDevices` and network
             isolation, read as option values.
+          '';
+        };
+
+        engine = lib.mkOption {
+          type = lib.types.enum [ "nspawn" "rootless" ];
+          default = "nspawn";
+          description = ''
+            Which engine runs this declaration's sessions. Temporary: the
+            option goes when the nspawn engine does.
+
+            `nspawn`, the default, is systemd-nspawn run as root. `rootless`
+            runs as the calling user through flong-launch and bubblewrap, in
+            user namespaces the caller owns, with no sudo and no root
+            anywhere.
+
+            Until flong's phase 3, `rootless` installs no seccomp filter, so it
+            is not for untrusted payloads yet. Its wrapper's checks --
+            `workspace`, `binds`, `guard`, the depth rule -- are consistency
+            checks, not a boundary: the caller can run flong-launch directly
+            with any spec. The launcher's own checks are the boundary against
+            the payload, and the prepared root and the records are the
+            caller's, as their `~/.bashrc` is.
+
+            Stop a declaration's running sessions before switching its engine.
+            An nspawn session's postStop record and network pin under
+            /run/flong are swept only by an nspawn launcher of the same
+            container.
           '';
         };
 
@@ -1734,6 +1785,81 @@ in
             A session's root, its TMPDIR and every overlay upper layer live
             under /run, which is RAM: `MemoryMax` makes a payload that fills
             them the session's problem rather than the host's.
+
+            `engine = "nspawn"` only: there is no scope under rootless, whose
+            limits are `limits`.
+          '';
+        };
+
+        limits =
+          let
+            # A size as systemd writes one, and as the kernel's memparse reads
+            # it: bytes, or a number with K, M, G or T.
+            memSize = lib.types.either lib.types.ints.unsigned
+              (lib.types.strMatching "[0-9]+[KMGT]|infinity");
+            limit = type: description: lib.mkOption {
+              type = lib.types.nullOr type;
+              default = null;
+              inherit description;
+            };
+          in
+          lib.mkOption {
+            default = { };
+            example = { MemoryMax = "8G"; TasksMax = 4096; CPUQuota = "400%"; };
+            description = ''
+              Opt-in resource limits for a rootless session, written into its
+              own cgroup, which the caller's user manager delegates to the
+              holder unit. Named and spelt as systemd's, and unset means
+              unlimited, as it does there.
+
+              `engine = "rootless"` only. Under nspawn a limit is refused and
+              `scopeConfig` is the way. Only the controllers a user manager is
+              delegated are offered -- memory, pids and cpu -- so there is no
+              `IOWeight`: with no io controller below `user@.service`, it
+              would have nothing to write to.
+
+              A session's root, its TMPDIR and every overlay upper layer are
+              tmpfs, which is RAM: `MemoryMax` makes a payload that fills
+              them the session's problem rather than the host's.
+            '';
+            type = lib.types.submodule {
+              options = {
+                MemoryMax = limit memSize "`memory.max`: the hard limit.";
+                MemoryHigh = limit memSize "`memory.high`: the throttling limit.";
+                MemorySwapMax = limit memSize "`memory.swap.max`.";
+                TasksMax = limit
+                  (lib.types.either lib.types.ints.positive (lib.types.enum [ "infinity" ]))
+                  "`pids.max`: processes and threads together.";
+                CPUQuota = limit (lib.types.strMatching "[1-9][0-9]*%")
+                  "`cpu.max`: a share of one CPU, as `N%`; `200%` is two.";
+                CPUWeight = limit (lib.types.ints.between 1 10000)
+                  "`cpu.weight`, against the caller's other processes.";
+                oomGroup = lib.mkOption {
+                  type = lib.types.bool;
+                  default = false;
+                  description = ''
+                    `memory.oom.group`: an OOM kill takes the whole session
+                    rather than one process of it.
+                  '';
+                };
+              };
+            };
+          };
+
+        protect = lib.mkOption {
+          type = lib.types.listOf (lib.types.strMatching "/.*");
+          default = [ ];
+          example = [ "/run/frisket" ];
+          description = ''
+            Host paths no mount of a session may reach: no source may equal,
+            lie inside or contain one. For a directory whose contents steer
+            sessions from outside, such as a daemon's control socket.
+
+            `engine = "rootless"` only, and ignored under nspawn, so a module
+            can set it before the engine changes. The wrapper protects
+            `/proc`, `/sys/fs/cgroup` and the user manager's `bus` and
+            `systemd` sockets as well, and the launcher its own state and
+            the holder's cgroup.
           '';
         };
 
@@ -1760,7 +1886,9 @@ in
         };
       };
 
-      config.launcher = mkLauncher name config;
+      config.launcher =
+        if config.engine == "rootless" then rootless.mkLauncher name config
+        else mkLauncher name config;
     }));
   };
 
@@ -1769,10 +1897,16 @@ in
   config = lib.mkIf (cfg != { }) {
     boot.enableContainers = true;
 
+    # The rootless sessions' holder, in every user's manager, for as long as
+    # any declaration runs rootless.
+    systemd.user.services.flong-sessions = lib.mkIf anyRootless rootless.holderUnit;
+
     warnings = lib.concatLists (lib.mapAttrsToList
       (n: c:
         let declared = config.containers.${c.container} or null; in
-        lib.optional (declared != null && declared.autoStart) ''
+        # Under rootless an autoStart container is refused, not warned about.
+        lib.optionals (c.engine == "rootless") (rootless.warningsFor n c)
+        ++ lib.optional (c.engine == "nspawn" && declared != null && declared.autoStart) ''
           flong.${n} drives containers.${c.container}, which has autoStart
           enabled: systemd boots that container at every host boot, which is
           the second and a bit a flong exists in order not to pay, and it holds
@@ -1795,6 +1929,9 @@ in
             (w: w == "-U" || lib.any (flag: w == flag || lib.hasPrefix "${flag}=" w)
               [ "--capability" "--ambient-capability" "--private-users" ])
             (extraFlagWords declared);
+          isRootless = c.engine == "rootless";
+          # The limits a declaration sets: anything not left null or false.
+          setLimits = lib.attrNames (lib.filterAttrs (_: v: v != null && v != false) c.limits);
           # Each is fixed per declaration, and a declaration here is many
           # concurrent sessions: two of them would claim one address or one
           # host port. `network` is the per-session answer.
@@ -1832,7 +1969,13 @@ in
           }
           {
             assertion = declared.privateUsers == "no";
-            message = ''
+            message = if isRootless then ''
+              flong.${n} drives containers.${c.container}, which asks for a uid
+              namespace. A rootless session always has flong's own, which maps
+              the container's user onto the caller so the workspace stays
+              theirs, and the rest onto the caller's subordinate range. There is
+              no other to choose, so the option would declare nothing.
+            '' else ''
               flong.${n} drives containers.${c.container}, which asks for a uid
               namespace. flong cannot give it one: a bind-mounted file owned by
               a host uid maps to an unmapped uid inside, so the session cannot
@@ -1842,7 +1985,13 @@ in
           }
           {
             assertion = declared.additionalCapabilities == [ ] && ! declared.enableTun;
-            message = ''
+            message = if isRootless then ''
+              flong.${n} drives containers.${c.container}, which grants
+              capabilities. Nothing in a rootless session holds any: the
+              payload's user namespace has an empty bounding set, so there is
+              no process for a capability to belong to, and no CAP_NET_ADMIN to
+              make enableTun's /dev/net/tun useful.
+            '' else ''
               flong.${n} drives containers.${c.container}, which grants
               capabilities. Nothing in a session holds any, and that one is
               structural rather than unwritten: nspawn drops to ${c.user} before
@@ -1858,7 +2007,9 @@ in
             '';
           }
           {
-            assertion = privilegedFlags == [ ];
+            # Under rootless every extraFlags entry is refused, by the
+            # rootless checks below.
+            assertion = isRootless || privilegedFlags == [ ];
             message = ''
               flong.${n} drives containers.${c.container}, whose extraFlags ask
               for ${lib.concatStringsSep " " privilegedFlags}. flong passes
@@ -1874,7 +2025,19 @@ in
           }
           {
             assertion = ! lib.any (x: x) needsInside;
-            message = ''
+            message = if isRootless then ''
+              flong.${n} drives containers.${c.container}, which declares a
+              veth, a bridge, a macvlan, a moved interface, an address or a
+              forwarded port. flong refuses them rather than dropping them:
+              each is static per container, and flong runs many concurrent
+              sessions from one declaration, which would claim the same
+              address, interface or host port.
+
+              What a session can have is `privateNetwork` alone (loopback and
+              nothing else), or `privateNetwork` with flong.${n}.network (a
+              real network through pasta, with its own forwardPorts and
+              hostPorts).
+            '' else ''
               flong.${n} drives containers.${c.container}, which declares a
               veth, a bridge, a macvlan, a moved interface, an address or a
               forwarded port. flong refuses them rather than dropping them,
@@ -1902,7 +2065,17 @@ in
               be pointed at the host's own network. Set privateNetwork = true.
             '';
           }
-        ])
-      cfg);
+          {
+            assertion = c.engine != "nspawn" || setLimits == [ ];
+            message = ''
+              flong.${n} sets limits.${lib.concatStringsSep ", limits." setLimits}, which
+              only the rootless engine writes. Under nspawn a session's limits
+              are its scope's: set them in scopeConfig.
+            '';
+          }
+        ]
+        ++ lib.optionals (declared != null && isRootless) (rootless.assertionsFor n c))
+      cfg)
+    ++ lib.optionals anyRootless rootless.hostAssertions;
   };
 }
