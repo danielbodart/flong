@@ -345,9 +345,24 @@ let
   sysctl = k: config.boot.kernel.sysctl.${k} or null;
   wrapperOn = w: config.security.enableWrappers
     && config.security.wrappers ? ${w} && config.security.wrappers.${w}.enable;
+
+  # The seccomp pipeline: the compiler, the tiers expanded from this system's
+  # own `systemd-analyze syscall-filter`, the fixed filters, and the tool that
+  # compiles a project's policy at launch. A filter's store path is named by
+  # its content, so declarations with equal policies share it.
+  seccomp = import ./seccomp/policy.nix {
+    inherit pkgs lib;
+    systemd = config.systemd.package;
+    compiler = import ./seccomp { inherit pkgs; };
+  };
+
+  # How many user namespaces a nestedSandbox session may make below its own.
+  # A ceiling, not a need: Chromium's sandbox, `codex sandbox` and a nested
+  # bwrap ran under 16.
+  nestedUserNamespaces = 128;
 in
 {
-  inherit declarationOf prepareInner cacheTool steps8;
+  inherit declarationOf prepareInner cacheTool steps8 seccomp;
 
   # THE LAUNCHER: a header of assignments, generated here, then
   # rootless-wrapper.bash, the same text for every declaration. The header is
@@ -364,6 +379,7 @@ in
       q = lib.escapeShellArg;
       qs = lib.escapeShellArgs;
       closure = "${declared.path}";
+      s = c.seccomp;
 
       # The hook programs. postStop is the nspawn engine's own program, since
       # it is given the same `machine` and nothing else. postStart is a
@@ -417,6 +433,7 @@ in
         # runtime directory's, which is known only at launch.
         ++ lib.concatMap (p: [ "protect" p ]) ([ "/proc" "/sys/fs/cgroup" ] ++ c.protect)
         ++ limitTokens
+        ++ lib.optionals s.nestedSandbox [ "nested-userns" (toString nestedUserNamespaces) ]
         ++ [ "holder" "app.slice/flong-sessions.service" ]
         ++ lib.concatMap (a: [ "holder-start" a ])
           [ "/run/current-system/sw/bin/systemctl" "--user" "start" "flong-sessions.service" ]
@@ -437,6 +454,7 @@ in
         "launcher" "cache_tool" "flock" "payload" "post_start"
         "network" "dns_forward4" "dns_forward6"
         "workspace_snippet" "binds_snippet" "guard_snippet"
+        "seccomp_tier" "seccomp_fixed" "seccomp_project" "seccomp_policy_snippet"
       ];
 
       # One group, so one directive covers it: a `$`, a quote or a backslash
@@ -468,6 +486,11 @@ in
         workspace_snippet=${q (if lib.trim c.workspace == "pwd" then "" else c.workspace)}
         binds_snippet=${q c.binds}
         guard_snippet=${q c.guard}
+        seccomp_tier=${q (if s.tier == null then "" else "${seccomp.filterFor s}")}
+        seccomp_fixed=(${qs ([ seccomp.fixed.audit seccomp.fixed.tty ] ++ lib.optional (! s.nestedSandbox) seccomp.fixed.nsmask)})
+        seccomp_project=(${qs (lib.optionals (c.seccompPolicy != "")
+          [ "${seccomp.project}/bin/flong-seccomp-project" "${seccomp.namesFor s}" (seccomp.deny s) ])})
+        seccomp_policy_snippet=${q c.seccompPolicy}
         export -n ${lib.concatStringsSep " " names}
         }
       '';
@@ -512,6 +535,12 @@ in
       badDevices = map (x: "${x.node} ${x.modifier}")
         (lib.filter (x: ! lib.hasPrefix "/dev/" x.node || ! lib.elem x.modifier [ "rw" "rwm" ]) d.devices);
       devBinds = lib.filter (s: s == "/dev" || lib.hasPrefix "/dev/" s) (map (b: b.src) d.binds);
+
+      # What acts on a tier's allow-list, so has nothing to act on without one.
+      noTier = lib.optional (c.seccomp.allow != [ ]) "seccomp.allow"
+        ++ lib.optional (c.seccomp.deny != [ ]) "seccomp.deny"
+        ++ lib.optional c.seccomp.log "seccomp.log"
+        ++ lib.optional (c.seccompPolicy != "") "seccompPolicy";
     in
     [
       {
@@ -667,6 +696,14 @@ in
         '';
       }
       {
+        assertion = c.seccomp.tier != null || noTier == [ ];
+        message = ''
+          flong.${n} sets seccomp.tier = null and ${lib.concatStringsSep ", " noTier},
+          which change a tier's allow-list. With no tier there is no filter
+          for them to act on. Set a tier, or drop them.
+        '';
+      }
+      {
         assertion = ! declared.autoStart;
         message = ''
           flong.${n} runs containers.${c.container} rootless, which has
@@ -678,12 +715,14 @@ in
     ];
 
   warningsFor = n: c:
-    [
-      ''
-        flong.${n} runs rootless, which installs no seccomp filter until
-        flong's phase 3. It is not for untrusted payloads yet.
-      ''
-    ]
+    lib.optional (c.seccomp.tier == null) ''
+      flong.${n} has seccomp.tier = null: no syscall allow-list, only the
+      audit, tty and namespace masks.
+    ''
+    ++ lib.optional c.seccomp.log ''
+      flong.${n} has seccomp.log = true, so it logs rather than refuses calls
+      outside its tier: for learning a policy, not for untrusted payloads.
+    ''
     ++ lib.optional (c.guard != "") ''
       flong.${n} has a guard and runs rootless, where the guard is a
       consistency check and not a gate: the caller can run flong-launch

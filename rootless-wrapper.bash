@@ -2,10 +2,11 @@
 # front of it (name, container, user, closure, cuid, cgid, closure8, steps8,
 # static, declared_dests, declared_binds, masks, mask_hosts, launcher,
 # cache_tool, flock, payload, post_start, network, dns_forward4,
-# dns_forward6 and the three snippets) and writeShellApplication runs it
-# under errexit, nounset and pipefail. It works out what only the launch can
-# know -- the caller, the workspace and binds, the maps, the prepared root and
-# the payload's identity -- and execs flong-launch with the spec.
+# dns_forward6, the seccomp filters and tool, and the four snippets) and
+# writeShellApplication runs it under errexit, nounset and pipefail. It works
+# out what only the launch can know -- the caller, the workspace and binds,
+# the project's seccomp policy, the maps, the prepared root and the payload's
+# identity -- and execs flong-launch with the spec.
 #
 # The warm path of a default declaration runs bash builtins only: every fork
 # is on the cold path or in a snippet the declaration chose. So there is no
@@ -22,7 +23,8 @@
 export -n self launcher_args me mygid rt state cwd canon nl out raw line p mode \
 	workspace_raw bind_paths bind_modes i found root m h n u g s c sub subn gsub gsubn \
 	MAP UMAP GMAP mapargs key cache P cfd pl old pw gr shell groups \
-	home_tmp tmpdir machine spec a resolv_conf forward4 forward6 ns rkey value rest rfd
+	home_tmp tmpdir machine spec a resolv_conf forward4 forward6 ns rkey value rest rfd \
+	policy tier_bpf
 
 if [[ -n ${FLONG_TRACE:-} ]]; then printf 'T %s wrapper-start\n' "${EPOCHREALTIME/./}" >&2; fi
 
@@ -183,6 +185,22 @@ export binds
 # runs it again.
 if [[ -n $guard_snippet ]]; then
 	run_as_caller "$guard_snippet" || exit 1
+fi
+
+# ---- the project's seccomp policy
+# It runs as the caller after the guard, with what the guard sees, and prints
+# `allow X...` and `deny X...` lines that change the declaration's allow-list.
+# A failing snippet refuses the launch. A policy that says nothing compiles
+# nothing, so the warm path stays builtins-only; one already seen is a hash
+# and a cached filter under $state/seccomp, where no session can write. A
+# relaunch runs it again, as it runs the guard.
+tier_bpf=$seccomp_tier
+if [[ -n $seccomp_policy_snippet ]]; then
+	policy=$(run_as_caller "$seccomp_policy_snippet") || exit 1
+	if [[ -n ${policy//[[:space:]]/} ]]; then
+		tier_bpf=$("${seccomp_project[@]}" "$state/seccomp" <<<"$policy") ||
+			die "the project's seccomp policy was refused"
+	fi
 fi
 
 # ---- the depth rule, for the caller's writable binds
@@ -357,6 +375,11 @@ machine=$container-$$-$RANDOM
 # unit outside the sandbox, so no mount may reach them.
 spec=(machine "$machine" state "$state" cache "$cache" "${static[@]}"
 	protect "$rt/bus" protect "$rt/systemd")
+# The tier's filter, then audit, tty and the namespace mask, each one
+# --add-seccomp-fd in this order. The order decides only which errno a call
+# two of them refuse gets: the most recently installed filter's.
+if [[ -n $tier_bpf ]]; then spec+=(seccomp "$tier_bpf"); fi
+for a in "${seccomp_fixed[@]}"; do spec+=(seccomp "$a"); done
 for a in "$self" "${launcher_args[@]}"; do spec+=(relaunch "$a"); done
 for ((i = 0; i < ${#UMAP[@]}; i += 3)); do spec+=(uidmap "${UMAP[@]:i:3}"); done
 for ((i = 0; i < ${#GMAP[@]}; i += 3)); do spec+=(gidmap "${GMAP[@]:i:3}"); done

@@ -1417,13 +1417,12 @@ in
             user namespaces the caller owns, with no sudo and no root
             anywhere.
 
-            Until flong's phase 3, `rootless` installs no seccomp filter, so it
-            is not for untrusted payloads yet. Its wrapper's checks --
-            `workspace`, `binds`, `guard`, the depth rule -- are consistency
-            checks, not a boundary: the caller can run flong-launch directly
-            with any spec. The launcher's own checks are the boundary against
-            the payload, and the prepared root and the records are the
-            caller's, as their `~/.bashrc` is.
+            Its wrapper's checks -- `workspace`, `binds`, `guard`, the depth
+            rule -- are consistency checks, not a boundary: the caller can
+            run flong-launch directly with any spec. The launcher's own
+            checks and the session's `seccomp` filter are the boundary
+            against the payload, and the prepared root and the records are
+            the caller's, as their `~/.bashrc` is.
 
             Stop a declaration's running sessions before switching its engine.
             An nspawn session's postStop record and network pin under
@@ -1899,6 +1898,133 @@ in
             };
           };
 
+        seccomp =
+          let
+            # A syscall's name or a systemd group's, as `systemd-analyze
+            # syscall-filter` lists them. The build refuses one it does not
+            # list.
+            syscallName = lib.types.strMatching "@?[a-z0-9_-]+";
+          in
+          lib.mkOption {
+            default = { };
+            example = { tier = "strict"; debug = true; };
+            description = ''
+              The session's syscall filter. A tier is an allow-list: the calls
+              it names are allowed, the rest of systemd's `@known` get
+              `errno`, and a call outside `@known` gets ENOSYS. It applies on
+              x86_64, i386 and x32 alike.
+
+              Three fixed filters are stacked behind it and are not options:
+              the audit mask (`socket(AF_NETLINK, ..., NETLINK_AUDIT)` gets
+              EAFNOSUPPORT), the tty filter (`ioctl` TIOCSTI, TIOCLINUX,
+              TIOCSETD and TIOCCONS get EPERM, in every tier and under any
+              project policy) and, unless `nestedSandbox`, the namespace mask
+              (clone and unshare with a `CLONE_NEW*` flag, and setns, get
+              EPERM, and clone3 ENOSYS).
+
+              `engine = "rootless"` only. Under nspawn anything but the
+              defaults is refused, since nspawn installs its own filter.
+            '';
+            type = lib.types.submodule {
+              options = {
+                tier = lib.mkOption {
+                  type = lib.types.nullOr (lib.types.enum [ "parity" "strict" ]);
+                  default = "strict";
+                  description = ''
+                    `parity` is exactly the allow-list nspawn installs for a
+                    flong session. `strict` is parity without `@keyring`,
+                    `userfaultfd`, `@mount`, `io_uring_*`, `ptrace` and
+                    `process_vm_*`, which ordinary tools do without; strace
+                    and gdb need `debug`. `null` installs no allow-list, only
+                    the fixed filters, and warns.
+                  '';
+                };
+                debug = lib.mkOption {
+                  type = lib.types.bool;
+                  default = false;
+                  description = ''
+                    Adds `ptrace`, for strace and gdb. Its reach is the
+                    session's own pid namespace.
+                  '';
+                };
+                nestedSandbox = lib.mkOption {
+                  type = lib.types.bool;
+                  default = false;
+                  description = ''
+                    For a payload that sandboxes its own children, such as
+                    Chromium's sandbox, `codex sandbox` or a nested bwrap: the
+                    session may make user namespaces of its own, the namespace
+                    mask goes and `@mount` is allowed. All three are needed
+                    together. The payload still cannot reach the session's
+                    network namespace.
+                  '';
+                };
+                allow = lib.mkOption {
+                  type = lib.types.listOf syscallName;
+                  default = [ ];
+                  example = [ "@keyring" "userfaultfd" ];
+                  description = "Syscall names or `@groups` added to the tier.";
+                };
+                deny = lib.mkOption {
+                  type = lib.types.listOf syscallName;
+                  default = [ ];
+                  example = [ "@swap" ];
+                  description = ''
+                    Syscall names or `@groups` removed, after the tier, the
+                    loosenings and `allow`, which it overrides.
+                  '';
+                };
+                errno = lib.mkOption {
+                  type = lib.types.enum [ "EPERM" "EACCES" "ENOSYS" ];
+                  default = "EPERM";
+                  description = ''
+                    What a call in `@known` that the filter does not allow
+                    returns. ENOSYS makes a program fall back as it would on
+                    an older kernel.
+                  '';
+                };
+                log = lib.mkOption {
+                  type = lib.types.bool;
+                  default = false;
+                  description = ''
+                    Allows the calls `errno` would refuse and has the kernel
+                    log each (audit `type=1326`, with `syscall=NR`), to learn
+                    a policy. `scmp_sys_resolver -a x86_64 NR` names a number;
+                    the names become `allow` entries or `seccompPolicy` lines.
+                    Not for untrusted payloads, and it warns.
+                  '';
+                };
+              };
+            };
+          };
+
+        seccompPolicy = lib.mkOption {
+          type = lib.types.lines;
+          default = "";
+          example = ''chase-envelope seccomp "$workspace"'';
+          description = ''
+            A project's own changes to the `seccomp` filter, for a policy that
+            is only known at launch. Runs as the caller after `guard`, with
+            the launcher's arguments, the caller's stdin and stderr, and
+            `$workspace`, `$workspace_mode` and `$binds` in scope, and prints
+            lines of `allow X...` or `deny X...`, where each X is a syscall
+            name or an `@group`. `#` comments and blank lines are skipped. A
+            non-zero exit refuses the launch, and so does a line it cannot
+            read or a name systemd does not list.
+
+            The project's lines apply to the declaration's allow-list: its
+            allows are added and then its denies removed. The fixed filters
+            stay, the tty filter included. The result is compiled at launch
+            and cached under `$XDG_RUNTIME_DIR/flong/seccomp` by the hash of
+            what is compiled, so a policy already seen costs a hash. Printing
+            nothing compiles nothing. A relaunch runs it again.
+
+            It needs a tier to act on, and it is a consistency check in the
+            way `guard` is: the caller can run flong-launch with any filter.
+            `engine = "rootless"` only.
+          '';
+        };
+
         protect = lib.mkOption {
           type = lib.types.listOf (lib.types.strMatching "/.*");
           default = [ ];
@@ -1995,6 +2121,13 @@ in
           isRootless = c.engine == "rootless";
           # The limits a declaration sets: anything not left null or false.
           setLimits = lib.attrNames (lib.filterAttrs (_: v: v != null && v != false) c.limits);
+          # The seccomp settings a declaration changes from their defaults.
+          seccompDefaults = {
+            tier = "strict"; debug = false; nestedSandbox = false;
+            allow = [ ]; deny = [ ]; errno = "EPERM"; log = false;
+          };
+          setSeccomp = lib.attrNames (lib.filterAttrs (k: v: seccompDefaults ? ${k} && seccompDefaults.${k} != v) c.seccomp)
+            ++ lib.optional (c.seccompPolicy != "") "seccompPolicy";
           # Each is fixed per declaration, and a declaration here is many
           # concurrent sessions: two of them would claim one address or one
           # host port. `network` is the per-session answer.
@@ -2134,6 +2267,14 @@ in
               flong.${n} sets limits.${lib.concatStringsSep ", limits." setLimits}, which
               only the rootless engine writes. Under nspawn a session's limits
               are its scope's: set them in scopeConfig.
+            '';
+          }
+          {
+            assertion = c.engine != "nspawn" || setSeccomp == [ ];
+            message = ''
+              flong.${n} sets ${lib.concatStringsSep ", " (map (k: if k == "seccompPolicy" then k else "seccomp.${k}") setSeccomp)},
+              which only the rootless engine reads. nspawn installs its own
+              filter, and flong does not change it.
             '';
           }
         ]

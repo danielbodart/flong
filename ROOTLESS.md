@@ -518,7 +518,7 @@ refuses it together with `--seccomp`):
   `/run/wrappers`, which is absent: a consumer running it sets
   `CHROME_DEVEL_SANDBOX` empty. flong sets nothing for it.
 
-**The option** (shape to settle in phase 3):
+**The option**, with `seccompPolicy` beside it:
 
 ```nix
 flong.<name>.seccomp = {

@@ -27,6 +27,9 @@
           # The rootless engine's native launcher, built with -Werror.
           launcher = import ./launcher { inherit pkgs; };
 
+          # The rootless engine's seccomp compiler, built with -Werror.
+          seccomp = import ./seccomp { inherit pkgs; };
+
           # A refusal happens at evaluation, so it is checked by evaluating: each
           # declaration below must trip the assertion it is about, and the
           # baseline must trip none of flong's. Evaluation only -- no system is
@@ -82,6 +85,24 @@
               };
               flongWarnings = extra:
                 lib.filter (lib.hasPrefix "flong") (map lib.trim (configWith extra).warnings);
+
+              # A message with its line breaks and indentation as single
+              # spaces, so that a needle does not depend on where a message
+              # happens to wrap.
+              words = s: lib.concatStringsSep " "
+                (lib.filter (w: builtins.isString w && w != "") (builtins.split "[[:space:]]+" s));
+              refusedSaying = what: extra: needle:
+                let failures = flongFailures extra; in
+                lib.any (m: lib.hasInfix needle (words m)) failures
+                || throw "assertions: ${what} was not refused; flong said: ${builtins.toJSON failures}";
+              warnedSaying = what: extra: needle:
+                let warnings = flongWarnings extra; in
+                lib.any (m: lib.hasInfix needle (words m)) warnings
+                || throw "assertions: ${what} was not warned about; flong said: ${builtins.toJSON warnings}";
+              # An option value its type refuses, which stops evaluation
+              # rather than failing an assertion.
+              untyped = extra: path:
+                ! (builtins.tryEval (builtins.deepSeq (lib.getAttrFromPath path (configWith extra)) true)).success;
             in
             assert flongFailures { } == [ ]
               || throw "assertions: the baseline is refused: ${builtins.toJSON (flongFailures { })}";
@@ -115,12 +136,72 @@
             assert refused "oomGroup under nspawn"
               { flong.box.limits.oomGroup = true; }
               "limits.oomGroup";
-            # THE ROOTLESS ENGINE. Its baseline trips nothing, and warns only
-            # that it has no seccomp filter yet.
+            # seccomp is the rootless engine's; nspawn installs its own filter,
+            # so a declaration's seccomp must be the defaults there.
+            assert accepted "the default seccomp spelt out under nspawn"
+              { flong.box.seccomp = { tier = "strict"; errno = "EPERM"; }; };
+            assert refusedSaying "a seccomp tier under nspawn"
+              { flong.box.seccomp.tier = "parity"; }
+              "nspawn installs its own";
+            assert refusedSaying "a seccomp loosening under nspawn"
+              { flong.box.seccomp.debug = true; }
+              "nspawn installs its own";
+            assert refusedSaying "a seccomp allow under nspawn"
+              { flong.box.seccomp.allow = [ "ptrace" ]; }
+              "nspawn installs its own";
+            assert refusedSaying "a seccompPolicy under nspawn"
+              { flong.box.seccompPolicy = "echo allow ptrace"; }
+              "nspawn installs its own";
+            # THE ROOTLESS ENGINE. Its baseline, the strict tier with every
+            # fixed filter, trips nothing and warns about nothing.
             assert accepted "the rootless baseline" (rootless { });
-            assert (let w = flongWarnings (rootless { }); in
-              lib.length w == 1 && lib.hasInfix "no seccomp filter" (lib.head w))
+            assert flongWarnings (rootless { }) == [ ]
               || throw "assertions: the rootless baseline warns ${builtins.toJSON (flongWarnings (rootless { }))}";
+            # With no tier there is no allow-list filter for a policy to act
+            # on. debug and errno have nothing to act on either, but are
+            # harmless, so they are accepted.
+            assert refusedSaying "seccomp.allow with no tier"
+              (rootless { flong.box.seccomp = { tier = null; allow = [ "ptrace" ]; }; })
+              "no filter";
+            assert refusedSaying "seccomp.deny with no tier"
+              (rootless { flong.box.seccomp = { tier = null; deny = [ "ptrace" ]; }; })
+              "no filter";
+            assert refusedSaying "seccomp.log with no tier"
+              (rootless { flong.box.seccomp = { tier = null; log = true; }; })
+              "no filter";
+            assert refusedSaying "a seccompPolicy with no tier"
+              (rootless {
+                flong.box.seccomp.tier = null;
+                flong.box.seccompPolicy = "echo allow ptrace";
+              })
+              "no filter";
+            assert accepted "debug and errno with no tier"
+              (rootless { flong.box.seccomp = { tier = null; debug = true; errno = "EACCES"; }; });
+            assert warnedSaying "no tier"
+              (rootless { flong.box.seccomp.tier = null; })
+              "only the audit, tty and namespace masks";
+            assert warnedSaying "log = true"
+              (rootless { flong.box.seccomp.log = true; })
+              "for learning a policy, not for untrusted payloads";
+            assert accepted "every tier setting and loosening together"
+              (rootless {
+                flong.box.seccomp = {
+                  tier = "parity";
+                  debug = true;
+                  nestedSandbox = true;
+                  allow = [ "@keyring" "userfaultfd" ];
+                  deny = [ "ptrace" "@swap" ];
+                  errno = "ENOSYS";
+                };
+                flong.box.seccompPolicy = "echo allow ptrace";
+              });
+            # A name is a syscall or a group, in the form systemd lists them.
+            assert untyped (rootless { flong.box.seccomp.allow = [ "Ptrace" ]; }) [ "flong" "box" "seccomp" "allow" ]
+              || throw "assertions: an upper-case seccomp name was accepted";
+            assert untyped (rootless { flong.box.seccomp.deny = [ "@ keyring" ]; }) [ "flong" "box" "seccomp" "deny" ]
+              || throw "assertions: a seccomp name with a blank was accepted";
+            assert untyped (rootless { flong.box.seccomp.errno = "EINVAL"; }) [ "flong" "box" "seccomp" "errno" ]
+              || throw "assertions: an errno outside EPERM, EACCES and ENOSYS was accepted";
             assert lib.any (lib.hasInfix "consistency check and not a gate")
               (flongWarnings (rootless { flong.box.guard = "true"; }))
               || throw "assertions: a rootless guard is not warned about";

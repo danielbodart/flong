@@ -3,21 +3,69 @@
 # launch cold and warm, the environment a payload is given, a postStart hook
 # with and without a network, that nothing of a session runs as host root,
 # the refusal of a caller with no subordinate ids, the sweeper releasing a
-# SIGKILLed launcher's session, the limits, and the declaration's mounts.
+# SIGKILLed launcher's session, the limits, the declaration's mounts, and
+# the seccomp stack: the tiers, their loosenings, a project's policy and its
+# cache, the tty filter, and learning a policy from a logging filter.
 #
 # Kept small for CI's software emulation: every declaration runs the same
-# container closure, and nothing in it is built for this test. No assertion
-# is about time.
+# container closure, and the one thing in it built for this test is a
+# one-file probe. No assertion is about time.
 { lib, ... }:
 
 let
   # One closure for both containers: a container's closure depends on its
   # `config` alone, and the mounts are the container's other options.
-  boxConfig = {
+  # strace is the payload that ptrace separates the tiers by; the probe
+  # makes the one call no shell tool makes, an ioctl with a 64-bit request.
+  boxConfig = { pkgs, ... }: {
     system.stateVersion = "24.05";
     users.users.alice = { isNormalUser = true; uid = 1000; group = "users"; };
     users.groups.users.gid = 100;
+    environment.systemPackages = [ pkgs.strace (ioctlProbe pkgs) ];
   };
+
+  # ioctl-probe REQUEST prints the errno name of ioctl(0, REQUEST, &byte),
+  # or ok. Standard input is never a terminal here, so a request the filters
+  # let through reaches the kernel and fails with ENOTTY, and one they refuse
+  # fails with the filter's errno. The request is passed whole, all 64 bits,
+  # which the C library's ioctl would truncate to an int.
+  ioctlProbe = pkgs: pkgs.runCommandCC "ioctl-probe"
+    {
+      src = pkgs.writeText "ioctl-probe.c" ''
+        #include <errno.h>
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <string.h>
+        #include <sys/syscall.h>
+        #include <unistd.h>
+
+        int main(int argc, char **argv)
+        {
+        	char byte = 0;
+        	if (argc != 2) {
+        		fputs("usage: ioctl-probe REQUEST\n", stderr);
+        		return 2;
+        	}
+        	unsigned long request = strtoul(argv[1], NULL, 0);
+        	if (syscall(SYS_ioctl, 0, request, &byte) == 0) {
+        		puts("ok");
+        	} else {
+        		puts(strerrorname_np(errno));
+        	}
+        	return 0;
+        }
+      '';
+    } ''
+    mkdir -p $out/bin
+    $CC -std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror -o $out/bin/ioctl-probe $src
+  '';
+
+  # A project's policy, as the caller's environment states it, so that one
+  # declaration covers a policy, none, a refusal and a failing snippet.
+  seccompPolicy = ''
+    [ -z "''${FLONG_TEST_POLICY_FAIL:-}" ] || { echo "the policy snippet fails" >&2; exit 3; }
+    printf '%s\n' "''${FLONG_TEST_POLICY:-}"
+  '';
 
   # Records what the hook is promised: who it runs as, the session it is
   # for, and how many routes the session's namespace had while the hook held
@@ -159,11 +207,24 @@ in
           binds = "printf '%s:rw\\n' /srv/companion";
           guard = ''[ -z "''${FLONG_TEST_DENY:-}" ] || { echo "the guard refuses" >&2; exit 1; }'';
         };
+
+        # The tiers and loosenings beside plain's default, strict.
+        parity = base // { seccomp.tier = "parity"; };
+        debugged = base // { seccomp.debug = true; };
+        nested = base // { seccomp.nestedSandbox = true; };
+        learner = base // { seccomp.log = true; };
+        project = base // { inherit seccompPolicy; };
       };
 
     environment.systemPackages =
-      map (n: config.flong.${n}.launcher) [ "plain" "hooked" "nethook" "limited" "mounts" ]
+      map (n: config.flong.${n}.launcher) [
+        "plain" "hooked" "nethook" "limited" "mounts"
+        "parity" "debugged" "nested" "learner" "project"
+      ]
       ++ [
+        # scmp_sys_resolver, which names the numbers a logging filter records.
+        (lib.getBin pkgs.libseccomp)
+
         # The machine name of CONTAINER's session whose payload is asleep,
         # read from the cgroups, which only the launcher names.
         (pkgs.writeShellScriptBin "session-of" ''
@@ -369,5 +430,92 @@ in
 
         out = machine.succeed(as_user("FLONG_TEST_DENY=1 mounts true 2>&1; echo rc=$?"))
         assert "the guard refuses" in out and out.split()[-1] == "rc=1", out
+
+    # The Seccomp_filters count a payload sees: the stack its launcher
+    # installed, as the kernel reports it.
+    def filters(launcher):
+        out = machine.succeed(as_user(f"{launcher} 'grep ^Seccomp /proc/self/status'"))
+        fields = dict(l.split(":") for l in out.splitlines())
+        assert fields["Seccomp"].strip() == "2", out
+        return int(fields["Seccomp_filters"])
+
+    with subtest("the default tier is strict, and applied"):
+        # The tier, the audit mask, the tty filter and the namespace mask.
+        assert filters("plain") == 4
+        # ptrace is in parity and not in strict, so it gets the tier's errno.
+        out = machine.succeed(as_user("plain 'strace true 2>&1; echo rc=$?'"))
+        assert "Operation not permitted" in out and out.split()[-1] != "rc=0", out
+        # The namespace mask refuses with EPERM. Without it, the absent
+        # nested-userns token would refuse with ENOSPC instead.
+        out = machine.succeed(as_user("plain 'unshare -U true 2>&1; echo rc=$?'"))
+        assert "Operation not permitted" in out and out.split()[-1] != "rc=0", out
+
+    with subtest("tiers and loosenings differ on ptrace"):
+        for launcher in ("parity", "debugged"):
+            out = machine.succeed(as_user(f"{launcher} 'strace true 2>&1; echo rc=$?'"))
+            assert "+++ exited with 0 +++" in out and out.split()[-1] == "rc=0", (launcher, out)
+        assert filters("debugged") == 4
+
+    with subtest("nestedSandbox allows a nested user namespace and a mount in it"):
+        # No namespace mask.
+        assert filters("nested") == 3
+        out = machine.succeed(as_user(
+            "nested 'unshare -U true && echo userns-ok; "
+            "unshare -Urm sh -c \"mount -t tmpfs nested /tmp && echo mount-ok\"'"))
+        assert out.split() == ["userns-ok", "mount-ok"], out
+
+    with subtest("the tty filter refuses TIOCSTI, also with bit 32 set"):
+        for launcher in ("plain", "nested"):
+            out = machine.succeed(as_user(
+                f"{launcher} 'ioctl-probe 0x5412; ioctl-probe 0x100005412; "
+                "ioctl-probe 0x10000541c; ioctl-probe 0x100005401'"))
+            # TCGETS with the same high bit is let through, and fails only
+            # for not being asked of a terminal.
+            assert out.split() == ["EPERM", "EPERM", "EPERM", "ENOTTY"], (launcher, out)
+
+    with subtest("log = true allows and logs, and what it logs is a policy"):
+        since = machine.succeed("date +%s").strip()
+        out = machine.succeed(as_user("learner 'strace true 2>&1; echo rc=$?'"))
+        assert "+++ exited with 0 +++" in out and out.split()[-1] == "rc=0", out
+        # The kernel's SECCOMP_RET_LOG records, as the learning path reads them.
+        numbers = machine.wait_until_succeeds(
+            f"journalctl -k --since @{since} -o cat --no-pager"
+            " | grep -F type=1326 | grep -o 'syscall=[0-9]*' | cut -d= -f2 | sort -un | grep .").split()
+        learned = machine.succeed(
+            "for n in " + " ".join(numbers) + "; do scmp_sys_resolver \"$n\"; done").split()
+        assert "ptrace" in learned, learned
+        learned_policy = "allow " + " ".join(learned)
+
+    with subtest("a project's policy compiles, is cached, and applies"):
+        cache = f"{STATE}/seccomp"
+        machine.succeed(f"rm -rf {cache}")
+        # A snippet that prints nothing compiles nothing.
+        out = machine.succeed(as_user("project 'strace true 2>&1; echo rc=$?'"))
+        assert "Operation not permitted" in out and out.split()[-1] != "rc=0", out
+        machine.succeed(f"test ! -e {cache} || test -z \"$(ls -A {cache})\"")
+
+        # The policy learned above, as a project's.
+        policy = shlex.quote(learned_policy)
+        out = machine.succeed(as_user(f"FLONG_TEST_POLICY={policy} project 'strace true 2>&1; echo rc=$?'"))
+        assert "+++ exited with 0 +++" in out and out.split()[-1] == "rc=0", out
+        cached = machine.succeed(f"ls {cache}").split()
+        assert len(cached) == 1 and cached[0].endswith(".bpf"), cached
+        assert machine.succeed(f"stat -c '%a %u' {cache}").split() == ["700", "1000"]
+        mtime = machine.succeed(f"stat -c %Y {cache}/{cached[0]}")
+
+        # Warm: the same policy is the same file, not compiled again.
+        out = machine.succeed(as_user(f"FLONG_TEST_POLICY={policy} project 'strace true 2>&1; echo rc=$?'"))
+        assert out.split()[-1] == "rc=0", out
+        assert machine.succeed(f"ls {cache}").split() == cached
+        assert machine.succeed(f"stat -c %Y {cache}/{cached[0]}") == mtime
+
+        # A name systemd does not list refuses the launch.
+        out = machine.succeed(as_user(
+            "FLONG_TEST_POLICY='allow no_such_call' project true 2>&1; echo rc=$?"))
+        assert "seccomp policy was refused" in out and out.split()[-1] == "rc=1", out
+        # So does a failing snippet.
+        out = machine.succeed(as_user("FLONG_TEST_POLICY_FAIL=1 project true 2>&1; echo rc=$?"))
+        assert "the policy snippet fails" in out and out.split()[-1] == "rc=1", out
+        assert machine.succeed(f"ls {cache}").split() == cached
   '';
 }
