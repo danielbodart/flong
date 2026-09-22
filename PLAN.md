@@ -3,28 +3,13 @@
 What is not built yet, in order. What is built, and why, is in
 [DESIGN.md](DESIGN.md).
 
-## 1. Reopen `privateUsers`
+## 1. The rootless engine
 
-flong refuses `privateUsers != "no"` because a bind-mounted file owned by a
-host uid is unreadable inside, so the session cannot read its workspace. That
-describes `noidmap`, which is the default.
-
-nspawn takes an ID-mapping option per bind mount: `idmap`, `rootidmap` and
-`owneridmap`. With `owneridmap`, the owner of the bind source on the host maps
-to the user inside, which is the workspace case, and
-`--private-users-ownership=map` maps the image with idmapped mounts instead of
-chowning it.
-
-The benefit is worth the work. A session runs as the caller's own uid, so
-anything it reaches outside its bind mounts (a leaked file descriptor, a path
-through `/proc`, a bug in nspawn) it acts on as that user. nspawn's manual says
-of `--private-users=no`: *"This option is not secure and must not be used to
-run untrusted code."*
-
-It needs testing: idmapped mounts need support from each source filesystem,
-and the prepared root, the tmpfs mounts and the overlays each need their own
-answer. A wrong mapping shows up as `nobody` and a read failure, which is the
-safe direction to fail in.
+Replace root systemd-nspawn with bubblewrap in user namespaces the caller
+owns: no root anywhere, a warm session in about 16 ms, and seccomp policy per
+tier. Spiked and planned in [ROOTLESS.md](ROOTLESS.md), which supersedes what
+was here: a keep-id user namespace comes first, and a uid range per session
+is that plan's last phase.
 
 ## 2. Persistence, and a discardable workspace
 
