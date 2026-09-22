@@ -193,7 +193,11 @@ fi
 # A failing snippet refuses the launch. A policy that says nothing compiles
 # nothing, so the warm path stays builtins-only; one already seen is a hash
 # and a cached filter under $state/seccomp, where no session can write. A
-# relaunch runs it again, as it runs the guard.
+# relaunch runs it again, as it runs the guard. It sees $machine, the name
+# postStart and postStop will see, so what it approves can be handed to them
+# by launch and not by checkout, where two launches at once would mix.
+machine=$container-$$-$RANDOM
+export machine
 tier_bpf=$seccomp_tier
 if [[ -n $seccomp_policy_snippet ]]; then
 	policy=$(run_as_caller "$seccomp_policy_snippet") || exit 1
@@ -370,7 +374,6 @@ tmpdir=/tmp
 if ((home_tmp)); then tmpdir=$home/tmp; fi
 
 # ---- the spec
-machine=$container-$$-$RANDOM
 # The user manager's bus and private socket could stop the holder or start a
 # unit outside the sandbox, so no mount may reach them.
 spec=(machine "$machine" state "$state" cache "$cache" "${static[@]}"

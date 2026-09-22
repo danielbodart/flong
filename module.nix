@@ -2001,16 +2001,20 @@ in
         seccompPolicy = lib.mkOption {
           type = lib.types.lines;
           default = "";
-          example = ''chase-envelope seccomp "$workspace"'';
+          example = ''chase-envelope approve "$workspace"'';
           description = ''
             A project's own changes to the `seccomp` filter, for a policy that
             is only known at launch. Runs as the caller after `guard`, with
             the launcher's arguments, the caller's stdin and stderr, and
-            `$workspace`, `$workspace_mode` and `$binds` in scope, and prints
-            lines of `allow X...` or `deny X...`, where each X is a syscall
-            name or an `@group`. `#` comments and blank lines are skipped. A
-            non-zero exit refuses the launch, and so does a line it cannot
-            read or a name systemd does not list.
+            `$workspace`, `$workspace_mode`, `$binds` and `$machine` in
+            scope, and prints lines of `allow X...` or `deny X...`, where
+            each X is a syscall name or an `@group`. `#` comments and blank
+            lines are skipped. A non-zero exit refuses the launch, and so
+            does a line it cannot read or a name systemd does not list.
+
+            `$machine` is the session's name, the one `postStart` and
+            `postStop` see, so anything it approves for them can be staged
+            per launch rather than per checkout.
 
             The project's lines apply to the declaration's allow-list: its
             allows are added and then its denies removed. The fixed filters
@@ -2047,9 +2051,9 @@ in
           default = [ ];
           description = ''
             Packages on `PATH` for every hook that runs on the host: the
-            caller-run `workspace` and `binds`, and the root-run `guard`,
-            `postStart` and `postStop`, which under `engine = "rootless"` are
-            caller-run too. Not for `command`, which runs inside
+            caller-run `workspace` and `binds`, and `guard`, `postStart` and
+            `postStop`, which run as root under nspawn and as the caller
+            under `engine = "rootless"`. Not for `command`, which runs inside
             the session with the container's own `PATH`: a tool the workload
             needs belongs in the container's `environment.systemPackages`.
           '';

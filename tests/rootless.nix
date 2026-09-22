@@ -135,9 +135,11 @@ let
   '';
 
   # A project's policy, as the caller's environment states it, so that one
-  # declaration covers a policy, none, a refusal and a failing snippet.
+  # declaration covers a policy, none, a refusal and a failing snippet. It
+  # records the session it was asked for, which postStart must share.
   seccompPolicy = ''
     [ -z "''${FLONG_TEST_POLICY_FAIL:-}" ] || { echo "the policy snippet fails" >&2; exit 3; }
+    echo "$machine" > /tmp/project-policy
     printf '%s\n' "''${FLONG_TEST_POLICY:-}"
   '';
 
@@ -390,7 +392,10 @@ in
         debugged = base // { seccomp.debug = true; };
         nested = base // { seccomp.nestedSandbox = true; };
         learner = base // { seccomp.log = true; };
-        project = base // { inherit seccompPolicy; };
+        project = base // {
+          inherit seccompPolicy;
+          postStart = ''echo "$machine" > /tmp/project-poststart'';
+        };
       };
 
     environment.systemPackages =
@@ -975,6 +980,9 @@ in
         # A snippet that prints nothing compiles nothing.
         out = machine.succeed(as_user("project 'strace true 2>&1; echo rc=$?'"))
         assert "Operation not permitted" in out and out.split()[-1] != "rc=0", out
+        # The snippet saw the name postStart saw.
+        named = machine.succeed("cat /tmp/project-policy /tmp/project-poststart").split()
+        assert len(named) == 2 and named[0] == named[1] and named[0].startswith("box-"), named
         machine.succeed(f"test ! -e {cache} || test -z \"$(ls -A {cache})\"")
 
         # The policy learned above, as a project's.
