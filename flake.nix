@@ -31,6 +31,12 @@
             imports = [ ./tests/rootless.nix ];
           };
 
+          # The rootless engine's seccomp stack against nspawn's, both live
+          # in one VM: the filters dumped and evaluated, and a syscall probe.
+          parity = pkgs.testers.runNixOSTest {
+            imports = [ ./tests/parity.nix ];
+          };
+
           # The rootless engine's native launcher, built with -Werror.
           launcher = import ./launcher { inherit pkgs; };
 
@@ -403,6 +409,18 @@
               shellcheck ${./scripts/version.sh}
               touch $out
             '';
+        });
+
+      # Launch times of both engines, like for like, in one VM: built on
+      # demand (`nix build .#bench`), never by `nix flake check`, because a
+      # time is a number to report and not a test. The result holds
+      # numbers.md.
+      packages = forAllSystems (system:
+        let pkgs = nixpkgs.legacyPackages.${system}; in
+        {
+          bench = pkgs.testers.runNixOSTest {
+            imports = [ ./tests/bench.nix ];
+          };
         });
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);
