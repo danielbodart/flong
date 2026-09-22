@@ -19,6 +19,11 @@
             imports = [ ./tests/basic.nix ];
           };
 
+          # The rootless engine, launched by a lingering user with no sudo.
+          rootless = pkgs.testers.runNixOSTest {
+            imports = [ ./tests/rootless.nix ];
+          };
+
           # The rootless engine's native launcher, built with -Werror.
           launcher = import ./launcher { inherit pkgs; };
 

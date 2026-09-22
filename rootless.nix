@@ -114,18 +114,23 @@ let
   # declaration has that host path two or more levels below its source.
   # Each refusal names those binds' sources, since a mask one level below a
   # read-only bind can still be deep in a writable one.
+  #
+  # The launch repeats the rule against the caller's own writable binds,
+  # which only exist then, so it is given each mask's host path as well.
+  maskHost = d: m:
+    let
+      under = lib.filter (x: x != m && lib.hasPrefix "${x}/" m) d.dests;
+      nearest = lib.foldl' (a: x: if a == null || lib.stringLength x > lib.stringLength a then x else a) null under;
+      b = if nearest == null then null else lib.findFirst (x: x.dest == nearest) null d.binds;
+    in
+    if b == null then null else b.src + "/" + lib.removePrefix "${nearest}/" m;
+
   deepMasks = d: masks:
     let
-      under = m: lib.filter (x: x != m && lib.hasPrefix "${x}/" m) d.dests;
-      nearest = m: lib.foldl' (a: x: if a == null || lib.stringLength x > lib.stringLength a then x else a) null (under m);
-      bindAt = dest: lib.findFirst (b: b.dest == dest) null d.binds;
-      hostPath = m:
-        let n = nearest m; b = if n == null then null else bindAt n; in
-        if b == null then null else b.src + "/" + lib.removePrefix "${n}/" m;
       over = h: if h == null then [ ] else
         map (w: w.src) (lib.filter (w: w.rw && lib.hasPrefix "${w.src}/" h && depth (lib.removePrefix "${w.src}/" h) >= 2) d.binds);
     in
-    lib.concatMap (m: let ws = over (hostPath m); in
+    lib.concatMap (m: let ws = over (maskHost d m); in
       lib.optional (ws != [ ]) "${m} (in the writable bind of ${lib.concatStringsSep ", " (lib.unique ws)})") masks;
 
   # THE PREPARED ROOT, BUILT AS CONTAINER ROOT IN THE CALLER'S OWN USER
@@ -344,8 +349,134 @@ in
 {
   inherit declarationOf prepareInner cacheTool steps8;
 
+  # THE LAUNCHER: a header of assignments, generated here, then
+  # rootless-wrapper.bash, the same text for every declaration. The header is
+  # the only place a declaration reaches bash, and every value in it is
+  # quoted, so a name, a path or a snippet is data there and never code. It
+  # runs nothing and expands nothing; the body decides what runs.
+  #
+  # `c.path` is on PATH for the caller's snippets only. The body calls its
+  # own tools by the store paths the header gives it.
   mkLauncher = name: c:
-    throw "flong.${name}: engine = \"rootless\" has no launcher yet";
+    let
+      d = declarationOf name c;
+      inherit (d) declared;
+      q = lib.escapeShellArg;
+      qs = lib.escapeShellArgs;
+      closure = "${declared.path}";
+
+      # The hook programs. postStop is the nspawn engine's own program, since
+      # it is given the same `machine` and nothing else. postStart is a
+      # program rather than a snippet because the launcher runs it, with the
+      # environment the launcher gives it: shellcheck cannot see where
+      # $leader, $netns or $workspace come from, so SC2154 is off.
+      postStartScript = pkgs.writeShellApplication {
+        name = "flong-poststart-${name}";
+        runtimeInputs = [ pkgs.coreutils pkgs.util-linux ] ++ c.path;
+        excludeShellChecks = [ "SC2154" ];
+        text = c.postStart;
+      };
+      postStopScript = shared.mkPostStopScript name c;
+
+      # systemd's names for the limits, as the cgroup files they are written
+      # to. systemd spells unlimited `infinity` and the kernel `max`.
+      value = v: if v == "infinity" then "max" else toString v;
+      limitTokens =
+        let
+          l = c.limits;
+          plain = lib.concatLists (lib.mapAttrsToList
+            (field: file: lib.optionals (l.${field} != null) [ "limit" file (value l.${field}) ])
+            {
+              MemoryMax = "memory.max";
+              MemoryHigh = "memory.high";
+              MemorySwapMax = "memory.swap.max";
+              TasksMax = "pids.max";
+              CPUWeight = "cpu.weight";
+            });
+          # A percentage of one CPU is that many thousandths of a 100 ms period.
+          quota = lib.toIntBase10 (lib.removeSuffix "%" l.CPUQuota) * 1000;
+        in
+        plain
+        ++ lib.optionals (l.CPUQuota != null) [ "limit" "cpu.max" "${toString quota} 100000" ]
+        ++ lib.optionals l.oomGroup [ "limit" "memory.oom.group" "1" ];
+
+      # Everything in the spec that does not depend on the launch, in the
+      # launcher's own words. Its order does not matter: the launcher sorts
+      # the mounts itself, parents first.
+      staticTokens =
+        [ "container" c.container "closure" closure ]
+        ++ lib.concatLists (lib.mapAttrsToList
+          (_: m: [ "mount" (if m.isReadOnly then "bind-ro" else "bind-rw") m.mountPoint
+                   (if m.hostPath == null then m.mountPoint else m.hostPath) ])
+          declared.bindMounts)
+        ++ lib.concatMap (t: [ "mount" "tmpfs" t.path t.mode t.size t.owner ]) d.tmpfs
+        ++ lib.concatMap (p: [ "mount" "overlay" p (toString c.overlays.${p}) ]) d.overlayDests
+        ++ lib.concatMap (x: [ "mount" "dev" x.node x.node ]) d.devices
+        ++ lib.concatMap (m: [ "mount" "mask" m ]) c.masks
+        # The user manager's bus and systemd directory are the caller's
+        # runtime directory's, which is known only at launch.
+        ++ lib.concatMap (p: [ "protect" p ]) ([ "/proc" "/sys/fs/cgroup" ] ++ c.protect)
+        ++ limitTokens
+        ++ [ "holder" "app.slice/flong-sessions.service" ]
+        ++ lib.concatMap (a: [ "holder-start" a ])
+          [ "/run/current-system/sw/bin/systemctl" "--user" "start" "flong-sessions.service" ]
+        ++ lib.optionals (c.postStop != "")
+          [ "post-stop" "${postStopScript}/bin/flong-poststop-${name}" ]
+        ++ lib.optionals (c.network != null) ([ "network" ]
+          ++ lib.concatMap (a: [ "pasta-arg" a ]) (shared.pastaPortArgs c.network ++ [ "--no-map-gw" ])
+          # Fixed ports are bound on the host, so teardown waits for pasta to
+          # let them go, and the next session can have them.
+          ++ lib.optional (lib.isList c.network.forwardPorts && c.network.forwardPorts != [ ]) "pasta-wait");
+
+      # Every name the header assigns. The header un-exports them all: an
+      # assignment to a name the caller's environment exports keeps it
+      # exported, into the launcher and the hooks.
+      names = [
+        "name" "container" "user" "closure" "cuid" "cgid" "closure8" "steps8"
+        "static" "declared_dests" "declared_binds" "masks" "mask_hosts"
+        "launcher" "cache_tool" "flock" "payload" "post_start"
+        "network" "dns_forward4" "dns_forward6"
+        "workspace_snippet" "binds_snippet" "guard_snippet"
+      ];
+
+      # One group, so one directive covers it: a `$`, a quote or a backslash
+      # in a value is meant literally, which is what shellcheck warns of.
+      header = ''
+        # shellcheck disable=SC2016,SC2089,SC2090
+        {
+        name=${q name}
+        container=${q c.container}
+        user=${q c.user}
+        closure=${q closure}
+        cuid=${toString d.cuid}
+        cgid=${toString d.cgid}
+        closure8=${q (builtins.substring 0 8 (baseNameOf closure))}
+        steps8=${q steps8}
+        static=(${qs staticTokens})
+        declared_dests=(${qs (map norm d.dests)})
+        declared_binds=(${qs (map (b: norm b.dest) d.binds)})
+        masks=(${qs c.masks})
+        mask_hosts=(${qs (map (m: let h = maskHost d m; in if h == null then "" else h) c.masks)})
+        launcher=${q "${shared.flongLauncher}/bin/flong-launch"}
+        cache_tool=${q "${cacheTool}/bin/flong-cache"}
+        flock=${q "${pkgs.util-linux}/bin/flock"}
+        payload=${q (lib.getExe (shared.mkPayload name c))}
+        post_start=${q (if c.postStart == "" then "" else "${postStartScript}/bin/flong-poststart-${name}")}
+        network=${if c.network == null then "0" else "1"}
+        dns_forward4=${q shared.dnsForward4}
+        dns_forward6=${q shared.dnsForward6}
+        workspace_snippet=${q (if lib.trim c.workspace == "pwd" then "" else c.workspace)}
+        binds_snippet=${q c.binds}
+        guard_snippet=${q c.guard}
+        export -n ${lib.concatStringsSep " " names}
+        }
+      '';
+    in
+    pkgs.writeShellApplication {
+      inherit name;
+      runtimeInputs = c.path;
+      text = header + builtins.readFile ./rootless-wrapper.bash;
+    };
 
   # Everything the container module or flong's options can say that the
   # rootless engine cannot honour, refused rather than dropped. Each message

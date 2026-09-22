@@ -1444,6 +1444,15 @@ in
             name against. So there is nothing to keep in step, and nothing an
             unset `users.users.<name>.uid` or a container declared by `path`
             could hide from an assertion.
+
+            Under `engine = "rootless"` the user's uid and the gid of its
+            primary group must be declared in the container's `config`, and
+            the container cannot be declared by `path`: they name the
+            prepared root's cache and the caller's id maps, which are needed
+            before anything is prepared. The launch refuses a prepared
+            `/etc/passwd` that disagrees, and the home still comes from it.
+            The uid need not be the caller's: the session's user is mapped
+            onto the caller whatever its uid.
           '';
         };
 
@@ -1466,7 +1475,8 @@ in
             attacker-shaped input the launcher handles, and its answer is the
             caller's to give either way. Root only when there is no
             unprivileged caller to drop to, as when a unit starts the
-            launcher directly.
+            launcher directly. Under `engine = "rootless"` everything runs as
+            the caller, so there is nothing to drop from.
 
             What it prints is resolved with `realpath`, must be a directory,
             and is refused if it names a `:` or a newline: a caller's path
@@ -1533,6 +1543,14 @@ in
             Runs in a subshell, so a non-zero exit refuses the launch, `exit 0`
             allows it, and nothing the guard assigns reaches the launcher: it
             judges `$workspace` and cannot change it.
+
+            Under `engine = "rootless"` it runs as the caller, and it is a
+            consistency check, not a gate: the session grants nothing the
+            caller did not already have, and the caller can run flong-launch
+            directly with any spec. It runs again when the launcher relaunches
+            itself, which it does when the prepared root it found was swept
+            before it could lock it, so a guard that asks a question can ask
+            it twice.
           '';
         };
 
@@ -1591,6 +1609,19 @@ in
             Unlike systemd's `ExecStartPost`, the main process is not yet
             running: it is held until this hook and any `network` have
             finished.
+
+            Under `engine = "rootless"` it is a program of its own, run by the
+            launcher as the caller, with `path` on `PATH` and the launcher's
+            arguments in "$@". `$leader`, `$machine`, `$uid`, `$gid`, `$home`,
+            `$workspace`, `$workspace_mode` and `$binds` are exported as
+            above, and so is `$userns`, the session's user namespace. `$netns`
+            is `/proc/<launcher>/fd/<n>`, a descriptor the launcher holds,
+            and not `/proc/$leader/ns/net`. There is no `$root`: the session's
+            root exists only in its own mount namespace, reached as
+            `/proc/$leader/root`, and a hook that names `$root` fails. The
+            hook enters the session as its root, with every capability over
+            it and none over the host:
+            `nsenter --user="$userns" --net="$netns" nft -f ruleset.nft`.
           '';
         };
 
@@ -1615,6 +1646,10 @@ in
             releases is already gone. It runs under `set -euo pipefail` with
             `path` on `PATH`; a non-zero exit is reported and otherwise
             ignored, because flong's own release follows it.
+
+            Under `engine = "rootless"` it runs as the caller, and a killed
+            launcher's session is released by the caller's holder unit
+            within moments, rather than at the next launch.
           '';
         };
 
@@ -1662,6 +1697,11 @@ in
             resolver on the host's loopback answers it. Both read the host's
             file once, at launch: a host that moves networks keeps a live
             session on the old resolver.
+
+            Under `engine = "rootless"` pasta runs as the caller, so a fixed
+            `forwardPorts` host port below the host's
+            `net.ipv4.ip_unprivileged_port_start` is refused, and there is no
+            namespace pin under /run/flong: the launcher holds the namespace.
           '';
           type = lib.types.nullOr (lib.types.submodule {
             options = {
@@ -1741,6 +1781,10 @@ in
 
             overlayfs reports changing device and inode numbers as a file is
             written, so this must not cover a path holding a sqlite database.
+
+            Under `engine = "rootless"` an overlay below a bind, at any depth,
+            is allowed: a session that renames its parent on the host only
+            moves where its own writes land.
           '';
         };
 
@@ -1767,6 +1811,15 @@ in
               the file by renaming a new one over it -- as many write a
               credential -- detaches the mask in every running session, and
               the new file shows through.
+
+            Under `engine = "rootless"` a mask may lie at most one level
+            below the root of a writable bind: deeper, a session that can
+            write the host directory renames the masked file's parent, leaves
+            a decoy for the mask, and reads the file at the new name. A
+            declared writable bind is checked at evaluation, and the
+            workspace and `binds` at launch. A mask below a read-only bind,
+            and a declared `tmpfs` or an overlay at any depth, is not
+            checked.
           '';
         };
 
@@ -1869,7 +1922,8 @@ in
           description = ''
             Packages on `PATH` for every hook that runs on the host: the
             caller-run `workspace` and `binds`, and the root-run `guard`,
-            `postStart` and `postStop`. Not for `command`, which runs inside
+            `postStart` and `postStop`, which under `engine = "rootless"` are
+            caller-run too. Not for `command`, which runs inside
             the session with the container's own `PATH`: a tool the workload
             needs belongs in the container's `environment.systemPackages`.
           '';
@@ -1879,9 +1933,18 @@ in
           type = lib.types.package;
           readOnly = true;
           description = ''
-            The generated launcher. Must be run as root; how you arrange that
-            -- sudo, doas, run0, a systemd unit -- is deliberately not this
-            module's business.
+            The generated launcher. Under `engine = "nspawn"` it must be run
+            as root; how you arrange that -- sudo, doas, run0, a systemd unit
+            -- is deliberately not this module's business.
+
+            Under `engine = "rootless"` it is run directly, as the user whose
+            session it is, and needs their subordinate ids in /etc/subuid and
+            /etc/subgid (`users.users.<name>.subUidRanges`, or
+            `autoSubUidGidRange`). Its checks are consistency checks; the
+            launcher's own are the boundary. It exits with the payload's
+            status, 128+n when a signal killed the payload, 125 when the
+            payload never ran, and 75 when its prepared root was swept and it
+            could not relaunch.
           '';
         };
       };
