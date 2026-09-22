@@ -16,7 +16,14 @@
         let pkgs = nixpkgs.legacyPackages.${system}; in
         {
           basic = pkgs.testers.runNixOSTest {
-            imports = [ ./tests/basic.nix ];
+            imports = [ (import ./tests/basic.nix { engine = "nspawn"; }) ];
+          };
+
+          # The same declarations and subtests on the rootless engine,
+          # launched by a lingering user with no sudo. Temporary, with the
+          # engine switch: when nspawn goes, this is basic.
+          basic-rootless = pkgs.testers.runNixOSTest {
+            imports = [ (import ./tests/basic.nix { engine = "rootless"; }) ];
           };
 
           # The rootless engine, launched by a lingering user with no sudo.

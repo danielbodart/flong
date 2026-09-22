@@ -1,7 +1,7 @@
 # The rootless launcher's body. rootless.nix puts a header of assignments in
 # front of it (name, container, user, closure, cuid, cgid, closure8, steps8,
 # static, declared_dests, declared_binds, masks, mask_hosts, launcher,
-# cache_tool, flock, payload, post_start, network, dns_forward4,
+# cache_tool, flock, mkdir, payload, post_start, network, dns_forward4,
 # dns_forward6, the seccomp filters and tool, and the four snippets) and
 # writeShellApplication runs it under errexit, nounset and pipefail. It works
 # out what only the launch can know -- the caller, the workspace and binds,
@@ -279,14 +279,14 @@ P=$cache/prepared
 
 if [[ ! -d $P ]]; then
 	# Cold: the only path with forks besides the snippets, and the only one
-	# that collects garbage. mkdir comes from the running system, as
-	# holder-start's systemctl does, since the header names no coreutils.
-	# $rt exists, so only $state may need making; a concurrent launch may make
-	# it first.
-	if ! /run/current-system/sw/bin/mkdir -m 0700 -- "$state" 2>/dev/null && [[ ! -d $state ]]; then
+	# that collects garbage. mkdir is the header's, by store path, so a
+	# caller outside a NixOS login, or on a host whose running system lacks
+	# coreutils, still finds it. $rt exists, so only $state may need making;
+	# a concurrent launch may make it first.
+	if ! "$mkdir" -m 0700 -- "$state" 2>/dev/null && [[ ! -d $state ]]; then
 		die "cannot make $state"
 	fi
-	/run/current-system/sw/bin/mkdir -p -- "$cache"
+	"$mkdir" -p -- "$cache"
 	# The cache's shared lock is held across the prepare and kept open into
 	# flong-launch, which takes its own before this one closes: no sweep
 	# renames the cache under a prepare or between the two locks. A launch of

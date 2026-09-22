@@ -451,16 +451,18 @@ in
       names = [
         "name" "container" "user" "closure" "cuid" "cgid" "closure8" "steps8"
         "static" "declared_dests" "declared_binds" "masks" "mask_hosts"
-        "launcher" "cache_tool" "flock" "payload" "post_start"
+        "launcher" "cache_tool" "flock" "mkdir" "payload" "post_start"
         "network" "dns_forward4" "dns_forward6"
         "workspace_snippet" "binds_snippet" "guard_snippet"
         "seccomp_tier" "seccomp_fixed" "seccomp_project" "seccomp_policy_snippet"
       ];
 
-      # One group, so one directive covers it: a `$`, a quote or a backslash
-      # in a value is meant literally, which is what shellcheck warns of.
+      # One group, so one directive covers it: a `$`, a quote, a backslash
+      # or a comma in a value is meant literally, which is what shellcheck
+      # warns of. Two host ports make pasta's `-T 18123,19999`, which
+      # escapeShellArg leaves bare.
       header = ''
-        # shellcheck disable=SC2016,SC2089,SC2090
+        # shellcheck disable=SC2016,SC2054,SC2089,SC2090
         {
         name=${q name}
         container=${q c.container}
@@ -478,6 +480,7 @@ in
         launcher=${q "${shared.flongLauncher}/bin/flong-launch"}
         cache_tool=${q "${cacheTool}/bin/flong-cache"}
         flock=${q "${pkgs.util-linux}/bin/flock"}
+        mkdir=${q "${pkgs.coreutils}/bin/mkdir"}
         payload=${q (lib.getExe (shared.mkPayload name c))}
         post_start=${q (if c.postStart == "" then "" else "${postStartScript}/bin/flong-poststart-${name}")}
         network=${if c.network == null then "0" else "1"}
