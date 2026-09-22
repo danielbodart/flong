@@ -19,6 +19,9 @@
             imports = [ ./tests/basic.nix ];
           };
 
+          # The rootless engine's native launcher, built with -Werror.
+          launcher = import ./launcher { inherit pkgs; };
+
           # A refusal happens at evaluation, so it is checked by evaluating: each
           # declaration below must trip the assertion it is about, and the
           # baseline must trip none of flong's. Evaluation only -- no system is

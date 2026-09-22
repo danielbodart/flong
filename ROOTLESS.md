@@ -421,7 +421,11 @@ rmdir wait has a 10 s cap.
   launcher in its scope; that state no longer exists, and the sweep never
   needs to decide about a live session with a dead launcher.
 - **Cache liveness:** every launcher holds a shared `flock` on its cache
-  directory for its life, re-checking the inode after locking. The sweep of a
+  directory for its life, re-checking after locking that the path still names
+  the inode it locked and that the inode holds the prepared root: a cache the
+  sweep took away may have been made afresh at the same path by a wrapper that
+  is still preparing it, whose shared lock is granted beside the launcher's.
+  Either answer sends the launch back through the wrapper. The sweep of a
   superseded cache takes it exclusively, renames the cache to `.trash.*` and
   deletes it through the namespace. Deleting a live overlay lower breaks the
   session; renaming it does not (measured).
