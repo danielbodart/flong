@@ -64,9 +64,6 @@ toolchain survives.
 
 ## 4. Loose ends
 
-- **Remove `engine`.** It accepts only `"rootless"` and warns when set. No
-  known consumer sets or reads it any more (chase and frisket dropped it), so
-  it can go in the next release.
 - **frisket's steer and connect as one process.** Each re-executes under
   `nsenter --user --net`, and frisket's hook costs about 38 ms of each
   launch. One nsenter'd process doing both cuts into that.

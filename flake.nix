@@ -106,13 +106,6 @@
               || throw "assertions: the baseline is refused: ${builtins.toJSON (flongFailures { })}";
             assert flongWarnings { } == [ ]
               || throw "assertions: the baseline warns ${builtins.toJSON (flongWarnings { })}";
-            # engine is deprecated: the one engine it still names is accepted
-            # with a warning, and nspawn, which is gone, is not.
-            assert (untyped { flong.box.engine = "nspawn"; } [ "flong" "box" "engine" ]
-                || refused "engine = \"nspawn\"" { flong.box.engine = "nspawn"; } "nspawn")
-              || throw "assertions: engine = \"nspawn\" was accepted";
-            assert accepted "engine = \"rootless\" spelt out" { flong.box.engine = "rootless"; };
-            assert warned "engine spelt out" { flong.box.engine = "rootless"; } "engine";
             assert refused "the declaration's own forwardPorts"
               { containers.box.forwardPorts = [ { hostPort = 8080; } ]; }
               "static per container";

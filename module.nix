@@ -911,11 +911,7 @@ let
     ];
 
   warningsFor = n: c:
-    lib.optional c.engineSet ''
-      flong.${n} sets engine, which is deprecated: flong has one engine, and
-      the option goes in a later release. Drop it.
-    ''
-    ++ lib.optional (c.seccomp.tier == null) ''
+    lib.optional (c.seccomp.tier == null) ''
       flong.${n} has seccomp.tier = null: no syscall allow-list, only the
       audit, tty and namespace masks.
     ''
@@ -1032,7 +1028,7 @@ in
       only as a closure builder; the `container@` unit it installs is never
       started.
     '';
-    type = lib.types.attrsOf (lib.types.submodule ({ name, config, options, ... }: {
+    type = lib.types.attrsOf (lib.types.submodule ({ name, config, ... }: {
       options = {
         container = lib.mkOption {
           type = lib.types.str;
@@ -1042,23 +1038,6 @@ in
             `bindMounts`, `tmpfs` and `allowedDevices`, read as option values.
             It must set `privateNetwork = true`.
           '';
-        };
-
-        engine = lib.mkOption {
-          type = lib.types.enum [ "rootless" ];
-          default = "rootless";
-          description = ''
-            Deprecated, and setting it warns: flong has one engine, which
-            runs as the calling user, and the option goes in a later
-            release.
-          '';
-        };
-
-        engineSet = lib.mkOption {
-          type = lib.types.bool;
-          internal = true;
-          readOnly = true;
-          description = "Whether `engine` is set, which warns.";
         };
 
         user = lib.mkOption {
@@ -1647,7 +1626,6 @@ in
 
       config = {
         launcher = mkLauncher name config;
-        engineSet = options.engine.highestPrio < (lib.mkOptionDefault null).priority;
       };
     }));
   };

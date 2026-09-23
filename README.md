@@ -214,7 +214,6 @@ ordered with `mkBefore` and `mkAfter`.
 | `protect` | `[ ]` | Host paths no mount of a session may equal, lie inside or contain, such as a daemon's control socket directory. flong's own state, the user manager's sockets, `/proc` and `/sys/fs/cgroup` are always protected. |
 | `path` | `[ ]` | Packages on `PATH` for every hook. |
 | `launcher` | *read-only* | The generated launcher package. |
-| `engine` | `"rootless"` | Deprecated: flong has one engine. Setting it warns. |
 
 `scopeConfig` is refused: a session has no scope unit, and `limits` holds what
 a user cgroup can enforce.
