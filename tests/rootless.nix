@@ -750,11 +750,12 @@ in
     with subtest("the gate: a failing hook, or a launcher killed in its hook, and the payload never runs"):
         out = machine.succeed(as_user("FLONG_TEST_HOOK=fail hooked 'echo payload-ran' 2>&1; echo rc=$?"))
         assert "the hook fails" in out and "postStart failed" in out, out
-        # The status ends the output, but not always on a line of its own:
-        # the C flong-init writes its refusal in three writes
-        # (flong-init.c:61-66), and the launcher kills the sandbox right
-        # after closing the gate (flong-launch.c:792-797), so a kill between
-        # them drops the newline and "rc=125" follows the message.
+        # The status ends the output, but was not always on a line of its
+        # own: the C flong-init wrote its refusal in three writes
+        # (launcher/flong-init.c:61-66 at db5fdeb), and the launcher kills
+        # the sandbox right after closing the gate (flong-launch.c:792-797),
+        # so a kill between them dropped the newline and "rc=125" followed
+        # the message. The Zig's is one writev (ZIG.md quirk 22).
         assert "payload-ran" not in out and out.rstrip("\n").endswith("rc=125"), out
 
         machine.succeed("rm -f /tmp/hook-hang-* /tmp/poststop-*")

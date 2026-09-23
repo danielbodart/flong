@@ -376,9 +376,9 @@ $ nix flake check
 
 Runs NixOS VM tests of every option, the hook ordering, networking and DNS,
 the launcher's lifecycle and terminal, and each seccomp tier's live filters;
-builds the launcher with `-Werror`, and the seccomp compiler in Zig with its
-unit tests, lint and analysis; evaluates each refusal; and shellchecks the
-version script. `nix build .#bench` times launches in a VM.
+builds the launcher's C with `-Werror`, and its `flong-init` and the seccomp
+compiler in Zig with their unit tests, lint and analysis; evaluates each
+refusal; and shellchecks the version script. `nix build .#bench` times launches in a VM.
 
 ## Licence
 

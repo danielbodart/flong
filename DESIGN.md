@@ -1361,9 +1361,11 @@ store paths they run (bwrap, pasta, tini, flong-init) and
 `/run/wrappers/bin/newuidmap` and `newgidmap` are compiled in, so the wrapper
 cannot point the launcher at another bwrap.
 
-C, not Zig: the BPF and the runtime were identical, but a clean Zig build took
-78–93 s against C's 1.6 s and needs a 1.8 GiB compiler, and a typed config
-format would repeat checks the Nix module's types already make.
+The launcher began as C, not Zig: the BPF and the runtime were identical, but
+a clean Zig build took 78–93 s against C's 1.6 s and needs a 1.8 GiB
+compiler, and a typed config format would repeat checks the Nix module's types
+already make. `ZIG.md` is the decision to port it anyway, and what the port
+has measured since.
 
 ### Files
 
@@ -1381,11 +1383,12 @@ does, when it is called and how it fails.
 | `flong-tty` | the foreground wait, the pty relay or passthrough, raw mode, the watchdog, `^]^]^]`, the wait for bwrap |
 | `flong-launch.c` | `main`: the order of a launch, bwrap's argv, the hook, pasta, the gate, the one teardown path, exit codes |
 | `flong-sweeper.c` | `main` of the holder unit's process |
-| `flong-init.c` | pid 1 in the session: groups, capabilities, controlling tty, ready byte, the gate, chdir, exec tini; links nothing but libc |
+| `src/init.zig` | `flong-init`, pid 1 in the session: groups, capabilities, controlling tty, ready byte, the gate, chdir, exec tini; static, no libc, no allocator |
 
 Dependencies point one way: util, then spec, then ns, cgroup (then record),
 mount and tty; `flong-launch` uses all of them, `flong-sweeper` util, cgroup
-and record, and `flong-init` none.
+and record, and `flong-init` none of them (it imports the Zig package's
+`sys` and `msg`).
 
 ### Conventions
 

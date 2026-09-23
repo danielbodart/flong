@@ -1,5 +1,8 @@
 //! flong-init's root (ZIG.md, "Per binary"): launcher/flong-init.c, line by
-//! line. The first program inside the session: bwrap execs it as pid 1
+//! line; the C was deleted in phase 3 (b), and its line numbers here are
+//! those of db5fdeb.
+//!
+//! The first program inside the session: bwrap execs it as pid 1
 //! (--as-pid-1), so it runs before anything of the payload's and is the
 //! gate; bwrap's own --block-fd is fail-open, this one is fail-closed.
 //!

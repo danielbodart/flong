@@ -59,8 +59,7 @@ delegated cgroup, `newuidmap` or a real pid 1 goes in `vmScript`.
 `checks.native`'s node (`tests/native.nix`): alice, uid 1000, lingering, with
 subordinate ids 100000-165535 for both uid and gid; the
 `/run/wrappers/bin/new{u,g}idmap` wrappers (file capabilities, not setuid);
-no sudo; `strace`, `util-linux`, `bubblewrap` and every proof's `bins` on the
-system PATH. A `vmScript` runs after the common setup, which has
+no sudo; `util-linux` and every proof's `bins` on the system PATH. A `vmScript` runs after the common setup, which has
 waited for `user@1000.service` and checked that a `Delegate=yes` unit's cgroup
 takes a child and that `unshare --user --map-auto` maps the range. In scope:
 
@@ -87,11 +86,11 @@ column 0, like the rest of the testScript.
   phase 4's clash check on the real link replaces it.
 
 Retired in phase 3: `p2`, flong-init's start code as pid 1, whose run as
-pid 1 through bwrap under the strict/log stack is now the C-against-Zig
-strace subtest of `tests/native.nix` (the first call after the Zig's
-`execve` is its `setgroups`), with the real `flong-init`; its stack checks
-are rootless's `ulimit -s` subtest and the launcher set's `PT_GNU_STACK`
-check (native.nix).
+pid 1 through bwrap under the strict/log stack became phase 3 (a)'s
+C-against-Zig strace subtest of `tests/native.nix` (the first call after the
+Zig's `execve` is its `setgroups`), with the real `flong-init`, deleted with
+the C in phase 3 (b); its stack checks are rootless's `ulimit -s` subtest and
+the launcher set's `PT_GNU_STACK` check (native.nix).
 
 Retired in phase 2: `p1` (native.nix's derivations answer it every build),
 `p4` (its ABI asserts are `tests/zig/abi.zig`, in `test-libc` and

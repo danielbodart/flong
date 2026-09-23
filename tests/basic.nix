@@ -733,7 +733,7 @@ in
 
       with subtest("the payload holds descriptors 0-2 and nothing else"):
           # flong-init closes everything above stderr before it execs tini
-          # (flong-init.c:219-220): bwrap leaks its namespace descriptors,
+          # (src/init.zig:240-241): bwrap leaks its namespace descriptors,
           # and the seccomp and pipe ends reach it too. The `; true` keeps
           # bash from exec'ing ls, so ls lists the payload's own table, $$.
           out = machine.succeed(by_caller("${launcher} 'ls /proc/$$/fd; true'"))

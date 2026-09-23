@@ -141,16 +141,16 @@ let
 
   # The C launcher's compiler flags (launcher/default.nix before phase 3),
   # a bash array's words: the store paths of the programs it runs are
-  # compiled in, so the wrapper cannot hand it a different bwrap, pasta,
-  # tini or flong-init. newuidmap and newgidmap are NixOS's setuid wrappers,
-  # which have no store path. -Werror with the cc-wrapper's hardening.
+  # compiled in, so the wrapper cannot hand it a different bwrap, pasta or
+  # flong-init (tini is the Zig flong-init's -Dtini). newuidmap and
+  # newgidmap are NixOS's setuid wrappers, which have no store path. -Werror
+  # with the cc-wrapper's hardening.
   # FLONG_INIT names the Zig flong-init installed beside it, in the same
   # $out, so it is given as a shell word expanding $out.
   launcherCflags = ''
     -std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror
     -DFLONG_BWRAP='"${pkgs.bubblewrap}/bin/bwrap"'
     -DFLONG_PASTA='"${pkgs.passt}/bin/pasta"'
-    -DFLONG_TINI='"${pkgs.tini}/bin/tini"'
     -DFLONG_NEWUIDMAP='"/run/wrappers/bin/newuidmap"'
     -DFLONG_NEWGIDMAP='"/run/wrappers/bin/newgidmap"'
     -DFLONG_INIT="\"$out/bin/flong-init\""
@@ -162,8 +162,7 @@ let
   # built by $CC with launcherCflags (ZIG.md, "Phase 3"). The fileset holds
   # src/ but for the seccomp set's and the fixtures' own sources, and
   # launcher/'s C, so neither set's edits move the other (ZIG.md, "The Nix
-  # build"). flong-init.c stays in launcher/ until phase 3 (b); only
-  # checks.native's transition subtest builds it.
+  # build").
   launcher = zigSet {
     pname = "flong-launcher";
     set = "launcher";
@@ -293,7 +292,6 @@ in
     deps
     seccomp
     launcher
-    launcherCflags
     checks
     ;
 }

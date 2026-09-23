@@ -119,16 +119,16 @@ let
       '';
     };
 
-    # Recorded from the C of 2026-09-23 (launcher/flong-init.c): every
-    # refusal of its argv (:86-148, 179-193) in the order it checks them,
-    # each field's edge (0-2, INT_MAX, (gid_t)-1, ULONG_MAX and past it,
-    # signs, blanks, empty fields), GROUPS counted against NGROUPS_MAX before
-    # any gid is parsed, and a refused word over 1 KiB, printed whole
-    # (ZIG.md quirk 22). accepted-* pass every argv check and stop at the
-    # first call, setgroups, with EPERM: a Nix builder never holds
-    # CAP_SETGID. What follows it needs CAP_SETGID and CAP_SETPCAP in a user
-    # namespace, which CI's build sandbox refuses, or pid 1: the gate's EOF
-    # and a failing chdir to a DIR over 1 KiB are checks.native's
+    # Recorded from the C of 2026-09-23 (launcher/flong-init.c, deleted in
+    # phase 3 b): every refusal of its argv (:86-148, 179-193) in the order
+    # it checks them, each field's edge (0-2, INT_MAX, (gid_t)-1, ULONG_MAX
+    # and past it, signs, blanks, empty fields), GROUPS counted against
+    # NGROUPS_MAX before any gid is parsed, and a refused word over 1 KiB,
+    # printed whole (ZIG.md quirk 22). accepted-* pass every argv check and
+    # stop at the first call, setgroups, with EPERM: a Nix builder never
+    # holds CAP_SETGID. What follows it needs CAP_SETGID and CAP_SETPCAP in
+    # a user namespace, which CI's build sandbox refuses, or pid 1: the
+    # gate's EOF and a failing chdir to a DIR over 1 KiB are checks.native's
     # (tests/native.nix), the rest is the gate and the launches of rootless
     # and basic.
     init = {
