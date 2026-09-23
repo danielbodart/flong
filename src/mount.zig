@@ -1,6 +1,7 @@
 //! mount.zig: the mount helper, launcher/flong-mount.c ported function by
 //! function (ZIG.md, "Phase 4"); its specification is flong-mount.h:1-60,
-//! and its order ordering checkpoint 7, held by `run` alone.
+//! and its order ordering checkpoint 7, held by `run` alone. The C was
+//! deleted in phase 4 (b), and its line numbers here are those of a7919be.
 //!
 //! bwrap resolves nested destinations by path and follows symlinks a payload
 //! planted, so it mounts only fixed destinations in fresh filesystems, and

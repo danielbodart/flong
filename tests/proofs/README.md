@@ -2,8 +2,8 @@
 
 Each proof answers one question of ZIG.md's "Phase 0: proofs" by a build that
 fails when the answer is no. Phase 2 moved the three then standing here
-from `spike/proofs/` (ZIG.md, "Phase 2"), and phase 3 retired P2 (its last
-version is `tests/proofs/p2/` at 57e2de0); the spike and the other retired
+from `spike/proofs/` (ZIG.md, "Phase 2"), phase 3 retired P2 (its last
+version is `tests/proofs/p2/` at 57e2de0) and phase 4 P5; the spike and the other retired
 proofs, P1, P4's round trip and P6's qemu run, are in
 `~/Projects/flong-spikes-archive/zig`, beside P2's spike version. A proof is a directory
 `tests/proofs/<pN>/` holding a `default.nix`; `tests/integration.nix` finds it with
@@ -79,11 +79,14 @@ column 0, like the rest of the testScript.
 - `p3`: processes. `clone3` into a delegated `O_PATH` leaf, the `noreturn`
   fork (`compile-fail` and at run time), a fork after `setns(CLONE_NEWUSER)`.
   Stays in `checks.native`.
-- `p5`: the hybrid link. A Zig archive with the shim's settings linked by
-  `$CC` with the launcher's flags; its fork child, a planted panic, the
-  clash check. Its `aarch64` attribute, the archive for aarch64 and its
-  symbols (P6's piece), is built by `cross-aarch64` (native.nix). Until
-  phase 4's clash check on the real link replaces it.
+
+Retired in phase 4: `p5`, the hybrid link (its last version is
+`tests/proofs/p5/` at a7919be), a Zig archive with the shim's settings
+linked by `$CC` with the launcher's flags. The launcher's own build now links
+`libflong-mount.a` that way and runs the clash check on it, and a C program
+calling `flong_mount_main` for a refusal (1) and a panic (125); the aarch64
+archive's symbols are `cross-aarch64`'s (native.nix); the fork child is the
+real one, which the full VM suite runs.
 
 Retired in phase 3: `p2`, flong-init's start code as pid 1, whose run as
 pid 1 through bwrap under the strict/log stack became phase 3 (a)'s

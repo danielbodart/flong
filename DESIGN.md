@@ -1381,16 +1381,19 @@ does, when it is called and how it fails.
 | `flong-ns` | U1 (newuidmap and newgidmap in parallel) and U2 (the split maps, `max_user_namespaces`) |
 | `flong-cgroup` | the nsdelegate check, finding or starting the holder, the session cgroup and its leaves, limits, kill, wait, remove |
 | `flong-record` | the state directory, the cache lock, records, liveness, the sweep, `postStop`, the sweeper's loop |
-| `flong-mount` | the mount helper: sources, the walker, masks, overlays, `/sys`, `/run` read-only |
+| `flong-mount.h` | the mount helper's job and its one call, `flong_mount_main`, which `flong-launch` makes in the forked child |
 | `flong-tty` | the foreground wait, the pty relay or passthrough, raw mode, the watchdog, `^]^]^]`, the wait for bwrap |
 | `flong-launch.c` | `main`: the order of a launch, bwrap's argv, the hook, pasta, the gate, the one teardown path, exit codes |
 | `flong-sweeper.c` | `main` of the holder unit's process |
+| `src/mount.zig` | the mount helper, linked into `flong-launch` through `src/hybrid/mount_c.zig`: sources, the walker, masks, overlays, `/sys`, `/run` read-only; no libc |
 | `src/init.zig` | `flong-init`, pid 1 in the session: groups, capabilities, controlling tty, ready byte, the gate, chdir, exec tini; static, no libc, no allocator |
 
-Dependencies point one way: util, then spec, then ns, cgroup (then record),
-mount and tty; `flong-launch` uses all of them, `flong-sweeper` util, cgroup
-and record, and `flong-init` none of them (it imports the Zig package's
-`sys` and `msg`).
+Dependencies point one way: util, then spec, then ns, cgroup (then record)
+and tty; `flong-launch` uses all of them and the mount helper, `flong-sweeper`
+util, cgroup and record. The Zig uses none of them: the mount helper reads
+`flong-mount.h`'s job through mirrors checked against the header, and imports
+the Zig package's `sys`, `fd` and `msg`, as `flong-init` imports `sys` and
+`msg`.
 
 ### Conventions
 

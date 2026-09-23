@@ -343,10 +343,6 @@ in
         "fenced" "fencednested" "patient" "race" "esc"
       ]
       ++ [
-        # The C launcher with the C mount helper, for phase 4 (a)'s
-        # transition subtest (ZIG.md, "The mount-helper shim"; native.nix,
-        # `cmount`), never an output.
-        (import ../native.nix { inherit pkgs; }).cmount
         # The driver reads a session's ruleset and links from outside.
         pkgs.nftables
         # scmp_sys_resolver, which names the numbers a logging filter records.
@@ -829,7 +825,7 @@ in
             "touch /srv/companion/from-session && echo companion-written; "
             "touch \"$HOME/tmp/t\" && echo hometmp-ok")))
         lines = out.splitlines()
-        # /run read-only, last (flong-mount.c:484-497): the payload could
+        # /run read-only, last (src/mount.zig:674-686): the payload could
         # not write there anyway, as it is root's, so the flag is read.
         assert any(l.startswith("run ro,") for l in lines), out
         for want in ("/srv/work", "read-only-marker", "ro-refused", "ws-refused", "rw-written",
@@ -903,12 +899,12 @@ in
         out = extra_mount("mount bind-ro /srv/work/adir /srv/lower", "cat /srv/work/adir/seed; echo")
         assert out == "from-the-lower-layer\nrc=0\n", out
 
-        # flong-mount.c:539-541, before any namespace is touched.
+        # src/mount.zig:581, before any namespace is touched.
         refused("mount bind-ro /srv/work /srv/lower", "/srv/work is mounted twice")
-        # flong-mount.c:361-364: a file's clone would not go on a directory.
+        # src/mount.zig:469: a file's clone would not go on a directory.
         refused("mount bind-ro /srv/work/adir /srv/work/afile",
                 "/srv/work/adir is a directory and its source is not")
-        # flong-mount.c:346-347, and :348-349 for the last component.
+        # src/mount.zig:450, and :451 for the last component.
         refused("mount bind-ro /srv/work/afile/x /srv/lower",
                 "/srv/work/afile, on the way to /srv/work/afile/x, is not a directory")
         refused("mount bind-ro /srv/work/afile /srv/lower", "/srv/work/afile is not a directory")
@@ -924,172 +920,6 @@ in
         assert set(results) <= {"refused", "contained"}, out
         print(f"swap race: {results.count('refused')} refused, {results.count('contained')} contained")
         machine.succeed("test -z \"$(ls -A /srv/race/view)\"")
-
-    with subtest("the Zig mount helper against the C one: the same words, statuses and mounts, and nothing escapes"):
-        # ZIG.md phase 4 (a). The shipped launcher links the Zig helper; each
-        # wrapper used here is copied with its launcher= line
-        # (module.nix:612) pointing at flong-launch-cmount, the same C with
-        # flong-mount.c, and the two runs of each case must say the same
-        # thing and end the same way. flong-init's gate line comes or not
-        # with timing (flong-launch.c:792-797), so it is left out of both.
-        cmount = machine.succeed("readlink -f \"$(command -v flong-launch-cmount)\"").strip()
-        machine.succeed("mkdir -p /tmp/cmount && chmod 755 /tmp/cmount")
-        for w in ("plain", "mounts", "esc", "race"):
-            src = machine.succeed(f"readlink -f \"$(command -v {w})\"").strip()
-            machine.succeed(
-                f"sed 's|^launcher=.*|launcher={cmount}|' {src} > /tmp/cmount/{w} && chmod 755 /tmp/cmount/{w} && "
-                f"test \"$(diff {src} /tmp/cmount/{w} | grep -c '^>')\" = 1 && "
-                f"grep -qx 'launcher={cmount}' /tmp/cmount/{w}")
-        GATE = "flong-init: the gate closed without opening: not starting the payload"
-
-        def both(script):
-            outs = []
-            for second, prefix in enumerate(("", "PATH=/tmp/cmount:$PATH; ")):
-                # Which wrappers the run finds, first: the copies in the
-                # second run only, so the two runs cannot be one launcher's.
-                out = machine.succeed(as_user(f"{prefix}command -v plain mounts esc race; {script} 2>&1; echo rc=$?"))
-                found, out = out.split("\n", 4)[:4], out.split("\n", 4)[4]
-                assert all(f.startswith("/tmp/cmount/") == bool(second) for f in found), (prefix, found)
-                outs.append("".join(l + "\n" for l in out.splitlines() if l != GATE))
-            assert outs[0] == outs[1], (script, outs)
-            return outs[0]
-
-        # The controls: the copy's launcher is the C helper's (its message
-        # formats are flong-mount.c's, which the shipped one lacks), and a
-        # session started through the copy runs it; the trace flag reaches
-        # either helper, which stamps sandbox-ready.
-        shipped = machine.succeed("sed -n 's/^launcher=//p' \"$(readlink -f \"$(command -v plain)\")\"").strip()
-        machine.succeed(f"grep -q 'cannot take file ids %u:%u' {cmount}")
-        machine.fail(f"grep -q 'cannot take file ids %u' {shipped}")
-        machine.succeed(f"grep -q 'cannot take file ids ' {shipped}")
-        start("/tmp/cmount/plain", "sleep infinity", "cmount")
-        name = machine.wait_until_succeeds("session-of box").strip()
-        exe = machine.succeed(f"readlink /proc/{launcher_pid(name)}/exe").strip()
-        assert exe == cmount, (exe, cmount)
-        stop(name, "cmount")
-        for launcher in ("plain", "/tmp/cmount/plain"):
-            out = machine.succeed(as_user(f"FLONG_TRACE=1 {launcher} true 2>&1 | awk '$1 == \"T\" {{ print $3 }}'"))
-            assert "sandbox-ready" in out.split() and "mounts-done" in out.split(), (launcher, out)
-
-        # The mount helper's refusals and their controls, through a copy of
-        # each plain with one more mount (the characterization subtest's).
-        # Beyond the characterization's cases: an exact source through a
-        # symlink (flong-mount.c:129-130) and a following one
-        # (:121); a protected path reached through a symlink (:97-110); an
-        # overlay whose lower is a symlink, tmpfs sizes and owners, and the
-        # sort's order ('-' before '/', :501-504), made on the workspace, a
-        # host bind, as the payload (:279-291), whose owner and mode the host
-        # shows after, and refused there where the caller may not write;
-        # masks of a directory and a file, and over nothing
-        # (:411-415); a name made under read-only sysfs (:473 first); and a
-        # directory made in home (:332-341). `after` runs as root after each
-        # run, and its output is compared too.
-        machine.succeed("mkdir /srv/work/adir && echo file > /srv/work/afile")
-        machine.succeed("ln -s /srv/lower /srv/lnk && ln -s /srv/protected /srv/plink")
-        FAILED = "flong-launch: the session's mounts failed; the payload does not run\nrc=125\n"
-        machine.succeed("mkdir /srv/work/mine && chown alice:users /srv/work/mine")
-        MADE = ("stat -c '%n %U %G %a' /srv/work/mine/o /srv/work/mine/t /srv/work/mine/t-x && "
-                "rm -r /srv/work/mine/o /srv/work/mine/t /srv/work/mine/t-x && test -z \"$(ls -A /srv/work/mine)\"")
-        TMPFS = ("cat /srv/work/mine/o/seed; echo; echo n > /srv/work/mine/o/n && echo ovl-written; "
-                 "stat -c '%n %a %u %g' /srv/work/mine/t /srv/work/mine/t/b /srv/work/mine/t-x; "
-                 "awk '$5 ~ /^[/]srv[/]work[/]mine[/]t/ { m = $5 \" \" $6; sub(/.* - /, \"\"); print m, $0 }' /proc/self/mountinfo")
-        for tokens, payload, want, after in (
-            ("", "echo ok", "ok\nrc=0\n", ""),
-            ("mount bind-ro /srv/work/adir /srv/lower", "cat /srv/work/adir/seed; echo", "from-the-lower-layer\nrc=0\n", ""),
-            ("mount bind-ro /srv/work /srv/lower", "echo ok", None, ""),
-            ("mount bind-ro /srv/work/adir /srv/work/afile", "echo ok", None, ""),
-            ("mount bind-ro /srv/work/afile/x /srv/lower", "echo ok", None, ""),
-            ("mount bind-ro /srv/work/afile /srv/lower", "echo ok", None, ""),
-            ("mount bind-ro-exact /srv/work/adir /srv/lnk", "echo ok",
-             "flong-launch: a symlink is on the way to /srv/lnk\n" + FAILED, ""),
-            ("mount bind-ro /srv/work/adir /srv/lnk", "cat /srv/work/adir/seed; echo", "from-the-lower-layer\nrc=0\n", ""),
-            ("protect /srv/protected mount bind-ro /srv/work/adir /srv/plink", "echo ok",
-             "flong-launch: the mount source /srv/plink is, holds or lies inside /srv/protected, "
-             "which no session may reach\n" + FAILED, ""),
-            ('mount tmpfs /srv/work/t 0755 "" root', "echo ok",
-             "flong-launch: cannot make /srv/work/t: Permission denied\n" + FAILED, "test ! -e /srv/work/t && echo none"),
-            ('mount overlay /srv/work/mine/o /srv/lnk mount tmpfs /srv/work/mine/t/b 0700 "" root '
-             'mount tmpfs /srv/work/mine/t-x 0750 1m user mount tmpfs /srv/work/mine/t 0755 "" root', TMPFS, "", MADE),
-            ("mount mask /srv/work/adir", "ls /srv/work/adir; stat -c '%a %F' /srv/work/adir", "", ""),
-            ("mount mask /srv/work/afile", "cat /srv/work/afile; stat -c '%a %F' /srv/work/afile", "", ""),
-            ("mount mask /srv/work/nothing", "echo ok",
-             "flong-launch: /srv/work/nothing: No such file or directory\n" + FAILED, "test ! -e /srv/work/nothing && echo none"),
-            ('mount tmpfs /sys/flong-x 0755 "" root', "echo ok", None, ""),
-            ('mount tmpfs /home/alice/deep/t 0755 "" root', "stat -c '%n %a %u %g' /home/alice/deep /home/alice/deep/t", "",
-             "test ! -e /home/alice/deep && echo none"),
-        ):
-            line = f"spec+=({tokens})"
-            for base in ("plain", "/tmp/cmount/plain"):
-                name = "/tmp/cmount/extra-" + ("zig" if base == "plain" else "c")
-                machine.succeed(
-                    f"sed '/^exec \"\\$launcher\" /i {line}' \"$(readlink -f \"$(command -v {base})\")\" > {name} && "
-                    f"chmod 755 {name} && test \"$(grep -cxF {shlex.quote(line)} {name})\" = 1")
-            outs = []
-            for which in ("zig", "c"):
-                o = machine.succeed(as_user(f"/tmp/cmount/extra-{which} {shlex.quote(payload)} 2>&1; echo rc=$?"))
-                o = "".join(l + "\n" for l in o.splitlines() if l != GATE)
-                if after:
-                    o += "after:\n" + machine.succeed(after)
-                outs.append(o)
-            zig, c = outs
-            assert zig == c, (tokens, zig, c)
-            print(f"helpers agree on {tokens!r}: {zig!r}")
-            said = zig.split("after:\n")[0]
-            if want is None:
-                assert said.endswith(FAILED), (tokens, zig)
-            elif want:
-                assert said == want, (tokens, zig)
-            else:
-                assert said.endswith("rc=0\n"), (tokens, zig)
-        machine.succeed("test -z \"$(ls -A /srv/work/adir)\" && test \"$(cat /srv/work/afile)\" = file")
-        machine.succeed("rm -r /srv/work/adir /srv/work/afile /srv/work/mine /srv/lnk /srv/plink /tmp/cmount/extra-zig /tmp/cmount/extra-c")
-
-        # The declaration's mounts: binds read-only and read-write, a space
-        # in both paths, tmpfs modes and owners, an overlay (a dir lower),
-        # a mask and its rename, a device, the caller's binds, ~/tmp.
-        out = both("mounts " + shlex.quote(
-            "pwd; "
-            "cat '/data ro/marker'; "
-            "touch '/data ro/new' 2>/dev/null && echo ro-writable || echo ro-refused; "
-            "touch /srv/work/new 2>/dev/null && echo ws-writable || echo ws-refused; "
-            "echo from-session > /rw/written && echo rw-written; "
-            "cat /rw/secret 2>&1; "
-            "stat -c 'mode %n %a %u %g' /scratch /sticky /rootish /ovl /rw /srv/companion \"$HOME/tmp\"; "
-            "cat /ovl/seed; echo; echo new > /ovl/added && echo ovl-written; "
-            "echo x > /dev/null && echo devnull-ok; "
-            "mv /rw/secret /rw/secret.real 2>/dev/null && echo moved || echo move-refused; "
-            "echo decoy > /rw/secret 2>/dev/null && echo written || echo write-refused; "
-            "awk '$5 != \"/\" { print $5, $6 }' /proc/self/mountinfo | sort; "
-            "touch /srv/companion/from-session && echo companion-written; "
-            "touch \"$HOME/tmp/t\" && echo hometmp-ok"))
-        for want in ("ro-refused", "ws-refused", "rw-written", "from-the-lower-layer", "ovl-written",
-                     "devnull-ok", "move-refused", "write-refused", "companion-written", "hometmp-ok", "rc=0"):
-            assert want in out.splitlines(), (want, out)
-        assert "should-be-masked" not in out, out
-        machine.succeed("grep -qx should-be-masked /srv/rw/secret")
-
-        # The protected paths, and the workspace among them.
-        for path in ("/run/user/1000", "/run/user/1000/flong", "/srv/protected", "/srv"):
-            out = both(f"FLONG_TEST_BIND={path} mounts true")
-            assert "which no session may reach" in out and out.endswith("rc=125\n"), (path, out)
-        out = both("cd /run/user/1000 && plain true")
-        assert "which no session may reach" in out and out.endswith("rc=125\n"), out
-
-        # A symlink in the prepared root, and nothing made on the host.
-        out = both("esc true")
-        assert "a symlink is on the way" in out and out.endswith("rc=125\n"), out
-        machine.succeed("test -z \"$(ls -A /srv/race/view)\"")
-
-        # The swap race under the C helper, as under the Zig one above.
-        out = machine.succeed(as_user("PATH=/tmp/cmount:$PATH; command -v plain race; race-mounts 20"))
-        lines = out.splitlines()
-        assert lines[:2] == ["/tmp/cmount/plain", "/tmp/cmount/race"], out
-        lines = lines[2:]
-        assert lines[-1] == "a=143" and len(lines) == 41, out
-        assert set(lines[:-1]) <= {"refused", "contained"}, out
-        print(f"swap race, the C helper: {lines.count('refused')} refused, {lines.count('contained')} contained")
-        machine.succeed("test -z \"$(ls -A /srv/race/view)\"")
-        machine.succeed("rm -r /tmp/cmount")
 
     # The Seccomp_filters count a payload sees: the stack its launcher
     # installed, as the kernel reports it.

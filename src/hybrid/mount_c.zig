@@ -1,7 +1,8 @@
 //! mount_c.zig: the mount-helper shim (ZIG.md, "The mount-helper shim"),
 //! the root of libflong-mount.a, which the C launcher links. Its one
 //! export, flong_mount_main, is what flong-launch.c:553 calls in the
-//! fl_fork child where it called `_exit(mount_run(&job))`.
+//! fl_fork child where it called `_exit(mount_run(&job))`. flong-mount.c
+//! was deleted in phase 4 (b); its line numbers here are those of a7919be.
 //!
 //! No Zig start code runs: the child is the C launcher's, on its stack, in
 //! its copy of memory. This file sets what a root sets (msg's program name,

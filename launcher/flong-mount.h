@@ -80,12 +80,13 @@ struct fl_mount_job {
 	size_t nprotect;
 };
 
-/* The mount helper's whole life. Runs in the forked child (setns into a user
- * namespace is one-way, so it cannot run in the launcher) and returns its
- * exit status: 0 when every mount, /sys and /run are done, 1 after printing
- * why not. The launcher calls _exit(mount_run(&job)) and waits for the
- * helper's pidfd; the gate opens only on 0. */
-int mount_run(const struct fl_mount_job *job);
+/* The mount helper's whole life, in Zig (src/mount.zig, through
+ * src/hybrid/mount_c.zig). Runs in the forked child (setns into a user
+ * namespace is one-way, so it cannot run in the launcher) and ends it: 0
+ * when every mount, /sys and /run are done, 1 after printing why not, 125
+ * on an internal error. tracing is the launcher's fl_tracing. The launcher
+ * calls it in its fl_fork child and waits for the helper's pidfd; the gate
+ * opens only on 0. */
 _Noreturn void flong_mount_main(const struct fl_mount_job *job, int tracing);
 
 #endif

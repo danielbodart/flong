@@ -146,17 +146,15 @@ let
   # newgidmap are NixOS's setuid wrappers, which have no store path. -Werror
   # with the cc-wrapper's hardening.
   # FLONG_INIT names the Zig flong-init installed beside it, in the same
-  # $out, so it is given as a shell word expanding $out; the check-only C
-  # variant (cmount) names the launcher's.
-  cflagsWithInit = init: ''
+  # $out, so it is given as a shell word expanding $out.
+  launcherCflags = ''
     -std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror
     -DFLONG_BWRAP='"${pkgs.bubblewrap}/bin/bwrap"'
     -DFLONG_PASTA='"${pkgs.passt}/bin/pasta"'
     -DFLONG_NEWUIDMAP='"/run/wrappers/bin/newuidmap"'
     -DFLONG_NEWGIDMAP='"/run/wrappers/bin/newgidmap"'
-    -DFLONG_INIT="\"${init}/bin/flong-init\""
+    -DFLONG_INIT="\"$out/bin/flong-init\""
   '';
-  launcherCflags = cflagsWithInit "$out";
 
   # flong-launch, flong-sweeper and flong-init side by side in one $out
   # (tests/rootless.nix:636-641 finds the sweeper beside the launcher):
@@ -194,7 +192,7 @@ let
       [[ $(awk '$1 == "GNU_STACK" { print $6 }' $TMPDIR/init.phdrs) == 0x000000 ]]
 
       # The mount helper: the archive (src/hybrid/mount_c.zig), then the C
-      # launcher linked with it in place of flong-mount.c.
+      # launcher linked with it.
       TERM=dumb zig build mountlib -j$NIX_BUILD_CORES $zigDefaultCpuFlag $zigDefaultOptimizeFlag --prefix $TMPDIR/mountlib
       mountlib=$TMPDIR/mountlib/lib/libflong-mount.a
       cd launcher
@@ -209,14 +207,14 @@ let
     '';
   };
 
-  # The clash check (ZIG.md, "The mount-helper shim"; P5's, on the real
-  # link), in the launcher's build, before Nix's fixup strips anything:
-  # the archive exports flong_mount_main alone and needs nothing but what
-  # glibc supplies; the launcher defines none of the names compiler-rt
-  # would have taken from glibc, and takes memcpy, memset and
-  # __stack_chk_fail from it. The launcher's symbol table is read once and
-  # must hold flong_mount_main and main, so a stripped binary cannot pass by
-  # listing nothing.
+  # The clash check (ZIG.md, "The mount-helper shim"; phase 0's P5 made it
+  # on a proof's archive, this on the real link), in the launcher's build,
+  # before Nix's fixup strips anything: the archive exports flong_mount_main
+  # alone and needs nothing but what glibc supplies; the launcher defines
+  # none of the names compiler-rt would have taken from glibc, and takes
+  # memcpy, memset and __stack_chk_fail from it. The launcher's symbol
+  # table is read once and must hold flong_mount_main and main, so a
+  # stripped binary cannot pass by listing nothing.
   clashCheck = ''
     nm -g --defined-only $mountlib | awk 'NF == 3 { print $2, $3 }' > $TMPDIR/mount.globals
     echo "libflong-mount.a, $(stat -c %s $mountlib) bytes, defines: $(cat $TMPDIR/mount.globals)" >&2
@@ -326,8 +324,7 @@ let
     # aarch64 from x86_64 (P6's pieces, ZIG.md "Phase 2"): flong-seccomp
     # compiled and not linked, since the flake has no aarch64 libseccomp
     # here; tests/zig/abi.zig's aarch64 half, and its controls, each plant
-    # failing the build naming what differs on both arches; and P5's archive
-    # for aarch64 with its clash check (tests/proofs/p5); flong-init for
+    # failing the build naming what differs on both arches; flong-init for
     # aarch64 with a dummy tini, the launcher set's Zig; and the mount
     # library for aarch64, its symbols checked as the launcher's build
     # checks x86_64's (the aarch64 C link is unchecked, ZIG.md "The
@@ -378,42 +375,11 @@ let
           grep -ho 'error: abi: .*' plant-*.log | sort -u | tee $out/plants >&2
         '';
       };
-      p5 = (import ./tests/proofs/p5 { inherit pkgs lib zigSet; }).aarch64;
     };
-  };
-  # flong-launch-cmount (ZIG.md, "The mount-helper shim"; phase 4 (a)
-  # only): the C launcher with the C mount helper, flong-mount.c, and
-  # tests/cmount-shim.c for flong_mount_main, whose body is
-  # `fl_tracing = tracing; _exit(mount_run(job));`. Built for
-  # tests/rootless.nix's transition subtest, never an output; its
-  # flong-init is the launcher's.
-  cmount = pkgs.stdenv.mkDerivation {
-    pname = "flong-launch-cmount";
-    version = "0";
-    src = lib.fileset.toSource {
-      root = ./.;
-      fileset = lib.fileset.unions [
-        (lib.fileset.fileFilter (f: f.hasExt "c" || f.hasExt "h") ./launcher)
-        ./tests/cmount-shim.c
-      ];
-    };
-    dontConfigure = true;
-    buildPhase = ''
-      runHook preBuild
-      mkdir -p $out/bin
-      cd launcher
-      cflags=(${cflagsWithInit "${launcher}"})
-      $CC "''${cflags[@]}" -I. -o $out/bin/flong-launch-cmount flong-launch.c flong-spec.c flong-ns.c \
-        flong-cgroup.c flong-record.c flong-mount.c flong-tty.c flong-util.c ../tests/cmount-shim.c
-      cd ..
-      runHook postBuild
-    '';
-    dontInstall = true;
   };
 in
 {
   inherit
-    cmount
     zigSet
     zigDeps
     deps

@@ -1,7 +1,0 @@
-.{
-    .name = .p5_hybrid,
-    .version = "0.0.0",
-    .fingerprint = 0x26c5eaac6060959b,
-    .minimum_zig_version = "0.15.2",
-    .paths = .{ "build.zig", "build.zig.zon", "src" },
-}
