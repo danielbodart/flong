@@ -1,0 +1,2 @@
+default allow
+errno 1 read a0:eq:1 a0:ne:2

@@ -1,0 +1,2 @@
+default allow
+errno 1 read a0:eq:0 a0:eq:1 a0:eq:2 a0:eq:3 a0:eq:4 a0:eq:5 a0:eq:6 a0:eq:7 a0:eq:8 a0:eq:9 a0:eq:10 a0:eq:11 a0:eq:12 a0:eq:13

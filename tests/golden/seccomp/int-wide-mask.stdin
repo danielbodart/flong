@@ -1,0 +1,2 @@
+default allow
+errno 1 kill a0:masked_eq:1:0x100000000

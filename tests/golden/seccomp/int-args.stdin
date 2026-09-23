@@ -1,0 +1,11 @@
+default allow
+errno 1 ioctl a0:masked_eq:1:0xffffffff a1:masked_eq:0x5412:0xffffffff
+errno 1 fcntl a1:masked_eq:4:0xffffffff
+errno 97 socket a0:masked_eq:16:0xffffffff a1:masked_eq:1:0xf a2:masked_eq:9:0xffffffff
+errno 1 socketpair a0:masked_eq:1:0xffffffff
+errno 1 setns a1:masked_eq:0:0
+errno 1 prctl a0:masked_eq:22:0xffffffff a1:gt:1
+errno 1 personality a0:masked_eq:0:0xffffffff
+errno 1 kill a1:masked_eq:9:0xffffffff
+errno 1 tgkill a2:masked_eq:9:0xffffffff
+errno 1 ioctl a2:eq:7

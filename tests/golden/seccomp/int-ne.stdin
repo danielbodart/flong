@@ -1,0 +1,2 @@
+default allow
+errno 1 socket a2:ne:9

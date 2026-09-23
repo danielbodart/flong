@@ -1,0 +1,2 @@
+default allow
+errno 1 mmap a0:eq:1_0

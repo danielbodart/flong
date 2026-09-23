@@ -1,0 +1,2 @@
+default allow
+allow read a0:eq:1

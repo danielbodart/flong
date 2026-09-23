@@ -1,0 +1,2 @@
+default allow
+errno 4096 read

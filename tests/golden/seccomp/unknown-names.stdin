@@ -1,0 +1,5 @@
+default 1
+errno 1 no_such_call
+allow read
+allow another_unknown a0:eq:1
+allow no_such_call

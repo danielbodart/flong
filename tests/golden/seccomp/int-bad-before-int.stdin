@@ -1,0 +1,2 @@
+default allow
+errno 1 fcntl a1:eq:4 a1:eq:x

@@ -1,0 +1,8 @@
+default allow
+errno 1 mmap a0:eq:1
+errno 2 mprotect a1:ne:2
+errno 3 munmap a1:lt:3
+errno 4 brk a0:le:4
+errno 5 read a2:gt:5
+errno 6 write a2:ge:6
+errno 7 openat a2:masked_eq:0x40:0xc0

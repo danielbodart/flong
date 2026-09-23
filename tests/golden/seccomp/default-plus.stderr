@@ -1,0 +1,1 @@
+flong-seccomp: line 1: default is neither allow nor an errno from 1 to 4095: +1

@@ -50,6 +50,10 @@
           # The seccomp compiler, built with -Werror.
           seccomp = import ./seccomp { inherit pkgs; };
 
+          # flong's programs against cases recorded from the C, byte for
+          # byte: stdout, stderr, status, and filters (tests/golden.nix).
+          golden = import ./tests/golden.nix { inherit pkgs; };
+
           # A refusal happens at evaluation, so it is checked by evaluating: each
           # declaration below must trip the assertion it is about, and the
           # baseline must trip none of flong's. Evaluation only -- no system is
@@ -365,6 +369,16 @@
             imports = [ ./tests/bench.nix ];
           };
         });
+
+      # golden-update rewrites tests/golden's .bpf files and LIBSECCOMP
+      # after a libseccomp bump, and refuses anything else: run it from the
+      # repository's root (tests/golden.nix says when it may be used). The
+      # .bpf files are x86_64's filters, so it is x86_64's alone.
+      apps.x86_64-linux.golden-update = {
+        type = "app";
+        program = "${self.checks.x86_64-linux.golden.update}/bin/golden-update";
+        meta.description = "Rewrite tests/golden's filters after a libseccomp bump";
+      };
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);
     };

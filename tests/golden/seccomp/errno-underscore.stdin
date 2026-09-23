@@ -1,0 +1,2 @@
+default allow
+errno 1_0 read

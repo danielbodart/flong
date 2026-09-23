@@ -1,0 +1,6 @@
+default allow
+# socket(AF_NETLINK, *, NETLINK_AUDIT) fails with EAFNOSUPPORT, as under nspawn,
+# so a payload cannot read or write the host's audit log. The kernel reads
+# both arguments as ints, so only their low 32 bits are compared: nspawn's own
+# `eq` rule is bypassed by setting any of bits 32-63.
+errno 97 socket a0:masked_eq:16:0xffffffff a2:masked_eq:9:0xffffffff

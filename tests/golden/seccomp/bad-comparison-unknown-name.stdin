@@ -1,0 +1,2 @@
+default allow
+errno 1 no_such_call a0:eq:x

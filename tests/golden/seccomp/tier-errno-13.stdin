@@ -1,0 +1,36 @@
+default 38
+allow read
+allow write
+allow open
+allow close
+allow stat
+allow fstat
+allow lstat
+allow poll
+allow lseek
+allow mmap
+allow mprotect
+allow munmap
+allow brk
+allow rt_sigaction
+allow rt_sigprocmask
+allow rt_sigreturn
+allow ioctl
+allow pread64
+allow pwrite64
+allow readv
+errno 13 ptrace
+errno 13 kexec_load
+errno 13 init_module
+errno 13 delete_module
+errno 13 reboot
+errno 13 swapon
+errno 13 swapoff
+errno 13 mount
+errno 13 umount2
+errno 13 pivot_root
+errno 13 acct
+errno 13 settimeofday
+errno 13 bpf
+errno 13 perf_event_open
+errno 4094 keyctl

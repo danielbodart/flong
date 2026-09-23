@@ -1,0 +1,12 @@
+default allow
+# Terminal ioctls a session must never issue on a terminal it shares with the caller.
+# ioctl's request is arg1; the kernel truncates it to 32 bits (unsigned int cmd), so compare
+# only the low 32 bits: an `eq` rule is bypassed by setting any of bits 32-63.
+# TIOCSTI: push bytes into the terminal's input queue (types commands into the caller's shell)
+errno 1 ioctl a1:masked_eq:0x5412:0xffffffff
+# TIOCLINUX: VT subcommands, incl. TIOCL_PASTESEL (paste selection = inject input) on a VT
+errno 1 ioctl a1:masked_eq:0x541c:0xffffffff
+# TIOCSETD: change line discipline (loads n_hdlc/n_gsm/... - kernel attack surface; wrecks the caller's tty)
+errno 1 ioctl a1:masked_eq:0x5423:0xffffffff
+# TIOCCONS: redirect kernel console output to this tty
+errno 1 ioctl a1:masked_eq:0x541d:0xffffffff

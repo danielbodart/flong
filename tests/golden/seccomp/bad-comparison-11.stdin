@@ -1,0 +1,2 @@
+default allow
+errno 1 mmap a0:masked_eq:1:x

@@ -1,0 +1,82 @@
+default 38
+allow read
+allow write
+allow open
+allow close
+allow stat
+allow fstat
+allow lstat
+allow poll
+allow lseek
+allow mmap
+allow mprotect
+allow munmap
+allow brk
+allow rt_sigaction
+allow rt_sigprocmask
+allow rt_sigreturn
+allow ioctl
+allow pread64
+allow pwrite64
+allow readv
+allow writev
+allow access
+allow pipe
+allow select
+allow sched_yield
+allow mremap
+allow msync
+allow mincore
+allow madvise
+allow dup
+allow dup2
+allow pause
+allow nanosleep
+allow getitimer
+allow alarm
+allow setitimer
+allow getpid
+allow sendfile
+allow socket
+allow connect
+allow accept
+allow sendto
+allow recvfrom
+allow exit
+allow wait4
+allow kill
+allow uname
+allow fcntl
+allow flock
+allow fsync
+allow fdatasync
+allow truncate
+allow ftruncate
+allow getdents
+allow getcwd
+allow chdir
+allow fchdir
+allow rename
+allow mkdir
+allow rmdir
+allow openat
+allow newfstatat
+allow exit_group
+allow execve
+allow clone3
+allow futex
+allow set_robust_list
+errno 1 ptrace
+errno 1 kexec_load
+errno 1 init_module
+errno 1 delete_module
+errno 1 reboot
+errno 1 swapon
+errno 1 swapoff
+errno 1 mount
+errno 1 umount2
+errno 1 pivot_root
+errno 1 acct
+errno 1 settimeofday
+errno 1 bpf
+errno 1 perf_event_open

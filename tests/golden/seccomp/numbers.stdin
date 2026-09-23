@@ -1,0 +1,8 @@
+default allow
+errno 010 mmap a0:eq:010
+errno 1 mprotect a0:eq:0b1
+errno 1 munmap a0:eq:0x10
+errno 1 brk a0:eq:0X1f
+errno 1 read a0:eq:00
+errno 1 write a0:eq:18446744073709551615
+errno 1 pread64 a0:masked_eq:0xffffffffffffffff:0xffffffffffffffff

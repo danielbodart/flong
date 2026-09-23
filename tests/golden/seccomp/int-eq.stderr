@@ -1,0 +1,1 @@
+flong-seccomp: line 2: an int argument needs masked_eq with a mask of at most 0xffffffff: a1:eq:0x5412

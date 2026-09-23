@@ -1,0 +1,1 @@
+flong-seccomp: line 3: the first directive must be `default N|allow`: errno

@@ -1,0 +1,2 @@
+default allow
+errno 1 ioctl a1:eq:0x5412

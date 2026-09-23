@@ -1,0 +1,4 @@
+default allow
+errno 1 spu_run
+errno 1 spu_run
+errno 2 subpage_prot
