@@ -655,6 +655,21 @@ in
         assert "xdg=/run/user/1000" in names, out
         assert "launcher-start" in out, out
 
+    with subtest("the caller's RLIMIT_STACK reaches the payload unchanged"):
+        # ZIG.md quirk 20: nothing between the caller and the payload (the
+        # wrapper, flong-launch, bwrap, flong-init, tini) sets it.
+        out = machine.succeed(as_user("ulimit -s 4096; plain 'ulimit -s'"))
+        assert out == "4096\n", out
+        # The soft limit alone, the hard one left as it was: a program that
+        # raised the soft limit toward the hard one (Zig's default start code
+        # sets 16 MiB, ZIG.md "Measured", P2) would show here and not above.
+        out = machine.succeed(as_user("ulimit -S -s 4096; ulimit -H -s; plain 'ulimit -S -s; ulimit -H -s'")).split()
+        assert len(out) == 3 and out[1:] == ["4096", out[0]], out
+        # The control: another value arrives as itself, so the one above is
+        # not a constant of the session.
+        out = machine.succeed(as_user("ulimit -s 6144; plain 'ulimit -s'"))
+        assert out == "6144\n", out
+
     with subtest("a hook without a network"):
         machine.succeed("rm -f /tmp/poststart-* /tmp/poststop-*")
         out = machine.succeed(as_user("hooked 'tail -n +2 /proc/net/route | wc -l'"))

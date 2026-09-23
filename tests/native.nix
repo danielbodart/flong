@@ -11,6 +11,8 @@
 
 let
   integration = import ./integration.nix { pkgs = hostPkgs; };
+  # The launcher's output, for its flong-init (launcher/flong-init.c).
+  launcher = import ../launcher { pkgs = hostPkgs; };
 in
 {
   name = "flong-native";
@@ -70,5 +72,31 @@ in
         out = machine.succeed(as_alice(
             "unshare --user --map-auto --map-root-user cat /proc/self/uid_map")).split()
         assert out[:2] == ["0", "1000"] and "100000" in out and "65536" in out, out
+
+    with subtest("flong-init past its argv: the gate's EOF, and a failing chdir printed whole"):
+        # What golden's init set cannot reach (tests/golden.nix): as root of
+        # a namespace newuidmap made, setgroups and the capability drop
+        # succeed, as in the launcher's U1 (flong-init.c:195-201). GATE is 4,
+        # reading GATE_FILE; READY is 5, writing to /dev/null; no groups,
+        # terminal or trace. Prints stderr and the status as the last line.
+        def init_run(gate_file, dir):
+            return machine.succeed(as_alice(
+                "unshare --user --map-auto --map-root-user -- "
+                f"${launcher}/bin/flong-init 4 5 - - - {shlex.quote(dir)} -- true "
+                f"4<{gate_file} 5>/dev/null 2>&1; echo rc=$?"))
+
+        machine.succeed("printf g > /tmp/init-gate && chmod 644 /tmp/init-gate")
+        # The gate closed without its byte (:214-215).
+        out = init_run("/dev/null", "/")
+        assert out == "flong-init: the gate closed without opening: not starting the payload\nrc=125\n", out
+        # The gate open, DIR missing (:217-218): the message is over 1 KiB
+        # and printed whole (ZIG.md quirk 22), then too long a DIR.
+        for dir, text in (("/nonexistent/" + "/".join(["d" * 200] * 6), "No such file or directory"),
+                          ("/" + "/".join(["d" * 200] * 21), "File name too long")):
+            out = init_run("/tmp/init-gate", dir)
+            assert len(dir) > 1024 and out == f"flong-init: changing to {dir}: {text}\nrc=125\n", out
+        # The control: the gate open, DIR there, tini runs the payload.
+        out = init_run("/tmp/init-gate", "/tmp")
+        assert out.endswith("rc=0\n"), out
   '' + lib.concatMapStrings (p: "\n# ${p.name}\n" + p.script) integration.vm.vmScripts;
 }

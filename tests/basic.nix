@@ -731,6 +731,17 @@ in
           out = machine.succeed(by_caller("${launcher} 'true' 2>&1"))
           assert out == "", out
 
+      with subtest("the payload holds descriptors 0-2 and nothing else"):
+          # flong-init closes everything above stderr before it execs tini
+          # (flong-init.c:219-220): bwrap leaks its namespace descriptors,
+          # and the seccomp and pipe ends reach it too. The `; true` keeps
+          # bash from exec'ing ls, so ls lists the payload's own table, $$.
+          out = machine.succeed(by_caller("${launcher} 'ls /proc/$$/fd; true'"))
+          assert out.split() == ["0", "1", "2"], out
+          # The control: a descriptor the payload opens itself is listed.
+          out = machine.succeed(by_caller("${launcher} 'exec 7</dev/null; ls /proc/$$/fd; true'"))
+          assert out.split() == ["0", "1", "2", "7"], out
+
       with subtest("nothing in the session runs as root"):
           # pid 1 is tini, and the engine drops before starting it, so there is
           # no process in here for a root phase to have belonged to. That no
