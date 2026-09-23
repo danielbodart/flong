@@ -1059,10 +1059,11 @@ version skew shows in the build log. It is built ReleaseSafe and checked by
 output unless the whole policy is accepted.
 
 **Groups** are expanded at build time from one
-`systemd-analyze syscall-filter` dump of `config.systemd.package`, by an awk
-expander. That works in the Nix build sandbox and matches the host's own
-groups. An unknown group or name fails the build. Nothing at launch calls
-`systemd-analyze`.
+`systemd-analyze syscall-filter` dump of `config.systemd.package`, by the
+compiler's `expand`, and `render` turns the names into the tier's policy.
+That works in the Nix build sandbox and matches the host's own groups. An
+unknown group or name fails the build. Nothing at launch calls
+`systemd-analyze`: a project's policy is expanded against the same dump.
 
 **The stack**, each filter passed with its own `--add-seccomp-fd` (bwrap
 refuses that together with `--seccomp`), in this order:
@@ -1127,10 +1128,10 @@ removed). chase evaluates a project's envelope there, sends any loosening
 through its approver, and prints the result. The fixed filters stay, the tty
 filter included.
 
-The result is compiled at launch and cached under
-`$XDG_RUNTIME_DIR/flong/seccomp/<hash>.bpf`, keyed by exactly what is compiled
-and by which compiler, so a new compiler makes new filters. It measured 37 ms
-cold and a hash warm. A policy that prints nothing
+The result is compiled at launch by `flong-seccomp project`, in one process,
+and cached under `$XDG_RUNTIME_DIR/flong/seccomp/<hash>.bpf`, keyed by exactly
+what is compiled and by which compiler, so a new compiler makes new filters.
+It measured 32 ms cold and 3 ms warm. A policy that prints nothing
 compiles nothing, so the warm path stays builtins-only. It needs a tier to act
 on, and it is a consistency check in the way `guard` is: the caller can run
 `flong-launch` with any filter.

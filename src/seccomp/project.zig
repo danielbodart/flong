@@ -27,7 +27,7 @@
 //! printed (quirk 34). On a refusal the temp file is unlinked, exit 1.
 //!
 //! seccomp/policy.nix's line numbers here are those of 0dc291c, before the
-//! port (tests/seccomp-tools-transition/old.nix keeps its code).
+//! port; the bash was deleted in phase 2 (b).
 
 const std = @import("std");
 const sys = @import("sys");

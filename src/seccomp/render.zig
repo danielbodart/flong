@@ -16,7 +16,7 @@
 //! its lines, its two warnings, and exit 1 under the script's pipefail.
 //!
 //! seccomp/policy.nix's line numbers here are those of 0dc291c, before the
-//! port (tests/seccomp-tools-transition/old.nix keeps its code).
+//! port; the bash was deleted in phase 2 (b).
 
 const std = @import("std");
 const sys = @import("sys");

@@ -23,9 +23,8 @@
 //! next operand with a record the dump (`FNR == NR`, :7); a `var=value`
 //! operand is a file here, not an assignment.
 //!
-//! seccomp/policy.nix's line numbers here are those of 0dc291c, before the
-//! port; its code is kept in tests/seccomp-tools-transition/old.nix until
-//! phase 2 (b).
+//! seccomp/expand.awk and seccomp/policy.nix's line numbers here are those
+//! of 0dc291c, before the port; the awk and bash were deleted in phase 2 (b).
 
 const std = @import("std");
 const sys = @import("sys");

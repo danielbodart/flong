@@ -62,11 +62,6 @@
           # byte: stdout, stderr, status, and filters (tests/golden.nix).
           golden = import ./tests/golden.nix { inherit pkgs; };
 
-          # ZIG.md phase 2 (a): flong-seccomp's expand, render and project
-          # against the awk and bash they replace, over the live dump.
-          # Deleted with the bash in phase 2 (b).
-          seccomp-tools-transition = import ./tests/seccomp-tools-transition { inherit pkgs; };
-
           # A refusal happens at evaluation, so it is checked by evaluating: each
           # declaration below must trip the assertion it is about, and the
           # baseline must trip none of flong's. Evaluation only -- no system is
