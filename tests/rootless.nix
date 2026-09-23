@@ -876,6 +876,9 @@ in
         wrapper = machine.succeed("readlink -f \"$(command -v plain)\"").strip()
         machine.succeed("mkdir /srv/work/adir && echo file > /srv/work/afile")
         GATE = "flong-init: the gate closed without opening: not starting the payload"
+        # flong-init is its namespace's pid 1, which SIGPIPE's default never
+        # kills: writing READY after the helper refused gets EPIPE, and says so.
+        READY = "flong-init: telling the launcher the root is built: Broken pipe"
         FAILED = "flong-launch: the session's mounts failed; the payload does not run"
 
         def extra_mount(tokens, payload="echo ok"):
@@ -886,11 +889,12 @@ in
                 f"test \"$(grep -cxF {shlex.quote(line)} /tmp/plain-mount)\" = 1")
             return machine.succeed(as_user(f"/tmp/plain-mount {shlex.quote(payload)} 2>&1; echo rc=$?"))
 
-        # flong-init may or may not say the gate closed before teardown
-        # kills it (flong-launch.c:792-797); nothing else may be said.
+        # flong-init may or may not say the gate closed, or that READY's
+        # reader is gone, before teardown kills it (flong-launch.c:792-797);
+        # nothing else may be said.
         def refused(tokens, message):
             out = extra_mount(tokens)
-            lines = [l for l in out.splitlines() if l != GATE]
+            lines = [l for l in out.splitlines() if l not in (GATE, READY)]
             assert lines == [f"flong-launch: {message}", FAILED, "rc=125"], (tokens, out)
 
         # The control: the copy launches, and a mount it adds lands.

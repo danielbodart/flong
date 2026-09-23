@@ -634,7 +634,7 @@ visible difference the port requires. Fixes wait for Open decisions.
 
 | # | behaviour | verdict |
 |---|---|---|
-| 1 | flong-init dies of SIGPIPE writing the ready byte after the helper died (`flong-init.c:206`, after `flong-util.c:415-416`) | Keep, `keep_sigpipe` |
+| 1 | writing the ready byte after the helper died, flong-init gets EPIPE, not SIGPIPE's death: it is its namespace's pid 1, which a default-action signal never kills; it prints `telling the launcher the root is built: Broken pipe`, or not, by timing (`flong-init.c:206`; CI run 35931207199) | Keep, `keep_sigpipe` (SIGPIPE stays default for the payload) |
 | 2 | relaunch execs the wrapper before inherited descriptors are closed, restoring SIGPIPE and the mask first (`flong-launch.c:163-175` against `:907-925`) | Keep |
 | 3 | pasta inherits `leader`, `userns`, `netns`, `machine` only when a hook ran (the `setenv` is in `run_hook` after its early return, `flong-launch.c:586-599`) | Keep: the envp is built only when a hook runs; pasta gets it then, `environ` otherwise |
 | 4 | pasta's `--netns` names the leader by pid, the hook's `$netns` the launcher's descriptor (`flong-launch.c:594` against `:643`) | Keep |
