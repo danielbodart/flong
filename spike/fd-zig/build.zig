@@ -3,6 +3,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe });
+    // The lazy dependencies are fetched only under -Ddev=true: an unguarded
+    // lazyDependency makes an offline `zig build install` fail fetching them
+    // (build_runner.zig:370), and a Nix build is offline. Without it, the
+    // steps that need them fail and say why (ZIG.md, "build.zig").
+    const dev = b.option(bool, "dev", "Enable the steps that need lazy dependencies: test, analyze") orelse false;
 
     // The probe a spawn test starts: prints what it holds and what argv named.
     const probe = b.addExecutable(.{
@@ -18,7 +23,9 @@ pub fn build(b: *std.Build) void {
     // minish is lazy, as in capsper: only the tests use it, so a plain build
     // needs no network, which a Nix derivation requires.
     const test_step = b.step("test", "Run unit and property tests");
-    if (b.lazyDependency("minish", .{ .target = target, .optimize = optimize })) |minish| {
+    if (!dev) {
+        test_step.dependOn(&b.addFail("needs -Ddev=true").step);
+    } else if (b.lazyDependency("minish", .{ .target = target, .optimize = optimize })) |minish| {
         const opts = b.addOptions();
         opts.addOptionPath("probe", probe.getEmittedBin());
         const tests = b.addTest(.{
@@ -90,7 +97,9 @@ pub fn build(b: *std.Build) void {
     // Resource models match on method name only: receiver_type and fqn do not
     // resolve a type imported from another file (checked in the spike).
     const analyze_step = b.step("analyze", "Run zwanzig on src/, and check it still catches the planted bugs");
-    if (b.lazyDependency("zwanzig", .{ .target = b.graph.host, .optimize = .ReleaseFast })) |zw| {
+    if (!dev) {
+        analyze_step.dependOn(&b.addFail("needs -Ddev=true").step);
+    } else if (b.lazyDependency("zwanzig", .{ .target = b.graph.host, .optimize = .ReleaseFast })) |zw| {
         const exe = zw.artifact("zwanzig");
         {
             const run = b.addRunArtifact(exe);
@@ -121,4 +130,24 @@ pub fn build(b: *std.Build) void {
     }
 
     b.installArtifact(probe);
+
+    // ---- cross: the probe for aarch64-linux, installed under aarch64/ ----
+    // The VM tests stay x86_64; this only proves the code builds for the
+    // other system the flake supports (ZIG.md, "Decided").
+    const cross_step = b.step("cross", "Install the probe built for aarch64-linux");
+    const probe_arm = b.addExecutable(.{
+        .name = "fd-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/probe.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux }),
+            .optimize = optimize,
+            // Stripped as every installed artifact is (ZIG.md, "build.zig"):
+            // unstripped, the binary names Zig's lib/std, and Nix's fixup
+            // strips bin/ only, not aarch64/.
+            .strip = true,
+        }),
+    });
+    cross_step.dependOn(&b.addInstallArtifact(probe_arm, .{
+        .dest_dir = .{ .override = .{ .custom = "aarch64" } },
+    }).step);
 }

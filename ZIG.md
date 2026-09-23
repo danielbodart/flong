@@ -97,6 +97,24 @@ By this plan (each detailed below):
 | zwanzig v0.15.1 | the CLI reports no leak, even on its own fixture; struct-stored resources count as escaped; with no config it catches B1-B3, B6, B8 | spike |
 | spike `fd-probe`, ReleaseSafe | unstripped 2.3 MB, 3 references to Zig's `lib/std`; stripped 51 KB, static, no libc; PT_GNU_STACK 16 MiB by default | spike |
 | libseccomp | 2.6.1; `seccomp_export_bpf` is one `write` (`api.c:760`) | port inventory (the locked tarball is inferred) |
+| `zig_0_15.fetchDeps { fetchAll = true; }` over the spike (P1) | one FOD, 2.2 MiB: minish 0.1.0, zwanzig 0.15.1 and zwanzig's own chilli 0.2.2; a symlink to `$ZIG_GLOBAL_CACHE_DIR/p` is enough; `test analyze -Ddev=true` then runs in the sandbox, zwanzig built from source; fallback not needed | this host, 2026-09-23, phase 0, `checks.integration` (p1-dev) |
+| the spike gated (P1) | `install lint compile-fail cross` pass with an empty cache, no deps and no `-Ddev`; `test` and `analyze` fail `needs -Ddev=true`; with `test` ungated, `install` fails `unable to connect to server` | same (p1-offline; the ungated plant in a scratch copy) |
+| a `b.path` outside the fileset (P1) | lazy: `install` passes from `build.zig`, `build.zig.zon` and `src/` alone; `lint` then fails naming `fdlint.zig` | same (p1-outside) |
+| Nix's fixup and Zig outputs (P1, P6) | strips `bin/` only, with `strip -S` (`fd-probe` 294,208 bytes), and no aarch64 ELF (binutils 2.46: "Unable to recognise the architecture"; `zig objcopy --strip-all`: "unimplemented"); any unstripped artifact names zig and trips `disallowedReferences`; with `.strip = true` the aarch64 `fd-probe` is 43,592 bytes | same (p1-offline, p6-spike) |
+| a no-libc root as pid 1 (P2): static, ReleaseSafe, stripped, `single_threaded`, `stack_size = 0` (17,768 bytes, PT_GNU_STACK MemSiz 0), under bwrap 0.12 `--as-pid-1` with the strict/log, audit, tty and nsmask filters | first syscall after `execve` is main's `getpid() = 1`; the control (Zig's default stack and threading) starts with `arch_prctl(ARCH_SET_FS)`, the C flong-init with `brk(NULL)`; Zig 0.15.2 accepts `stack_size = 0`, fallback not needed | this host, 2026-09-23, phase 0, `checks.native` (p2), `strace -f` |
+| audit records of the start code (P2) | none from p2-init, the control or the C flong-init (the strict tier allows `arch_prctl` and `prlimit64`, so the audit compare cannot tell them apart; the strace does); a positive control's `io_uring_setup` is logged, syscall=425 | same |
+| the pid-1 panic and RLIMIT_STACK (P2) | `flong-init: internal error: planted`, one line, 125 through bwrap; `ulimit -s 4096` reaches the exec'd `sh`; with only the soft limit at 4096 the control's child sees 16384, p2-init's 4096. bwrap ran in an `unshare --map-auto --map-root-user` namespace over `--ro-bind / /`, not the launcher's U1 and mounts | same, and `checks.integration` (p2) |
+| `std.os.linux` in 0.15.2 (P3) | no `clone3` or `setns` wrapper (raw `syscall2`, numbers 435 and 308 on x86_64); `CLONE.INTO_CGROUP` and `CLONE.PIDFD` correct | `std/os/linux.zig:5315-5348`, grep |
+| `clone3(CLONE_INTO_CGROUP\|CLONE_PIDFD)`, 88-byte args, no stack (P3) | into an `O_PATH\|O_DIRECTORY\|O_NOFOLLOW` leaf of a `Delegate=yes` unit: the child reads the leaf from `/proc/self/cgroup`, the parent stays, `waitid(P_PIDFD)` reaps; into `system.slice`: EACCES. After `setns(CLONE_NEWUSER)`: uid 0, map `0 1000 1 / 1 100000 65536`, the namespace's capabilities (`sethostname`), and `INTO_CGROUP` still lands | this host, 2026-09-23, phase 0, `checks.native` (p3) |
+| the `noreturn` fork (P3) | a `fn (u8) void` body: `expected type 'fn (u8) noreturn', found 'fn (u8) void'` (the `compile-fail` step; a `noreturn` body makes the step fail); a working body runs once and the parent's `defer` once, in the parent; a panicking body: 125, one line | same, and `checks.integration` (p3) |
+| translate-c of Zig's bundled headers (P4) | with `-target <arch>-linux-musl` it reads only Zig's `lib/libc/include`, never `pkgs.linuxHeaders` or `NIX_CFLAGS_COMPILE`; `LINUX_VERSION_CODE` 396548 (6.13.4), no `STATMOUNT_MNT_UIDMAP` | this host, 2026-09-23, phase 0, `checks.integration` (p4-abi) |
+| hand-written `extern struct`s against it (P4) | `open_how` 24, `mount_attr` 32, `mnt_id_req` VER0 24, `statmount`'s fixed part 512, `clone_args` 88, `stx_mnt_id` at 0x90 (`linux.Statx.__pad2[0]`): every field's offset and size, 28 constants and 12 syscall numbers equal on x86_64 and aarch64; the arch plant (`__NR_openat` 257 or 56) and an offset plant each fail the compile, naming the field; fallback not needed | same |
+| the mount calls under `unshare -Urm` as alice, kernel 6.18.51 (P4) | `fsopen`/`fsconfig`/`fsmount`, `move_mount`; the statx unique id stable across the move; `statmount` by it returns the id, `TMPFS_MAGIC`, `tmpfs`, the point, the parent's id, `mnt_id_old`; `mount_setattr` RDONLY then EROFS; `open_tree(OPEN_TREE_CLONE)` inherits RDONLY; `openat2` BENEATH refusals EXDEV, NO_SYMLINKS and NO_MAGICLINKS ELOOP, IN_ROOT, a 16-byte `how` EINVAL; nothing left on the host | this host, 2026-09-23, phase 0, `checks.native` (p4) |
+| the shim's library settings, linked by `$CC` with `launcher/default.nix:31-47`'s cflags and the wrapper's hardening (P5) | links: the archive's undefined symbols are `memcpy` and `memset` only, no `__zig_probe_stack`; a PIE with BIND_NOW and fortify; the clash check holds (`T proof_main` alone; the program defines no glibc name; it imports `memcpy`, `memset`, `__stack_chk_fail`). `stack_check = true` gives 3 undefined `__zig_probe_stack`; `bundle_compiler_rt = true` fails the clash check. libp5.a 70,708 bytes; fallback not needed | this host, 2026-09-23, phase 0, `checks.integration` (p5), `nm`, `readelf`; plants in a scratch copy |
+| the hybrid fork child (P5) | after `clone3(CLONE_PIDFD)` and the C's `close_range(3, keep)`: reads the pipe to EOF, fstats the kept descriptors, finds the rest EBADF, sorts, 1 MiB through `page_allocator`, a 256 KiB frame, exactly one `write`, `exit_group(0)`, no start code; a planted panic: one line, 125; the parent's heap and `malloc` intact (CoW: this shows the allocator, not isolation) | same, `strace -f`, and `checks.native` (p5) |
+| aarch64 (P6) | the spike's `install` (unstripped 2,286,120 bytes, runs under qemu-aarch64 11.1.0), P4's `p4-mount` (48,112 bytes, stripped) and ABI asserts, P5's archive (59,500 bytes, `T proof_main` alone) all build; the archive also needs `getauxval` (the page size is not comptime-known, `std/heap.zig:82`; a library leaves it extern, `std/os/linux.zig:515-525`), which glibc defines (the aarch64 C link is inferred). Under qemu `p4-mount` stops at `statmount`, NOSYS from qemu (no 457), so `statmount`, `mount_setattr`, `open_tree` and `openat2` have run on x86_64 only. `-fno-emit-bin` not needed | this host, 2026-09-23, phase 0, `checks.integration` (p6) |
+| derivation times, `nix build --rebuild` (32 cores, empty `ZIG_GLOBAL_CACHE_DIR`, each bit-identical) | a small no-libc set 6.9-9.7 s (p2-init 9.0, p3-proc 8.8-9.7, p4-mount 9.3, p5 6.9-8.8); the spike's `install` 19.6-20.4 s; p4-abi 22.8-23.1 s (the x86_64 translate-c compile 16 s); p1-dev 81.1 s (zwanzig from source); p6: 19.4, 21.6, 6.6 s | this host, 2026-09-23, phase 0 |
+| `checks.native` (one node, KVM) | 20.9-32 s wall; boot 8.2 s, multi-user.target 15.7 s; test script 16.5-19.6 s, each proof's subtest 0.2-1.7 s. Local `nix flake check`, 9 checks, partly cached: 197.9 s | this host, 2026-09-23, phase 0 |
 
 **Reporting.** CI runs after a push and trunk commits are never amended, so
 each phase's first commit reports the previous push's CI flake-check time (run
@@ -126,8 +144,9 @@ At the root, `build.zig`, `build.zig.zon`, `.zwanzig.json`, `native.nix`,
   that install depend on `b.addFail` (`flong-init.c:52-54`'s `#error`).
 - `-Ddev=true` guards every `b.lazyDependency`; without it `test` and
   `analyze` depend on `b.addFail("needs -Ddev=true")`. Installed artifacts:
-  `strip`, `single_threaded`, `stack_size = 0`; `link_libc` only for
-  `flong-seccomp` and `bpfdump`.
+  `strip` (every one, cross included: Nix's fixup strips only `bin/`, with
+  `-S`, and no aarch64 ELF, measured), `single_threaded`, `stack_size = 0`;
+  `link_libc` only for `flong-seccomp` and `bpfdump`.
 - Steps: `install`; `test` (`-Drelease=true` for ReleaseSafe); `test-libc`;
   `compile-fail`; `lint`; `fmt` as `b.addFmt(.{ .check = true, .paths = &.{
   "build.zig", "build.zig.zon", "src", "tests/zig", "tools" } })` (with no
@@ -146,7 +165,8 @@ At the root, `build.zig`, `build.zig.zon`, `.zwanzig.json`, `native.nix`,
 - **Re-exports** what the lint bans elsewhere (`argv()`, `environ()`,
   `path_max`) and `exitGroup(u8) noreturn`.
 - **Adds**, each `extern struct` or constant with a comptime assert:
-  `clone3`, `CloneArgs` (88 bytes); `close_range`; `setns`; `openat2`,
+  `clone3`, `CloneArgs` (88 bytes); `close_range`; `setns` (std wraps
+  neither `clone3` nor `setns`, measured); `openat2`,
   `OpenHow` (24), `RESOLVE_*`; `open_tree`, `move_mount`, `fsopen`,
   `fsconfig`, `fsmount`, `mount_setattr`, `MountAttr` (32); `statmount`,
   `MntIdReq` (VER0, 24), `StatMount`, `STATX_MNT_ID_UNIQUE` read at 0x90
@@ -310,9 +330,9 @@ the child (`flong-mount.c:524`). flong-seccomp: an arena over `c_allocator`.
 - **The library:** no libc, `pic`, `single_threaded`, stripped, ReleaseSafe,
   its own panic, `bundle_compiler_rt = false`, `stack_check = false`,
   `stack_protector = false`. Stack probing is what needed
-  `__zig_probe_stack` (measured); without it the remaining references
-  (`memcpy`, `memset`, integer builtins) resolve to glibc and libgcc, and
-  nothing of Zig's takes a glibc name. **The link,** in the launcher
+  `__zig_probe_stack` (measured); without it the remaining references are
+  `memcpy` and `memset`, plus `getauxval` on aarch64, all glibc's, and
+  nothing of Zig's takes a glibc name (measured, P5, P6). **The link,** in the launcher
   derivation with today's `cflags` (`launcher/default.nix:31-47`); the
   archive is never installed:
   ```
@@ -331,7 +351,9 @@ the child (`flong-mount.c:524`). flong-seccomp: an arena over `c_allocator`.
 - **The C-only variant** `flong-launch-cmount` (phase 4 (a), check-only)
   links the C with `flong-mount.c` and `tests/cmount-shim.c`, whose body is
   `fl_tracing = tracing; _exit(mount_run(job));`. **aarch64:**
-  `cross-aarch64` checks the archive's global symbols; the aarch64 C link is
+  `cross-aarch64` checks the archive's global symbols, and that it needs
+  nothing outside `memcpy`, `memset`, `memmove`, `memcmp`, `bcmp`,
+  `getauxval`; the aarch64 C link is
   unchecked in phases 4-7 (no cross C toolchain in the flake), so a failure
   there is a loud build error for that user. **L5 deletes** `src/hybrid/`,
   `adoptForeign`, `mountlib`, the layout check, `launcher/*.h`.
@@ -413,7 +435,9 @@ the child (`flong-mount.c:524`). flong-seccomp: an arena over `c_allocator`.
 - **`tests/integration.nix`**, from phase 0, never an output: `zig build
   integration` over the whole package (the proofs, then the spawn probe,
   walker, ns and pty drivers, on the branch `spec-probe`) for `checks.native`
-  and `golden`.
+  and `golden`. Phase 0's is per-proof derivations instead: it finds each
+  `spike/proofs/<pN>/default.nix` by `readDir` (`spike/proofs/README.md`),
+  for `checks.integration` and `checks.native`.
 - **`deps = pkgs.zig_0_15.fetchDeps { pname; version; src = <build.zig*>;
   fetchAll = true; hash; }`** (`fetchAll` defaults to false, fetching no lazy
   dependency, `fetcher.nix:7-12, 37`), linked into `$ZIG_GLOBAL_CACHE_DIR/p`
@@ -521,8 +545,9 @@ and `tests/integration.nix`. It records only what flong's code determines:
 against `fcntl.h`; in `tests/zig/abi.zig`, every `sys.zig` struct and
 constant against `addTranslateC` of `linux/{mount,openat2,sched,pidfd,stat,
 capability}.h`, `asm/termbits.h`, `asm/unistd.h` from Zig's bundled headers,
-for x86_64 and (in `cross-aarch64`) aarch64, asserting each took its arch's
-headers (`__NR_openat` 257 or 56); phases 4-7, `flong-mount.h`'s layout.
+for x86_64 and (in `cross-aarch64`) aarch64, each with `-target
+<arch>-linux-musl` so only Zig's headers are read, asserting each took its
+arch's headers (`__NR_openat` 257 or 56; P4's `abi_test.zig` is the model); phases 4-7, `flong-mount.h`'s layout.
 
 **`checks.native`** (one node, lingering alice with subordinate ranges,
 `systemd-run --user -p Delegate=yes`, `unshare -Urm` where needed), binaries
@@ -672,6 +697,11 @@ production code. Proofs live in `spike/proofs/`, built by a first
 - **P6, aarch64:** aarch64 builds of the spike, P4 and P5. *Fallback:*
   `-fno-emit-bin`.
 
+**Result (2026-09-23, this host):** P1-P6 pass, no fallback used; the
+answers and numbers are in Measured, the proofs in `spike/proofs/` (README
+there), the launcher and seccomp store paths unchanged. Still open for
+Accept: the `workflow_dispatch` run.
+
 **Accept:** every proof green in a `workflow_dispatch` run of the proof commit
 on a branch; the answers and that run's numbers in Measured, in the commit
 pushed to trunk; the outputs' store paths unchanged.
@@ -713,7 +743,8 @@ set; the project-launch stderr subtest.
   "${compiler}/bin/flong-seccomp" "project" "${dump}" names deny ]`. `fd.zig`
   with `file` and `dir`, its tests, property, probes and planted bugs.
 - **`spike/` moves to `~/Projects/flong-spikes-archive`** (as the rootless
-  spikes did): P1 retires (the derivations subsume it); P3 stays
+  spikes did): P1 retires (the derivations subsume it), P6 too
+  (`cross-aarch64`); P3 stays
   in `checks.native`; P2 and P5 move to `tests/proofs/` until phase 3's strace
   subtest and phase 4's clash check replace them; P4 becomes `abi.zig`, with
   its own struct copies until phase 4.
@@ -745,7 +776,9 @@ golden cases, the payload-descriptor subtest.
   true`, over tini's exec, a gate EOF (125), a failing chdir and an argv
   refusal; per path the ordered syscalls from the first `setgroups` to
   `execve` or exit, arguments normalised, are equal, and neither leaves an
-  audit record. P2 goes. **(b)** Delete `flong-init.c`, the subtest;
+  audit record; the Zig makes no syscall between its `execve` and that
+  `setgroups` (P2's check: the audit compare alone cannot see start code,
+  measured). P2 goes. **(b)** Delete `flong-init.c`, the subtest;
   DESIGN.md:1379's row.
 - **Accept:** rootless (the gate 731-751, no timeouts 622 and 1011, ^C 130
   under a pty and a pipe 957-961, TIOCSTI 944-955, log learning 963-976,

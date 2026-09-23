@@ -1,0 +1,7 @@
+.{
+    .name = .p3_proc,
+    .version = "0.0.0",
+    .fingerprint = 0x433d7964ca5b6f04,
+    .minimum_zig_version = "0.15.2",
+    .paths = .{ "build.zig", "build.zig.zon", "src", "probes" },
+}

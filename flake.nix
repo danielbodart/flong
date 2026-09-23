@@ -33,6 +33,17 @@
             imports = [ ./tests/parity.nix ];
           };
 
+          # The Zig port's proofs that need a kernel: a delegated user
+          # manager, subordinate ids, a real pid 1 (ZIG.md, "Tests").
+          native = pkgs.testers.runNixOSTest {
+            imports = [ ./tests/native.nix ];
+          };
+
+          # Every derivation of tests/integration.nix, the spike and each
+          # proof's build-sandbox assertions, never an output.
+          integration = pkgs.linkFarm "integration"
+            (import ./tests/integration.nix { inherit pkgs; });
+
           # The native launcher, built with -Werror.
           launcher = import ./launcher { inherit pkgs; };
 

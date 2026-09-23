@@ -1,0 +1,8 @@
+.{
+    .name = .p2_init,
+    .version = "0.0.0",
+    .fingerprint = 0x65c5ca8152d29d48,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{ "build.zig", "build.zig.zon", "init.zig" },
+}

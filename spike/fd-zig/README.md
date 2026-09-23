@@ -6,15 +6,17 @@ ported? `src/fd.zig` is the candidate descriptor layer. Everything else here
 exists to attack it.
 
 ```sh
-zig build test          # unit tests + the model-based property (minish)
-zig build compile-fail  # kind confusion must not compile
-zig build lint          # fdlint: raw descriptor APIs only in the syscall layer
-zig build analyze       # zwanzig: src/ clean, planted bugs still caught
-zig build test -Drelease=true   # the same in ReleaseSafe, the launcher's mode
+zig build test -Ddev=true     # unit tests + the model-based property (minish)
+zig build compile-fail        # kind confusion must not compile
+zig build lint                # fdlint: raw descriptor APIs only in the syscall layer
+zig build analyze -Ddev=true  # zwanzig: src/ clean, planted bugs still caught
+zig build cross               # the probe for aarch64-linux, in zig-out/aarch64
 ```
 
-Zig 0.15.2. minish and zwanzig are lazy dependencies, pinned to tags, so a
-plain `zig build` needs no network (the Nix derivation's constraint).
+Zig 0.15.2. minish and zwanzig are lazy dependencies, pinned to tags and
+fetched only under `-Ddev=true`, so a plain `zig build` needs no network (the
+Nix derivation's constraint); without it `test` and `analyze` fail with
+"needs -Ddev=true". spike/proofs/p1 builds all of it in the Nix sandbox.
 
 ## The design
 

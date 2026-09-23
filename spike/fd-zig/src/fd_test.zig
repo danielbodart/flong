@@ -8,6 +8,10 @@ const testing = std.testing;
 
 const probe_path = std.fmt.comptimePrint("{s}", .{options.probe});
 
+// Any file every Linux has, the Nix build sandbox included, which has no
+// /etc/hostname (spike/proofs/p1).
+const test_file = "/etc/passwd";
+
 // ---- helpers ----
 
 /// The kernel holds exactly baseline plus the table's live handles.
@@ -37,14 +41,14 @@ fn inChild(keep: []const fd.AnyFd, comptime body: fn () u8) !u8 {
 // ---- bug class 1: a stale number reaching a reused descriptor ----
 
 test "a closed handle is stale in every copy, even after its number and slot are reused" {
-    const f = try fd.openFile(null, "/etc/hostname", .{ .ACCMODE = .RDONLY });
+    const f = try fd.openFile(null, test_file, .{ .ACCMODE = .RDONLY });
     const Holder = struct { h: fd.File };
     const copy = Holder{ .h = f };
     const old_number = f.raw();
     f.close();
     try testing.expect(!copy.h.isLive());
 
-    const g = try fd.openFile(null, "/etc/hostname", .{ .ACCMODE = .RDONLY });
+    const g = try fd.openFile(null, test_file, .{ .ACCMODE = .RDONLY });
     defer g.close();
     // The kernel handed out the same number and the table the same slot:
     // with a bare int, copy would now silently name g's file.
@@ -57,9 +61,9 @@ test "a closed handle is stale in every copy, even after its number and slot are
 var stale_for_child: fd.File = undefined;
 
 test "using a stale handle panics rather than touching the reused number" {
-    stale_for_child = try fd.openFile(null, "/etc/hostname", .{ .ACCMODE = .RDONLY });
+    stale_for_child = try fd.openFile(null, test_file, .{ .ACCMODE = .RDONLY });
     stale_for_child.close();
-    const reuse = try fd.openFile(null, "/etc/hostname", .{ .ACCMODE = .RDONLY });
+    const reuse = try fd.openFile(null, test_file, .{ .ACCMODE = .RDONLY });
     defer reuse.close();
     const status = try inChild(&.{reuse.any()}, struct {
         fn body() u8 {
@@ -78,7 +82,7 @@ var dropped_for_child: fd.Dir = undefined;
 var pipe_for_child: fd.Pipe = undefined;
 
 test "a forked helper holds only what it keeps, and every other handle is stale in it" {
-    kept_for_child = try fd.openFile(null, "/etc/hostname", .{ .ACCMODE = .RDONLY });
+    kept_for_child = try fd.openFile(null, test_file, .{ .ACCMODE = .RDONLY });
     defer kept_for_child.close();
     dropped_for_child = try fd.openDir(null, "/");
     defer dropped_for_child.close();
@@ -155,7 +159,7 @@ fn expectHeldIsNamed(p: Probe) !void {
 }
 
 test "a spawned program holds exactly the descriptors its argv names" {
-    const passed = try fd.openFile(null, "/etc/hostname", .{ .ACCMODE = .RDONLY });
+    const passed = try fd.openFile(null, test_file, .{ .ACCMODE = .RDONLY });
     defer passed.close();
     const dir = try fd.openDir(null, "/");
     defer dir.close();
@@ -256,7 +260,7 @@ fn forkChildBody() u8 {
 fn step(m: *Model, op: u16) !void {
     const arg = op / 8;
     switch (op % 8) {
-        0 => if (m.nheld < m.held.len) m.add(.{ .file = try fd.openFile(null, "/etc/hostname", .{ .ACCMODE = .RDONLY }) }),
+        0 => if (m.nheld < m.held.len) m.add(.{ .file = try fd.openFile(null, test_file, .{ .ACCMODE = .RDONLY }) }),
         1 => if (m.nheld < m.held.len) m.add(.{ .dir = try fd.openDir(null, "/") }),
         2 => if (m.nheld < m.held.len) m.add(.{ .path = try fd.openPath(null, "/etc") }),
         3 => if (m.nheld + 2 <= m.held.len) {
