@@ -1,0 +1,22 @@
+.{
+    .name = .flong,
+    .version = "0.0.0",
+    // Both are lazy, fetched only under -Ddev=true (build.zig), and pinned
+    // to tags, as spike/fd-zig/build.zig.zon: a moving branch changes the
+    // hash. minish for property tests, zwanzig for static analysis.
+    .dependencies = .{
+        .minish = .{
+            .url = "https://github.com/CogitatorTech/minish/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "minish-0.1.0-SQtSTWHkAQACfz3xGuWHU8zbx320vK_47r2yto3Pq0Rf",
+            .lazy = true,
+        },
+        .zwanzig = .{
+            .url = "https://github.com/forketyfork/zwanzig/archive/refs/tags/v0.15.1.tar.gz",
+            .hash = "zwanzig-0.15.1-oiXZliOBGQA1fkoEDA6UxFdOv1ezRF5Jc9YY7uZnHjKe",
+            .lazy = true,
+        },
+    },
+    .fingerprint = 0xca830384b52ad00c,
+    .minimum_zig_version = "0.15.2",
+    .paths = .{ "build.zig", "build.zig.zon", "src", "tools", "tests/zig", ".zwanzig.json", "LICENSE" },
+}

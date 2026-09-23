@@ -29,82 +29,10 @@
 }:
 let
   inherit (pkgs) lib;
-  zig = pkgs.zig_0_15;
 
-  # One Zig package, one install set: ZIG.md "The Nix build", generalised
-  # for phase 0, where each package has its own root (the spike, a proof).
-  #
-  #   root       the directory holding build.zig and build.zig.zon
-  #   files      what else the build reads, as paths or filesets under root;
-  #              nothing else is in src, so an edit elsewhere moves nothing
-  #   steps      the `zig build` steps the installPhase runs ("install")
-  #   set        when not null, -Dset=<set> (the production package's sets)
-  #   flags      more `zig build` arguments, spliced into the shell line
-  #   deps       a fetchDeps result (zigDeps below), linked into
-  #              $ZIG_GLOBAL_CACHE_DIR/p, for -Ddev=true builds only
-  #   extra      shell run after the build, in the unpacked source; it may
-  #              write $out and fail the derivation
-  #
-  # The hook's buildPhase would be a second full build and its checkPhase
-  # runs `zig build test`, which needs -Ddev (zig setup-hook.sh:16-41,
-  # 108-110), so both are off and the one build is the installPhase. $out is
-  # created first, so a set that installs nothing still has an output.
-  zigSet =
-    {
-      pname,
-      root,
-      files ? [ ],
-      steps ? "install",
-      set ? null,
-      flags ? "",
-      deps ? null,
-      buildInputs ? [ ],
-      nativeBuildInputs ? [ ],
-      extra ? "",
-      version ? "0",
-      passthru ? { },
-    }:
-    pkgs.stdenv.mkDerivation {
-      inherit pname version buildInputs passthru;
-      src = lib.fileset.toSource {
-        inherit root;
-        fileset = lib.fileset.unions ([ (root + "/build.zig") (root + "/build.zig.zon") ] ++ files);
-      };
-      nativeBuildInputs = [ zig ] ++ nativeBuildInputs;
-      dontUseZigBuild = true;
-      doCheck = false;
-      disallowedReferences = [ zig ];
-      # zigConfigurePhase has made an empty $ZIG_GLOBAL_CACHE_DIR
-      # (setup-hook.sh:10); the lazy dependencies go where zig looks for a
-      # fetched package, p/<hash>.
-      postConfigure = lib.optionalString (deps != null) ''
-        ln -s ${deps} "$ZIG_GLOBAL_CACHE_DIR/p"
-      '';
-      installPhase = ''
-        runHook preInstall
-        mkdir -p $out
-        TERM=dumb zig build ${steps} -j$NIX_BUILD_CORES $zigDefaultCpuFlag $zigDefaultOptimizeFlag \
-          ${lib.optionalString (set != null) "-Dset=${set}"} --prefix $out ${flags}
-        ${extra}
-        runHook postInstall
-      '';
-    };
-
-  # Every dependency in build.zig.zon, lazy ones included (fetchAll; its
-  # default false fetches none, fetcher.nix:7-12, 37), as a fixed-output
-  # derivation over build.zig and build.zig.zon alone. On a build.zig.zon
-  # change: hash = lib.fakeHash, build, copy `got:`, rebuild.
-  zigDeps =
-    { pname, root, hash }:
-    zig.fetchDeps {
-      inherit pname hash;
-      version = "0";
-      fetchAll = true;
-      src = lib.fileset.toSource {
-        inherit root;
-        fileset = lib.fileset.unions [ (root + "/build.zig") (root + "/build.zig.zon") ];
-      };
-    };
+  # The one builder and the dependency fetch, native.nix's: see there for
+  # their arguments. A proof passes its own root.
+  inherit (import ../native.nix { inherit pkgs; }) zigSet zigDeps;
 
   spikeRoot = ../spike/fd-zig;
 

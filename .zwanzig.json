@@ -1,0 +1,10 @@
+{
+  "enabled_rules": ["store-violations-engine", "unreachable-code-engine", "empty-catch-engine"],
+  "resource_models": [
+    { "kind": "open", "method_name": "start" },
+    { "kind": "close", "method_name": "close" },
+    { "kind": "close", "method_name": "await" },
+    { "kind": "close", "method_name": "reapNow" },
+    { "kind": "close", "method_name": "release" }
+  ]
+}

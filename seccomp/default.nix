@@ -1,4 +1,6 @@
-# flong-seccomp: the compiler from flong's policy lines to a BPF filter.
+# flong-seccomp: the compiler from flong's policy lines to a BPF filter, in
+# Zig (src/seccomp/), built by native.nix's `seccomp` set. This file stays
+# so that module.nix, flake.nix and tests/parity.nix import it as before.
 #
 # pkgs defaults to the flake's locked nixpkgs, as the launcher's does, so a
 # build outside the flake links the same libseccomp.
@@ -12,8 +14,4 @@
       sha256 = locked.narHash;
     }) { },
 }:
-pkgs.runCommandCC "flong-seccomp" { buildInputs = [ pkgs.libseccomp ]; } ''
-  mkdir -p $out/bin
-  $CC -std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror \
-    -o $out/bin/flong-seccomp ${./flong-seccomp.c} -lseccomp
-''
+(import ../native.nix { inherit pkgs; }).seccomp

@@ -1,0 +1,207 @@
+# flong's native code as Nix builds it (ZIG.md, "The Nix build"): one
+# builder, zigSet, and one derivation per install set, each over only the
+# sources that set imports, so an edit elsewhere moves none of its store
+# paths; the checks of the Zig package; the dependency fetch they share.
+#
+# Phase 1 has the seccomp set, which seccomp/default.nix imports; phase 3
+# adds launcher, phase 6 fixtures.
+# tests/integration.nix builds phase 0's proofs with the same zigSet.
+#
+# pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:11-20
+# does, since zig_0_15 is that nixpkgs' (ZIG.md, "Decided").
+{
+  pkgs ?
+    let
+      locked = (builtins.fromJSON (builtins.readFile ./flake.lock)).nodes.nixpkgs.locked;
+    in
+    import (fetchTarball {
+      url = "https://github.com/${locked.owner}/${locked.repo}/archive/${locked.rev}.tar.gz";
+      sha256 = locked.narHash;
+    }) { },
+}:
+let
+  inherit (pkgs) lib;
+  zig = pkgs.zig_0_15;
+
+  # One Zig package, one install set.
+  #
+  #   root          the directory holding build.zig and build.zig.zon: this
+  #                 one for flong's package, another for a phase 0 proof's
+  #   files         what else the build reads, as paths or filesets under
+  #                 root; nothing else is in src, so an edit elsewhere moves
+  #                 nothing
+  #   steps         the `zig build` steps the installPhase runs ("install")
+  #   set           when not null, -Dset=<set>
+  #   flags         more `zig build` arguments, spliced into the shell line
+  #   optimizeFlag  the optimisation: the hook's --release=safe, or "" for
+  #                 Debug, or -Drelease=true
+  #   deps          a zigDeps result, linked into $ZIG_GLOBAL_CACHE_DIR/p,
+  #                 for -Ddev=true builds only
+  #   extra         shell run after the build, in the unpacked source; it
+  #                 may write $out and fail the derivation, but set -e
+  #                 ignores every command of an `a && b` list but the last,
+  #                 so one assertion per line
+  #
+  # The hook's buildPhase would be a second full build and its checkPhase
+  # runs `zig build test`, which needs -Ddev (zig setup-hook.sh:16-41,
+  # 108-110), so both are off and the one build is the installPhase. $out is
+  # created first, so a set that installs nothing still has an output. An
+  # unstripped artifact names Zig's lib/std, which disallowedReferences
+  # catches: every installed artifact is stripped by build.zig, since Nix's
+  # fixup strips only bin/, with -S, and no aarch64 ELF (spike/proofs/p6).
+  zigSet =
+    {
+      pname,
+      root ? ./.,
+      files ? [ ],
+      steps ? "install",
+      set ? null,
+      flags ? "",
+      optimizeFlag ? "$zigDefaultOptimizeFlag",
+      deps ? null,
+      buildInputs ? [ ],
+      nativeBuildInputs ? [ ],
+      extra ? "",
+      version ? "0",
+      passthru ? { },
+    }:
+    pkgs.stdenv.mkDerivation {
+      inherit pname version buildInputs passthru;
+      src = lib.fileset.toSource {
+        inherit root;
+        fileset = lib.fileset.unions ([ (root + "/build.zig") (root + "/build.zig.zon") ] ++ files);
+      };
+      nativeBuildInputs = [ zig ] ++ nativeBuildInputs;
+      dontUseZigBuild = true;
+      doCheck = false;
+      disallowedReferences = [ zig ];
+      # zigConfigurePhase has made an empty $ZIG_GLOBAL_CACHE_DIR
+      # (setup-hook.sh:10); the lazy dependencies go where zig looks for a
+      # fetched package, p/<hash>.
+      postConfigure = lib.optionalString (deps != null) ''
+        ln -s ${deps} "$ZIG_GLOBAL_CACHE_DIR/p"
+      '';
+      installPhase = ''
+        runHook preInstall
+        mkdir -p $out
+        TERM=dumb zig build ${steps} -j$NIX_BUILD_CORES $zigDefaultCpuFlag ${optimizeFlag} \
+          ${lib.optionalString (set != null) "-Dset=${set}"} --prefix $out ${flags}
+        ${extra}
+        runHook postInstall
+      '';
+    };
+
+  # Every dependency in build.zig.zon, lazy ones included (fetchAll; its
+  # default false fetches none, fetcher.nix:7-12, 37), as a fixed-output
+  # derivation over build.zig and build.zig.zon alone. On a build.zig.zon
+  # change: hash = lib.fakeHash, build .#checks.x86_64-linux.native-test,
+  # copy `got:`, rebuild.
+  zigDeps =
+    {
+      pname,
+      root ? ./.,
+      hash,
+    }:
+    zig.fetchDeps {
+      inherit pname hash;
+      version = "0";
+      fetchAll = true;
+      src = lib.fileset.toSource {
+        inherit root;
+        fileset = lib.fileset.unions [ (root + "/build.zig") (root + "/build.zig.zon") ];
+      };
+    };
+
+  # minish and zwanzig, and zwanzig's own chilli: for native-test and
+  # native-analyze only, which pass -Ddev=true.
+  deps = zigDeps {
+    pname = "flong";
+    hash = "sha256-GicN77r9Oh9xPqlIP5CS0/y2hSenxlM6thAiv1bjBW8=";
+  };
+
+  # The modules every program imports (ZIG.md, "Per binary").
+  shared = [
+    ./src/sys.zig
+    ./src/msg.zig
+    ./src/errno.zig
+    ./src/num.zig
+  ];
+
+  # flong-seccomp. -Dself is its own $out, the compiler path a project key
+  # is made of (quirk 36); zig finds libseccomp through NIX_LDFLAGS' -L,
+  # which it turns into a library path and an rpath (NativePaths.zig:17-72).
+  seccomp = zigSet {
+    pname = "flong-seccomp";
+    set = "seccomp";
+    flags = "-Dself=$out";
+    buildInputs = [ pkgs.libseccomp ];
+    files = [ ./src/seccomp ] ++ shared;
+  };
+
+  # The unit and property tests, and test-libc against this nixpkgs' glibc,
+  # in Debug and in ReleaseSafe.
+  test =
+    name: optimizeFlag:
+    zigSet {
+      pname = "native-test-${name}";
+      files = [
+        ./src
+        ./tests/zig
+      ];
+      steps = "test test-libc";
+      flags = "-Ddev=true";
+      inherit deps optimizeFlag;
+      buildInputs = [ pkgs.libseccomp ];
+    };
+
+  checks = {
+    native-test = pkgs.linkFarm "native-test" {
+      debug = test "debug" "";
+      release = test "release" "-Drelease=true";
+    };
+
+    # fdlint over src/ and tests/zig/ and on its planted files, what must
+    # not compile, and zig fmt: no dependency, no -Ddev.
+    native-lint = zigSet {
+      pname = "native-lint";
+      files = [
+        ./src
+        ./tests/zig
+        ./tools
+      ];
+      steps = "lint compile-fail fmt";
+    };
+
+    # zwanzig, built from source, over src/ and its planted bugs.
+    native-analyze = zigSet {
+      pname = "native-analyze";
+      files = [
+        ./src
+        ./tests/zig/analyze
+        ./.zwanzig.json
+      ];
+      steps = "analyze";
+      flags = "-Ddev=true";
+      inherit deps;
+    };
+  }
+  // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
+    # flong-seccomp compiled for aarch64-linux and not linked: the flake has
+    # no aarch64 libseccomp here. Phase 2 adds tests/zig/abi.zig's aarch64
+    # half, phase 3 the launcher set with dummy paths.
+    cross-aarch64 = zigSet {
+      pname = "cross-aarch64";
+      files = [ ./src/seccomp ] ++ shared;
+      steps = "cross";
+    };
+  };
+in
+{
+  inherit
+    zigSet
+    zigDeps
+    deps
+    seccomp
+    checks
+    ;
+}

@@ -142,7 +142,12 @@ let
     pkgs.runCommand "golden"
       {
         nativeBuildInputs = [ pkgs.diffutils ];
-        passthru = { inherit update; };
+        # libSh is for tests/seccomp-transition.nix, which runs the same
+        # cases against the C and the Zig.
+        passthru = {
+          inherit update;
+          libSh = lib-sh;
+        };
       }
       ''
         set -euo pipefail

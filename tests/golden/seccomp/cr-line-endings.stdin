@@ -1,0 +1,4 @@
+default allow
+
+errno 1 read
+errno 13write

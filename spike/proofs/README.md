@@ -27,8 +27,10 @@ added later). It returns an attrset with any of:
 The arguments:
 
 - `zigSet { pname, root, files ? [], steps ? "install", set ? null, flags ?
-  "", deps ? null, buildInputs ? [], nativeBuildInputs ? [], extra ? "",
-  version ? "0", passthru ? {} }`: a `stdenv.mkDerivation` with the
+  "", optimizeFlag ? "$zigDefaultOptimizeFlag", deps ? null, buildInputs ?
+  [], nativeBuildInputs ? [], extra ? "", version ? "0", passthru ? {} }`,
+  `native.nix`'s builder (the one flong's own sets use, whose `root`
+  defaults to the repo's): a `stdenv.mkDerivation` with the
   `zig_0_15` hook, `src` the fileset of `root/build.zig`,
   `root/build.zig.zon` and `files`, `dontUseZigBuild`, `doCheck = false`,
   `disallowedReferences = [ zig_0_15 ]`. Its installPhase is `mkdir -p $out`,

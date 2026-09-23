@@ -13,7 +13,15 @@
       nixosModules.default = self.nixosModules.flong;
 
       checks = forAllSystems (system:
-        let pkgs = nixpkgs.legacyPackages.${system}; in
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          native = import ./native.nix { inherit pkgs; };
+        in
+        # The Zig package's own checks (native.nix): native-test (unit,
+        # property and test-libc, Debug and ReleaseSafe), native-lint (fdlint,
+        # compile-fail, zig fmt), native-analyze (zwanzig), and on x86_64
+        # cross-aarch64.
+        native.checks //
         {
           # Every option that changes what a session sees, launched by a
           # lingering user with no sudo.
@@ -47,8 +55,13 @@
           # The native launcher, built with -Werror.
           launcher = import ./launcher { inherit pkgs; };
 
-          # The seccomp compiler, built with -Werror.
+          # The seccomp compiler, in Zig (native.nix's seccomp set).
           seccomp = import ./seccomp { inherit pkgs; };
+
+          # Phase 1's transition: the C flong-seccomp, built in the check,
+          # against the Zig one over the tier, fixed and golden policies
+          # (tests/seccomp-transition.nix).
+          seccomp-transition = import ./tests/seccomp-transition.nix { inherit pkgs; };
 
           # flong's programs against cases recorded from the C, byte for
           # byte: stdout, stderr, status, and filters (tests/golden.nix).
@@ -379,6 +392,18 @@
         program = "${self.checks.x86_64-linux.golden.update}/bin/golden-update";
         meta.description = "Rewrite tests/golden's filters after a libseccomp bump";
       };
+
+      # zig 0.15, libseccomp (found through NIX_LDFLAGS, as in the build)
+      # and strace, for `zig build` in the repository (build.zig lists the
+      # steps; -Ddev=true fetches the lazy dependencies).
+      devShells = forAllSystems (system:
+        let pkgs = nixpkgs.legacyPackages.${system}; in
+        {
+          default = pkgs.mkShell {
+            packages = [ pkgs.zig_0_15 pkgs.strace ];
+            buildInputs = [ pkgs.libseccomp ];
+          };
+        });
 
       formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);
     };
