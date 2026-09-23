@@ -91,7 +91,7 @@ static const struct {
 };
 #define NMOUNT_KINDS (sizeof mount_kinds / sizeof mount_kinds[0])
 
-/* The limits a spec may set: the opt-in ones ROOTLESS.md types. Anything else
+/* The limits a spec may set: the opt-in ones module.nix types. Anything else
  * in a cgroup (cgroup.procs, cgroup.kill, cgroup.subtree_control) is the
  * launcher's own machinery, not a limit. */
 static const char *const limit_files[] = {

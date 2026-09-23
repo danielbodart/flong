@@ -5,7 +5,7 @@
  * payload's command. An argument is a NUL-terminated string, so a path may
  * hold a tab, a newline or anything else but NUL, and bash builds the list
  * with builtins alone (an array and exec), which a spec file or a pipe would
- * not allow without a fork on the warm path. The grammar is in CONTRACT.md,
+ * not allow without a fork on the warm path. The grammar is in DESIGN.md,
  * "The input contract".
  *
  * Every string in struct fl_spec points into argv; nothing is copied.
@@ -102,7 +102,7 @@ struct fl_spec {
 	int pasta_wait;              /* fixed forwardPorts bind host ports: wait for pasta's exit */
 
 	/* bwrap */
-	struct fl_argv bwrap_args;   /* only the options CONTRACT.md allows */
+	struct fl_argv bwrap_args;   /* only DESIGN.md's bwrap-arg allow-list */
 	int *keep_fds;               /* descriptors those options name (--ro-bind-data 9 ...) */
 	size_t nkeep_fds;
 

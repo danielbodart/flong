@@ -77,7 +77,7 @@ in
   nodes.machine = { config, pkgs, ... }: {
     imports = [ ../module.nix ];
 
-    # As the VM the spikes measured in.
+    # As the VM DESIGN.md's numbers were measured in.
     virtualisation.memorySize = 3072;
     virtualisation.cores = 4;
 

@@ -1,11 +1,12 @@
 /* flong-launch: one session, from the wrapper's spec to the payload's exit.
  *
- * The wrapper execs this with the whole spec as arguments (CONTRACT.md,
- * "The input contract"). main does the steps of a launch in the plan's order:
- * sweep, record, U1 and U2, cgroup, bwrap, child-pid, the mount helper after
- * the ready byte, the hook, pasta, the gate, the wait, the teardown. Each
- * step is a call into a module; this file owns the order, bwrap's argv, the
- * hook's and pasta's argv, the gate and the one teardown path.
+ * The wrapper execs this with the whole spec as arguments (DESIGN.md,
+ * "The input contract"). main does the steps of a launch in the order of
+ * DESIGN.md's "The launch, in order": sweep, record, U1 and U2, cgroup, bwrap,
+ * child-pid, the mount helper after the ready byte, the hook, pasta, the gate,
+ * the wait, the teardown. Each step is a call into a module; this file owns
+ * the order, bwrap's argv, the hook's and pasta's argv, the gate and the one
+ * teardown path.
  *
  * Every resource lives in one struct launch, each descriptor -1 and each pid
  * 0 until it exists. run() returns at the first failure; teardown() looks at
@@ -39,7 +40,7 @@
 #include "flong-tty.h"
 #include "flong-util.h"
 
-/* Exit statuses of a launch that did not reach its payload (CONTRACT.md,
+/* Exit statuses of a launch that did not reach its payload (DESIGN.md,
  * "Exit codes"). */
 enum { EXIT_NOT_RUN = 125, EXIT_SWEPT = 75 };
 
@@ -265,11 +266,11 @@ static char *groups_arg(const struct fl_spec *s)
 	return out;
 }
 
-/* bwrap's argv, in CONTRACT.md's order: the fixed part, the wrapper's
- * bwrap-args, then flong-init and its protocol. The fixed part comes first so
- * nothing the wrapper adds can undo it, and flong-init's protocol is its
- * argv, after everything, so a --clearenv among the wrapper's options cannot
- * drop it. */
+/* bwrap's argv, in DESIGN.md's order ("The input contract"): the fixed
+ * part, the wrapper's bwrap-args, then flong-init and its protocol. The
+ * fixed part comes first so nothing the wrapper adds can undo it, and
+ * flong-init's protocol is its argv, after everything, so a --clearenv among
+ * the wrapper's options cannot drop it. */
 static char *const *bwrap_argv(const struct launch *l, int info_w, int ready_w, int gate_r)
 {
 	const struct fl_spec *s = &l->s;
@@ -703,7 +704,7 @@ static int open_gate(struct launch *l)
 
 /* ---- the launch ---- */
 
-/* Steps 7 to 18 of CONTRACT.md, "The launch, in order". Returns bwrap's
+/* Steps 6 to 18 of DESIGN.md, "The launch, in order". Returns bwrap's
  * status once the gate has opened, or -1 at the first failure. */
 static int run(struct launch *l)
 {
@@ -776,7 +777,7 @@ static int reap(int *pidfd)
 	return st < 0 ? -1 : 0;
 }
 
-/* The one teardown path, whatever stage the launch reached (CONTRACT.md,
+/* The one teardown path, whatever stage the launch reached (DESIGN.md,
  * "Teardown"). Each step happens only for what exists. When a wait is cut
  * short (a signal during teardown), the session may not be empty yet: then
  * postStop does not run here and the record is closed, not removed, so the

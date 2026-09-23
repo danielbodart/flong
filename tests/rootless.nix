@@ -101,7 +101,7 @@ let
   # fence-probe tries, from inside a session, everything that would undo a
   # hook's network setup or the session's cgroup, and prints each attempt's
   # name with allowed or refused. The limits it would lift are the ones the
-  # fence declarations set. The nested attempt is the one ROOTLESS.md
+  # fence declarations set. The nested attempt is the escape DESIGN.md
   # measured: a user and cgroup namespace of the payload's own, mounting
   # cgroup2 at the session's cgroup. Without nestedSandbox it cannot even
   # start. A cgroup.kill that went through would end the probe before its

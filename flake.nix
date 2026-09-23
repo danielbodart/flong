@@ -1,5 +1,5 @@
 {
-  description = "Ephemeral systemd-nspawn containers that start in milliseconds";
+  description = "Ephemeral rootless containers that start in milliseconds";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 

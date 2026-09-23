@@ -38,8 +38,8 @@ int fl_errx(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 _Noreturn void fl_die(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 /* Nonzero when the spec said `trace`. fl_trace then prints
- * "T <CLOCK_REALTIME in microseconds> <stage>" on stderr, the format the
- * spikes' benches parse and that bash's EPOCHREALTIME can be compared with. */
+ * "T <CLOCK_REALTIME in microseconds> <stage>" on stderr, a format bash's
+ * EPOCHREALTIME can be compared with. */
 extern int fl_tracing;
 void fl_trace(const char *stage);
 

@@ -11,12 +11,12 @@
 # where strict answers differently from parity it is by refusing the call.
 #
 # The parity tier was proved against nspawn's own filter while both engines
-# existed (ROOTLESS.md phase 5, commit d48ad97): with the audit mask it matched
-# nspawn's stack except where the mask refuses more -- i386's socket and
-# socketcall, and an x86_64 socket with a high bit set in a0, which nspawn's
-# 64-bit compare let through -- and the whole stack differed further only by
-# the tty filter's ioctl rows and the namespace mask's clone, unshare, setns
-# and clone3 rows, all stricter. That VM held nspawn, which is gone, so the
+# existed (commit d48ad97): with the audit mask it matched nspawn's stack
+# except where the mask refuses more -- i386's socket and socketcall, and an
+# x86_64 socket with a high bit set in a0, which nspawn's 64-bit compare let
+# through -- and the whole stack differed further only by the tty filter's
+# ioctl rows and the namespace mask's clone, unshare, setns and clone3 rows,
+# all stricter. That VM held nspawn, which is gone, so the
 # comparison is not repeated here; the byte-for-byte match with the build's
 # filters is what keeps it true.
 { lib, ... }:
