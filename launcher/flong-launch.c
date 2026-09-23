@@ -710,7 +710,7 @@ static int run(struct launch *l)
 {
 	struct fl_spec *s = &l->s;
 
-	if (tty_prepare(&l->tty) < 0)
+	if (tty_prepare(&l->tty, s->container, s->uid) < 0)
 		return -1;
 
 	if (cg_check_nsdelegate() < 0 ||

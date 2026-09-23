@@ -454,14 +454,4 @@ done
 if [[ -n ${COLORTERM:-} ]]; then spec+=(bwrap-arg --setenv bwrap-arg COLORTERM bwrap-arg "$COLORTERM"); fi
 if [[ -n ${FLONG_TRACE:-} ]]; then spec+=(trace); fi
 
-# Tell the terminal what it is looking at, as toolbox and distrobox do. The
-# runtime is flong, which owns the session and its terminal relay. ST, not
-# BEL, since VTE rejects the BEL form; \033\134 because shellcheck reads \033\\
-# as an escaped quote. Only on a terminal, or the bytes land in whatever
-# stdout was redirected to. The wrapper execs, so nothing is left to reset
-# the terminal afterwards.
-if [[ -t 1 ]]; then
-	printf '\033]666;vte.container.name=%s;vte.container.runtime=flong;vte.container.uid=%s\033\134' "$container" "$uid"
-fi
-
 exec "$launcher" "${spec[@]}" -- "$payload" "$workspace" "${launcher_args[@]}"

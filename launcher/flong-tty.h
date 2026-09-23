@@ -36,6 +36,7 @@ struct fl_tty {
 	int raw;                /* 1 while the caller's terminal is raw */
 	int guard;              /* the watchdog pipe's write end, or -1 */
 	pid_t guard_pid;
+	int marked;             /* 1 once the terminal was told it shows a container */
 };
 
 /* First thing after the spec is parsed. When stdin is a terminal and the
@@ -44,8 +45,11 @@ struct fl_tty {
  * the foreground; when the group is orphaned the kernel discards the SIGTTOU,
  * no shell will ever continue it, and the launch is refused. Then decides
  * the mode; for a relay opens the pty and gives the slave the caller's
- * termios and window size. Returns 0 or -1. */
-int tty_prepare(struct fl_tty *t);
+ * termios and window size. When stdout is a terminal, tells it (OSC 666, as
+ * toolbox and distrobox do) that it now shows the container named, for the
+ * user of that uid inside; tty_finish, or the watchdog after a SIGKILL, tells
+ * it again that it does not. Returns 0 or -1. */
+int tty_prepare(struct fl_tty *t, const char *container, uid_t uid);
 
 /* bwrap's stdio: NULL in passthrough, t->stdio in relay. */
 const int *tty_stdio(const struct fl_tty *t);
@@ -86,7 +90,8 @@ int tty_wait(struct fl_tty *t, int bwrap_pidfd, int leader_pidfd);
 
 /* Restores the caller's modes, tells the watchdog it is done, hands the
  * foreground back (passthrough, when we had it: tini -g gave it to the
- * payload's group, which is gone), closes the master. Idempotent; called
+ * payload's group, which is gone), closes the master, and clears the
+ * container from the terminal. Idempotent; called
  * from the one teardown path whatever stage the launch reached, including
  * before tty_prepare, on a struct that is all zeros. */
 void tty_finish(struct fl_tty *t);

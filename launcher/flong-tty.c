@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -115,7 +116,29 @@ static void take_foreground(void)
 	sigaction(SIGTTOU, &old, NULL);
 }
 
-int tty_prepare(struct fl_tty *t)
+/* OSC 666's vte.container termprops. ST-terminated: VTE rejects the BEL form,
+ * silently. The clearing form names no property, which unsets them all. */
+static const char unmark[] = "\033]666;vte.container.\033\\";
+
+/* Writes a terminal sequence to fd 1, with SIGTTOU ignored so a launcher in
+ * the background of its terminal is not stopped for it. A failure leaves only
+ * the terminal's border wrong, so it is not reported. */
+static void write_terminal(const char *buf, size_t len)
+{
+	struct sigaction old = ttou_ignore();
+	while (len > 0) {
+		ssize_t n = write(1, buf, len);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			break;
+		buf += n;
+		len -= (size_t)n;
+	}
+	sigaction(SIGTTOU, &old, NULL);
+}
+
+int tty_prepare(struct fl_tty *t, const char *container, uid_t uid)
 {
 	*t = (struct fl_tty){ .master = -1, .slave = -1, .out = -1, .stdio = { -1, -1, -1 },
 			      .guard = -1 };
@@ -124,6 +147,21 @@ int tty_prepare(struct fl_tty *t)
 		if (wait_foreground() < 0)
 			return -1;
 		t->was_fg = tcgetpgrp(0) == getpgrp();
+	}
+	/* The launcher, not the wrapper, marks the terminal, since only the
+	 * launcher is there at the end to clear it: the wrapper execs it. Only
+	 * on a terminal, or the bytes land in whatever stdout was redirected
+	 * to. The container name is the spec's, which holds no byte a
+	 * terminal would read as the sequence's end. */
+	if (isatty(1)) {
+		char mark[256];
+		int n = snprintf(mark, sizeof mark,
+				 "\033]666;vte.container.name=%s;vte.container.runtime=flong;"
+				 "vte.container.uid=%u\033\\", container, (unsigned)uid);
+		if (n > 0 && (size_t)n < sizeof mark) {
+			write_terminal(mark, (size_t)n);
+			t->marked = 1;
+		}
 	}
 	if (!isatty(0) || !isatty(1))
 		return 0;
@@ -216,6 +254,8 @@ static _Noreturn void watchdog(const struct fl_tty *t, int pipe_r, int leader_pi
 
 	if (t->relay) {
 		tcsetattr(0, TCSAFLUSH, &t->modes);
+		if (t->marked)
+			write_terminal(unmark, sizeof unmark - 1);
 		_exit(0);
 	}
 	/* Passthrough: the payload may set modes until it is gone. */
@@ -223,6 +263,8 @@ static _Noreturn void watchdog(const struct fl_tty *t, int pipe_r, int leader_pi
 	while (poll(&p, 1, -1) < 0 && errno == EINTR)
 		;
 	tcsetattr(0, TCSAFLUSH, &t->modes);
+	if (t->marked)
+		write_terminal(unmark, sizeof unmark - 1);
 	if (t->was_fg) {
 		pid_t fg = tcgetpgrp(0);
 		if (fg > 0 && fg != getpgrp() && kill(-fg, 0) < 0 && errno == ESRCH)
@@ -495,5 +537,9 @@ void tty_finish(struct fl_tty *t)
 		fl_close(&t->slave);
 		fl_close(&t->master);
 		fl_close(&t->out);
+	}
+	if (t->marked) {
+		write_terminal(unmark, sizeof unmark - 1);
+		t->marked = 0;
 	}
 }

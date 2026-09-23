@@ -1026,9 +1026,11 @@ payload set.
   has no payload to tell, so the gate copies the window size once more.
 - **OSC 666 `vte.container.*` termprops** tell a VTE terminal it is attached to
   a container, as toolbox and distrobox do: `name` is the container, `runtime`
-  is `flong` and `uid` is the container user's uid. ST-terminated, since VTE rejects the BEL form, and written only
-  when stdout is a terminal. The wrapper execs, so nothing is left to reset
-  them afterwards.
+  is `flong` and `uid` is the container user's uid. ST-terminated, since VTE
+  rejects the BEL form, and written only when stdout is a terminal. The
+  launcher writes them, not the wrapper, which execs it: the launcher clears
+  them in its teardown, whatever stage the launch reached, and the watchdog
+  clears them after a SIGKILL.
 
 **A fixed tty filter in every tier**, which no tier or project can remove:
 `ioctl` with request `TIOCSTI`, `TIOCLINUX`, `TIOCSETD` or `TIOCCONS` gets
