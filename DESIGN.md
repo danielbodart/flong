@@ -1046,7 +1046,7 @@ shell, and `masked_eq` stopped it.
 A session's filter is a policy, compiled at build time from its declaration
 and, per project, at launch.
 
-**The compiler** is C against libseccomp, reading a line format Nix renders:
+**The compiler** is Zig against libseccomp, reading a line format Nix renders:
 `default N|allow`, `allow NAME [CMP…]`, `errno N NAME [CMP…]`,
 `log NAME [CMP…]`, where a comparison is `aI:OP:VALUE` or
 `aI:masked_eq:VALUE:MASK`. libseccomp silently keeps the first of two
@@ -1054,8 +1054,9 @@ unconditional rules for one call and lets an unconditional rule swallow
 conditional ones; the compiler refuses both, so the filter says what the
 policy says. It refuses `eq` on an int-typed argument, which needs
 `masked_eq`, and it reports how many names libseccomp does not know, so
-version skew shows in the build log. It is built with `-Werror`, and nothing
-reaches its output unless the whole policy is accepted.
+version skew shows in the build log. It is built ReleaseSafe and checked by
+`native-test`, `native-lint` and `native-analyze`, and nothing reaches its
+output unless the whole policy is accepted.
 
 **Groups** are expanded at build time from one
 `systemd-analyze syscall-filter` dump of `config.systemd.package`, by an awk

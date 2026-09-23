@@ -58,11 +58,6 @@
           # The seccomp compiler, in Zig (native.nix's seccomp set).
           seccomp = import ./seccomp { inherit pkgs; };
 
-          # Phase 1's transition: the C flong-seccomp, built in the check,
-          # against the Zig one over the tier, fixed and golden policies
-          # (tests/seccomp-transition.nix).
-          seccomp-transition = import ./tests/seccomp-transition.nix { inherit pkgs; };
-
           # flong's programs against cases recorded from the C, byte for
           # byte: stdout, stderr, status, and filters (tests/golden.nix).
           golden = import ./tests/golden.nix { inherit pkgs; };

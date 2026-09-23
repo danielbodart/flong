@@ -27,8 +27,9 @@
 # them has a LIBSECCOMP file, libseccomp's version and a newline, and the
 # check compares it with pkgs.libseccomp's first, failing with `libseccomp
 # changed: run golden-update` before any case runs. The .bpf files are
-# x86_64's filters, which cover i386 and x32 too (flong-seccomp.c:191-198);
-# on another system a .bpf case checks its stderr and status only.
+# x86_64's filters, which cover i386 and x32 too
+# (src/seccomp/compile.zig:159-164); on another system a .bpf case checks
+# its stderr and status only.
 #
 # golden-update (`nix run .#golden-update`, from the repo root) is this
 # file's passthru.update. It rewrites the .bpf files and LIBSECCOMP and
@@ -58,9 +59,10 @@ let
   # Each set's program and derived values. A set whose directory does not
   # exist is skipped.
   sets = {
-    # Recorded from the C of 2026-09-23 (seccomp/flong-seccomp.c): every
-    # message it prints but three no input reaches, libseccomp failing to
-    # add the i386 or x32 arch or to set the optimisation (:191-201). The
+    # Recorded from the C of 2026-09-23 (seccomp/flong-seccomp.c, deleted
+    # in phase 1 b): every message it prints but three no input reaches,
+    # libseccomp failing to add the i386 or x32 arch or to set the
+    # optimisation (src/seccomp/compile.zig:159-167). The
     # repo's audit, tty and nsmask policies are copies, so a policy edit
     # moves nothing here; no case comes from the live systemd dump.
     seccomp = {
@@ -142,11 +144,8 @@ let
     pkgs.runCommand "golden"
       {
         nativeBuildInputs = [ pkgs.diffutils ];
-        # libSh is for tests/seccomp-transition.nix, which runs the same
-        # cases against the C and the Zig.
         passthru = {
           inherit update;
-          libSh = lib-sh;
         };
       }
       ''
