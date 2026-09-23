@@ -2,26 +2,34 @@
 //! derivation per install set builds it over only the sources that set
 //! imports (native.nix); every other step is a check.
 //!
-//!   install       -Dset=seccomp (flong-seccomp; needs -Dself), launcher
+//!   install       -Dset=seccomp (flong-seccomp and its subcommands; needs
+//!                 -Dself, the project key's compiler path), launcher
 //!                 (phase 3) or fixtures (phase 6)
 //!   test          unit and property tests, Debug, or ReleaseSafe with
 //!                 -Drelease=true (as every step); needs -Ddev=true
 //!   test-libc     errno.zig and num.zig against glibc, scmp.zig against
-//!                 seccomp.h (tests/zig/libc_*.zig)
+//!                 seccomp.h (tests/zig/libc_*.zig), and the host's half of
+//!                 `abi`
+//!   abi           tests/zig/abi.zig: the kernel structs and constants
+//!                 against Zig's bundled headers, x86_64 and aarch64 (run on
+//!                 the host's arch); -Dabi-plant=arch|offset plants a
+//!                 mismatch, which must fail
 //!   compile-fail  what must not compile (tests/zig/compile_fail/)
 //!   lint          tools/fdlint.zig over src/ and tests/zig/, and over its
 //!                 own planted files (tests/zig/lint/)
 //!   fmt           zig fmt --check over the package's Zig
 //!   analyze       zwanzig over src/, and over its planted bugs
 //!                 (tests/zig/analyze/); needs -Ddev=true
-//!   cross         flong-seccomp compiled for aarch64-linux, not linked
+//!   cross         flong-seccomp compiled for aarch64-linux, not linked,
+//!                 and abi's aarch64 half
 //!
 //! Every path a step reads is a lazy b.path, so an install set's derivation,
 //! which holds build.zig, build.zig.zon and its own sources only, configures
-//! (spike/proofs/p1, `outside`).
+//! (ZIG.md, "Measured": P1, `outside`).
 const std = @import("std");
 
 const Set = enum { seccomp, launcher, fixtures };
+const AbiPlant = enum { none, arch, offset };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -38,6 +46,7 @@ pub fn build(b: *std.Build) void {
     // Compiled-in paths have no default: a missing one fails the install
     // that needs it, as flong-init.c:52-54's #error does.
     const self = b.option([]const u8, "self", "flong-seccomp's own store path, the seccomp derivation's $out");
+    const abi_plant = b.option(AbiPlant, "abi-plant", "Plant a mismatch in tests/zig/abi.zig: arch, offset") orelse .none;
 
     // ---- install ----
     const install = b.getInstallStep();
@@ -59,18 +68,37 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addFail("needs -Ddev=true").step);
     } else if (b.lazyDependency("minish", .{ .target = target, .optimize = optimize })) |minish| {
         // Each module's own tests, with the modules it imports.
-        for ([_][]const u8{ "sys", "errno", "msg", "num" }) |name| {
+        for ([_][]const u8{ "sys", "errno", "msg", "num", "fd" }) |name| {
             const m = modules(b, target, optimize);
             const t = b.addTest(.{ .name = name, .root_module = m.get(name) });
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
-        {
-            // compile.zig's own tests, in flong-seccomp's root module,
-            // linked as it is.
+        for ([_][]const u8{ "compile", "expand", "render", "project" }) |name| {
+            // Each file's own tests, in flong-seccomp's root module, linked
+            // as it is.
             const root = seccompModule(b, target, optimize, "/nix/store/test-only");
-            root.root_source_file = b.path("src/seccomp/compile.zig");
+            root.root_source_file = b.path(b.fmt("src/seccomp/{s}.zig", .{name}));
             root.linkSystemLibrary("seccomp", .{});
-            const t = b.addTest(.{ .name = "compile", .root_module = root });
+            const t = b.addTest(.{ .name = name, .root_module = root });
+            test_step.dependOn(&b.addRunArtifact(t).step);
+        }
+        {
+            // fd.zig's model property: the table, a model of it and the
+            // kernel's /proc/self/fd agree after any sequence.
+            const m = modules(b, target, optimize);
+            const t = b.addTest(.{
+                .name = "fd_props",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/zig/fd_props.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "minish", .module = minish.module("minish") },
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "fd", .module = m.fd },
+                    },
+                }),
+            });
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
         const m = modules(b, target, optimize);
@@ -130,7 +158,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/seccomp/scmp.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "sys", .module = m.sys }},
+            .imports = &.{ .{ .name = "sys", .module = m.sys }, .{ .name = "fd", .module = m.fd } },
         });
         const root = b.createModule(.{
             .root_source_file = b.path("tests/zig/libc_scmp.zig"),
@@ -153,12 +181,17 @@ pub fn build(b: *std.Build) void {
         .{ .file = "result_ignored.zig", .expect = "value of type 'sys.Result(usize)' ignored" },
         .{ .file = "result_unwrapped.zig", .expect = "expected type 'usize', found 'sys.Result(usize)'" },
         .{ .file = "msg_arguments.zig", .expect = "msg: \"line {d}: {s}\" takes 2 arguments, given 1" },
+        .{ .file = "held_close.zig", .expect = "close on a Held descriptor: it is kept until the process exits" },
+        .{ .file = "stdio_close.zig", .expect = "no field or member function named 'close' in 'fd.Stdio'" },
+        .{ .file = "read_on_dir.zig", .expect = "read on a dir descriptor" },
+        .{ .file = "dir_for_file.zig", .expect = "expected type 'fd.Handle(.file,.owned)', found 'fd.Handle(.dir,.owned)'" },
+        .{ .file = "file_as_at.zig", .expect = "a directory handle or fd.cwd, not fd.Handle(.file,.owned)" },
     };
     for (cases) |c| {
         // Every module of src/ is on the command line, each with its own
         // imports; the case imports what it needs.
         const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build-obj", "-fno-emit-bin" });
-        run.addArgs(&.{ "--dep", "sys", "--dep", "errno", "--dep", "msg", "--dep", "num" });
+        run.addArgs(&.{ "--dep", "sys", "--dep", "errno", "--dep", "msg", "--dep", "num", "--dep", "fd" });
         run.addPrefixedFileArg("-Mroot=", b.path(b.fmt("tests/zig/compile_fail/{s}", .{c.file})));
         run.addPrefixedFileArg("-Msys=", b.path("src/sys.zig"));
         run.addArgs(&.{ "--dep", "sys" });
@@ -166,6 +199,8 @@ pub fn build(b: *std.Build) void {
         run.addArgs(&.{ "--dep", "sys", "--dep", "errno" });
         run.addPrefixedFileArg("-Mmsg=", b.path("src/msg.zig"));
         run.addPrefixedFileArg("-Mnum=", b.path("src/num.zig"));
+        run.addArgs(&.{ "--dep", "sys" });
+        run.addPrefixedFileArg("-Mfd=", b.path("src/fd.zig"));
         run.addCheck(.{ .expect_stderr_match = c.expect });
         run.addCheck(.{ .expect_term = .{ .Exited = 1 } });
         cf_step.dependOn(&run.step);
@@ -269,15 +304,19 @@ pub fn build(b: *std.Build) void {
             run.addFileArg(b.path(".zwanzig.json"));
             run.addFileArg(b.path("tests/zig/analyze/bugs.zig"));
             for ([_][]const u8{
-                "bugs.zig:16:12: error: [store-violations-engine] double-close", // B1
-                "bugs.zig:24:13: error: [store-violations-engine] use after close", // B2
-                "bugs.zig:31:12: error: [store-violations-engine] use after close", // B3
-                "bugs.zig:55:14: error: [store-violations-engine] double-close", // B6
-                "bugs.zig:62:14: error: [store-violations-engine] double-close", // B7
-                "bugs.zig:70:12: error: [store-violations-engine] double-close", // B8
+                "bugs.zig:19:12: error: [store-violations-engine] double-close", // B1
+                "bugs.zig:27:9: error: [store-violations-engine] use after close", // B2
+                "bugs.zig:34:12: error: [store-violations-engine] use after close", // B3
+                "bugs.zig:57:12: error: [store-violations-engine] double-close", // B6
+                "bugs.zig:64:14: error: [store-violations-engine] double-close", // B7
+                "bugs.zig:72:12: error: [store-violations-engine] double-close", // B8
+                "bugs.zig:79:9: error: [store-violations-engine] use after close", // B9, the rename
+                "bugs.zig:79:28: error: [store-violations-engine] use after close", // B9, its target
+                "bugs.zig:86:46: error: [store-violations-engine] double-close", // B10
+                "bugs.zig:95:18: error: [store-violations-engine] double-close", // B11
             }) |want| run.addCheck(.{ .expect_stdout_match = want });
-            // And those six only: the ok* controls stay quiet.
-            run.addCheck(.{ .expect_stdout_match = "Found 6 issue(s):\n" });
+            // And those ten only: the ok* controls stay quiet.
+            run.addCheck(.{ .expect_stdout_match = "Found 10 issue(s):\n" });
             run.addCheck(.{ .expect_term = .{ .Exited = 1 } });
             analyze_step.dependOn(&run.step);
         }
@@ -287,18 +326,61 @@ pub fn build(b: *std.Build) void {
     // flong-seccomp for aarch64-linux, analysed and compiled but not linked
     // (-fno-emit-bin: nothing asks for the binary): the flake has no aarch64
     // libseccomp to link against on x86_64 (ZIG.md, "The Nix build").
-    const cross_step = b.step("cross", "Compile flong-seccomp for aarch64-linux, without linking");
+    const cross_step = b.step("cross", "Compile flong-seccomp for aarch64-linux, without linking, and abi's aarch64 half");
     const arm = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu });
     cross_step.dependOn(&seccompUnlinked(b, arm, optimize).step);
+
+    // ---- abi: the kernel ABI against Zig's bundled headers ----
+    const abi_step = b.step("abi", "Check tests/zig/abi.zig against Zig's bundled headers, x86_64 and aarch64");
+    for ([_]std.Target.Cpu.Arch{ .x86_64, .aarch64 }) |arch| {
+        // musl: an explicit libc target, so translate-c's include path is
+        // Zig's own lib/libc/include (<arch>-linux-musl, generic-musl,
+        // <arch>-linux-any, any-linux-any), never the host's or
+        // NIX_CFLAGS_COMPILE's, which Zig reads for a native target only.
+        // Only the headers are used: the test links no libc
+        // (P4's build.zig, now in ~/Projects/flong-spikes-archive/zig).
+        const t = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .linux, .abi = .musl });
+        const headers = b.addTranslateC(.{
+            .root_source_file = b.path("tests/zig/abi.h"),
+            .target = t,
+            .optimize = optimize,
+        });
+        const opts = b.addOptions();
+        opts.addOption(AbiPlant, "plant", abi_plant);
+        const tests = b.addTest(.{
+            .name = b.fmt("abi-{s}", .{@tagName(arch)}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/zig/abi.zig"),
+                .target = t,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "sys", .module = b.createModule(.{ .root_source_file = b.path("src/sys.zig"), .target = t, .optimize = optimize }) },
+                    .{ .name = "c", .module = headers.createModule() },
+                    .{ .name = "options", .module = opts.createModule() },
+                },
+            }),
+        });
+        // Every check is comptime, so compiling is the check; the host's
+        // arch also runs, printing what was compared.
+        if (arch == b.graph.host.result.cpu.arch) {
+            const run = b.addRunArtifact(tests);
+            abi_step.dependOn(&run.step);
+            libc_step.dependOn(&run.step);
+        } else {
+            abi_step.dependOn(&tests.step);
+        }
+        if (arch == .aarch64) cross_step.dependOn(&tests.step);
+    }
 }
 
 /// The modules of src/ every program shares, each importing its own
-/// (ZIG.md, "Per binary": sys; then msg, errno, num).
+/// (ZIG.md, "Per binary": sys; then msg, errno, num, fd).
 const Modules = struct {
     sys: *std.Build.Module,
     errno: *std.Build.Module,
     msg: *std.Build.Module,
     num: *std.Build.Module,
+    fd: *std.Build.Module,
 
     fn get(m: Modules, name: []const u8) *std.Build.Module {
         inline for (@typeInfo(Modules).@"struct".fields) |f| {
@@ -323,7 +405,13 @@ fn modules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .imports = &.{ .{ .name = "sys", .module = sys }, .{ .name = "errno", .module = errno } },
     });
     const num = b.createModule(.{ .root_source_file = b.path("src/num.zig"), .target = target, .optimize = optimize });
-    return .{ .sys = sys, .errno = errno, .msg = msg, .num = num };
+    const fd = b.createModule(.{
+        .root_source_file = b.path("src/fd.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "sys", .module = sys }},
+    });
+    return .{ .sys = sys, .errno = errno, .msg = msg, .num = num, .fd = fd };
 }
 
 /// flong-seccomp's root module, the settings every installed artifact has
@@ -347,6 +435,7 @@ fn seccompModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
             .{ .name = "errno", .module = m.errno },
             .{ .name = "msg", .module = m.msg },
             .{ .name = "num", .module = m.num },
+            .{ .name = "fd", .module = m.fd },
             .{ .name = "config", .module = config.createModule() },
         },
     });
@@ -357,7 +446,7 @@ fn seccomp(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     root.linkSystemLibrary("seccomp", .{});
     const exe = b.addExecutable(.{ .name = "flong-seccomp", .root_module = root });
     // No stack size in PT_GNU_STACK: the start code then leaves RLIMIT_STACK
-    // alone (start.zig:545-578; spike/proofs/p2).
+    // alone (start.zig:545-578; tests/proofs/p2).
     exe.stack_size = 0;
     return exe;
 }

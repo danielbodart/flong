@@ -1,7 +1,7 @@
 # The proofs that need a kernel the build sandbox does not give: one node, a
 # lingering user with subordinate ids and a delegated user manager, the
 # proofs' binaries on PATH (tests/integration.nix's `vm`), and each proof's
-# testScript fragment after the common setup below, in spike/proofs/ name
+# testScript fragment after the common setup below, in tests/proofs/ name
 # order (ZIG.md, "Tests", checks.native). A fourth VM beside basic, rootless
 # and parity; nothing in it is about time.
 #

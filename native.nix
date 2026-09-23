@@ -48,7 +48,7 @@ let
   # created first, so a set that installs nothing still has an output. An
   # unstripped artifact names Zig's lib/std, which disallowedReferences
   # catches: every installed artifact is stripped by build.zig, since Nix's
-  # fixup strips only bin/, with -S, and no aarch64 ELF (spike/proofs/p6).
+  # fixup strips only bin/, with -S, and no aarch64 ELF (ZIG.md, "Measured": P1, P6).
   zigSet =
     {
       pname,
@@ -125,10 +125,11 @@ let
     ./src/msg.zig
     ./src/errno.zig
     ./src/num.zig
+    ./src/fd.zig
   ];
 
-  # flong-seccomp. -Dself is its own $out, the compiler path a project key
-  # is made of (quirk 36); zig finds libseccomp through NIX_LDFLAGS' -L,
+  # flong-seccomp and its subcommands. -Dself is its own $out, the compiler
+  # path a project key is made of (quirk 36); zig finds libseccomp through NIX_LDFLAGS' -L,
   # which it turns into a library path and an rpath (NativePaths.zig:17-72).
   seccomp = zigSet {
     pname = "flong-seccomp";
@@ -186,13 +187,36 @@ let
     };
   }
   // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
-    # flong-seccomp compiled for aarch64-linux and not linked: the flake has
-    # no aarch64 libseccomp here. Phase 2 adds tests/zig/abi.zig's aarch64
-    # half, phase 3 the launcher set with dummy paths.
-    cross-aarch64 = zigSet {
-      pname = "cross-aarch64";
-      files = [ ./src/seccomp ] ++ shared;
-      steps = "cross";
+    # aarch64 from x86_64 (P6's pieces, ZIG.md "Phase 2"): flong-seccomp
+    # compiled and not linked, since the flake has no aarch64 libseccomp
+    # here; tests/zig/abi.zig's aarch64 half, and its controls, each plant
+    # failing the build naming what differs on both arches; and P5's archive
+    # for aarch64 with its clash check (tests/proofs/p5). Phase 3 adds the
+    # launcher set with dummy paths.
+    cross-aarch64 = pkgs.linkFarm "cross-aarch64" {
+      flong = zigSet {
+        pname = "cross-aarch64";
+        files = [
+          ./src/seccomp
+          ./tests/zig/abi.zig
+          ./tests/zig/abi.h
+        ]
+        ++ shared;
+        steps = "cross";
+        extra = ''
+          for plant in arch offset; do
+            if zig build abi -Dabi-plant=$plant $zigDefaultCpuFlag $zigDefaultOptimizeFlag >plant-$plant.log 2>&1; then
+              echo "cross-aarch64: abi passed with -Dabi-plant=$plant"; exit 1
+            fi
+          done
+          grep -q 'abi: x86_64: __NR_openat is 257, expected 56' plant-arch.log
+          grep -q 'abi: aarch64: __NR_openat is 56, expected 257' plant-arch.log
+          grep -q 'abi: x86_64: open_how.flags: offset 0, header 1' plant-offset.log
+          grep -q 'abi: aarch64: open_how.flags: offset 0, header 1' plant-offset.log
+          grep -ho 'error: abi: .*' plant-*.log | sort -u | tee $out/plants >&2
+        '';
+      };
+      p5 = (import ./tests/proofs/p5 { inherit pkgs lib zigSet; }).aarch64;
     };
   };
 in

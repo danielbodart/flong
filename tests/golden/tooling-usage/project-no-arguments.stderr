@@ -1,1 +1,1 @@
-usage: flong-seccomp-project NAMES 1|13|38|log DIR < POLICY
+usage: flong-seccomp project DUMP NAMES 1|13|38|log DIR < POLICY

@@ -67,11 +67,28 @@ pub fn fail(e: sys.E, comptime fmt: []const u8, args: anytype) Error {
     return error.Reported;
 }
 
-/// A result's value, or its errno said as `fail` says it.
-pub fn check(r: anytype, comptime fmt: []const u8, args: anytype) Error!@FieldType(@TypeOf(r), "ok") {
-    return switch (r) {
+/// A result's value, or its errno said as `fail` says it. An open of
+/// fd.zig's is `error{TableFull}!Result(Fd(k))`, and its TableFull is said
+/// as "<body>: too many open descriptors" (ZIG.md, "The descriptor layer").
+pub fn check(r: anytype, comptime fmt: []const u8, args: anytype) Error!Checked(@TypeOf(r)) {
+    const res = switch (@typeInfo(@TypeOf(r))) {
+        .error_union => |u| blk: {
+            if (u.error_set != error{TableFull})
+                @compileError("msg.check: an error union other than error{TableFull}!Result");
+            break :blk r catch return refuse(fmt ++ ": too many open descriptors", args);
+        },
+        else => r,
+    };
+    return switch (res) {
         .ok => |v| v,
         .err => |e| fail(e, fmt, args),
+    };
+}
+
+fn Checked(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .error_union => |u| @FieldType(u.payload, "ok"),
+        else => @FieldType(T, "ok"),
     };
 }
 
@@ -389,4 +406,9 @@ test "check unwraps a result, and says an errno once" {
     defer prog = "flong";
     const bad: sys.Result(usize) = .{ .err = .BADF };
     try testing.expectError(error.Reported, check(bad, "planted by msg.zig's test, ignore", .{}));
+    // An open's two failures, and its value.
+    const opened: error{TableFull}!sys.Result(u16) = .{ .ok = 3 };
+    try testing.expectEqual(@as(u16, 3), try check(opened, "never said", .{}));
+    const full: error{TableFull}!sys.Result(u16) = error.TableFull;
+    try testing.expectError(error.Reported, check(full, "planted by msg.zig's test, ignore", .{}));
 }

@@ -63,11 +63,11 @@
 let
   inherit (pkgs) lib;
 
-  # The seccomp tooling of seccomp/policy.nix as it is today, over
   # golden/dump.txt in place of the live `systemd-analyze syscall-filter`,
-  # so a systemd bump changes no case. dump.txt is that dump as policy.nix's
-  # `dump` makes it (comment lines dropped) from systemd 261.2, so `dump`
-  # here has the same bytes.
+  # so a systemd bump changes no case. dump.txt is that dump as
+  # seccomp/policy.nix's `dump` makes it (comment lines dropped) from systemd
+  # 261.2, so `dump` here has the same bytes; the tooling cases name it as
+  # @DUMP@.
   analyze = pkgs.writeShellScriptBin "systemd-analyze" ''
     [ "$*" = syscall-filter ] || exit 99
     exec ${pkgs.coreutils}/bin/cat ${./golden/dump.txt}
@@ -78,45 +78,9 @@ let
     compiler = seccomp;
   };
 
-  # `tooling SUB DUMP ARG...` runs today's tools in the argv of the
-  # subcommands that replace them (ZIG.md quirks 16 and 38), so that
-  # phase 2 (a) runs the same cases with `flong-seccomp` as the program:
-  # `expand DUMP SPEC...` is policy.nix:29-30's command line; `render DUMP
-  # NAMES DENY` and `project DUMP NAMES DENY DIR` drop DUMP, which is
-  # built into the bash (policy.nix:33, 176), and run it. Only the usage
-  # lines differ, and those cases are the tooling-usage set.
-  tooling = pkgs.writeShellApplication {
-    name = "tooling";
-    runtimeInputs = [
-      pkgs.coreutils
-      pkgs.gawk
-    ];
-    text = ''
-      sub=$1
-      shift
-      if (($# > 0)); then
-        if [[ $1 != "${policy.dump}" ]]; then
-          echo "tooling: DUMP is not ${policy.dump}: $1" >&2
-          exit 99
-        fi
-        shift
-      fi
-      case $sub in
-        expand)
-          awk -f ${../seccomp/expand.awk} ${policy.dump} "$@" | LC_ALL=C sort
-          ;;
-        render) exec ${policy.render}/bin/flong-seccomp-render "$@" ;;
-        project) exec ${policy.project}/bin/flong-seccomp-project "$@" ;;
-        *)
-          echo "tooling: no subcommand $sub" >&2
-          exit 99
-          ;;
-      esac
-    '';
-  };
-
   # Each set's program and derived values. A set whose directory does not
-  # exist is skipped.
+  # exist is an evaluation error: skipped, it would pass having compared
+  # nothing.
   sets = {
     # Recorded from the C of 2026-09-23 (seccomp/flong-seccomp.c, deleted
     # in phase 1 b): every message it prints but three no input reaches,
@@ -130,16 +94,17 @@ let
     };
 
     # Recorded from the awk and bash of 2026-09-23 (seccomp/expand.awk,
-    # seccomp/policy.nix:81-209) over golden/dump.txt, through `tooling`
-    # above: expand-* the names of every tier variant and the expander's
-    # refusals, render-* the rendered policies, project-* a project corpus.
-    # parity.groups and strict.groups are copies of seccomp/'s. A project
-    # case that compiles has NAME.policy, the policy it renders, from which
-    # the check derives its key, KEY, as policy.nix:183 does: the sha256 of
-    # the compiler's store path, a newline, and the policy without its
-    # trailing newline (quirk 36).
+    # seccomp/policy.nix:81-209, deleted in phase 2 b) over golden/dump.txt,
+    # through a `tooling SUB DUMP ARG...` that ran them in the argv of the
+    # subcommands that replaced them (ZIG.md quirks 16 and 38): expand-* the
+    # names of every tier variant and the expander's refusals, render-* the
+    # rendered policies, project-* a project corpus. parity.groups and
+    # strict.groups are copies of seccomp/'s. A project case that compiles
+    # has NAME.policy, the policy it renders, from which the check derives
+    # its key, KEY, as the compiler does: the sha256 of its own store path,
+    # a newline, and the policy without its trailing newline (quirk 36).
     tooling = {
-      program = "${tooling}/bin/tooling";
+      program = "${seccomp}/bin/flong-seccomp";
       vars = {
         DUMP = "${policy.dump}";
         GOLDEN = "${cases}";
@@ -152,10 +117,10 @@ let
       '';
     };
 
-    # The tooling's usage errors, the one text phase 2 (a) changes (quirks
-    # 16 and 38): the same program as `tooling`, and its cases rewritten.
+    # The subcommands' usage errors, the one text phase 2 (a) changed
+    # (quirk 38): rewritten from the bash's then, and expand's added.
     tooling-usage = {
-      program = "${tooling}/bin/tooling";
+      program = "${seccomp}/bin/flong-seccomp";
       vars = {
         DUMP = "${policy.dump}";
       };
@@ -260,7 +225,8 @@ let
       {
         nativeBuildInputs = [ pkgs.diffutils ];
         passthru = {
-          inherit update tooling;
+          inherit update;
+          libSh = lib-sh;
         };
       }
       ''
@@ -330,7 +296,11 @@ let
         }
         ${lib.concatStrings (
           lib.mapAttrsToList (
-            name: s: lib.optionalString (builtins.pathExists (./golden + "/${name}")) (setCall "run_set" name s)
+            name: s:
+            if builtins.pathExists (./golden + "/${name}") then
+              setCall "run_set" name s
+            else
+              throw "golden: tests/golden/${name} does not exist"
           ) sets
         )}
         if ((failed)); then

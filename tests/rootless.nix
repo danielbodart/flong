@@ -546,6 +546,7 @@ in
 
   testScript = ''
     import shlex
+    import time
 
     CG = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/flong-sessions.service"
     STATE = "/run/user/1000/flong"
@@ -731,7 +732,12 @@ in
     with subtest("the gate: a failing hook, or a launcher killed in its hook, and the payload never runs"):
         out = machine.succeed(as_user("FLONG_TEST_HOOK=fail hooked 'echo payload-ran' 2>&1; echo rc=$?"))
         assert "the hook fails" in out and "postStart failed" in out, out
-        assert "payload-ran" not in out and out.split()[-1] == "rc=125", out
+        # The status ends the output, but not always on a line of its own:
+        # the C flong-init writes its refusal in three writes
+        # (flong-init.c:61-66), and the launcher kills the sandbox right
+        # after closing the gate (flong-launch.c:792-797), so a kill between
+        # them drops the newline and "rc=125" follows the message.
+        assert "payload-ran" not in out and out.rstrip("\n").endswith("rc=125"), out
 
         machine.succeed("rm -f /tmp/hook-hang-* /tmp/poststop-*")
         start("FLONG_TEST_HOOK=hang hooked", "echo payload-ran", "hang")
@@ -1015,7 +1021,11 @@ in
         policy = shlex.quote(learned_policy)
         machine.succeed(f"rm -rf {cache}")
         for run in ("cold", "warm"):
+            # Reported, never gated (ZIG.md, "Phase 2": the cold project
+            # compile time): the launch's wall time, from the test driver.
+            began = time.monotonic()
             out = machine.succeed(as_user(f"FLONG_TEST_POLICY={policy} project 'echo payload-ran' 2>&1"))
+            print(f"project policy, {run} launch: {time.monotonic() - began:.3f} s")
             assert out == "payload-ran\n", (run, out)
             assert len(machine.succeed(f"ls {cache}").split()) == 1, run
         # The control: the tool's own stderr does reach the caller's.

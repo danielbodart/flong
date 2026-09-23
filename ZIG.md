@@ -32,7 +32,7 @@ By the user (final; not revisited):
   (`pkgs/top-level/all-packages.nix:6745` in the locked nixpkgs `eaad0894`,
   whose unqualified `zig` is 0.16, `:6756`). minish (property tests) and
   zwanzig (static analysis) are lazy dependencies pinned to tags (minish
-  v0.1.0, zwanzig v0.15.1, `spike/fd-zig/build.zig.zon`).
+  v0.1.0, zwanzig v0.15.1, `build.zig.zon:8-16`).
 - **Scope.** Into Zig: the four programs; the C fixtures
   (`tests/parity/bpfdump.c`, `tests/parity/probe.c`, and the inline `swapper`
   and `ioctl-probe` at `tests/rootless.nix:46-94`); the seccomp tooling
@@ -119,6 +119,11 @@ By this plan (each detailed below):
 | the Zig `flong-seccomp` against the C (phase 1 a) | `checks.seccomp-transition`: 123 comparisons (17 rendered policies, audit, tty, nsmask, 106 golden cases), stdout by `cmp`, stderr and status all equal; tier filters 1550 (parity and strict, each of 1, 13, log, debug, nestedSandbox), 1324 and 1242 (38), 1321 and 1257 (allow/deny), audit 26, tty 19, nsmask 49; parity's live filters 1550, 26, 19, 49 for both tiers. A planted `ctl_optimize` 1: 32 stdout differences, golden red. Fuzzing both binaries, 87,000 policies (about 1,500 accepted) and 39 edge cases: 0 differences | this host, 2026-09-23, phase 1 (a) and its reviews |
 | the Zig `flong-seccomp` (phase 1 a) | 41,096 bytes stripped (the C 17,256), PT_GNU_STACK size 0, needs `libseccomp.so.2` and `libc.so.6`; no zig in the closure; closure 37,953,832 bytes (the C 48,454,728: it also held gcc-lib and the source) | same, `readelf -lW`, `nix path-info -rS` |
 | phase 1's derivations, `nix build --rebuild` | `seccomp` 8-10.9 s, bit-identical; `native-test` Debug 14.7 s, release 23.9 s; `native-analyze` 81-88 s; `native-lint` 8 s; `cross-aarch64` 7 s. Local `nix flake check`, partly cached: 6 min 8 s; test scripts parity 22.1 s, basic 88.7 s, rootless 113.2 s, native 19.0 s | same |
+| `nix flake check` in CI, before phase 2 | 9 min 37 s (the step; the run 10 min 4 s) | run 35888978900, 0dc291c |
+| the Zig tooling against the awk and bash (phase 2 a) | `checks.seccomp-tools-transition`, over the live dump: 109 comparisons (11 names files: parity and strict, each plain, debug, nestedSandbox, both, allow/deny, and `@known`; 8 rendered policies; the 77 tooling golden cases, 12 projects compiling, 18 refused; a bad DENY 4 ways, a warm cache, an unsorted NAMES, an unwritable DIR, umask 0277, a directory as each operand), all equal, each compiled project's key equal to `printf '%s\n%s' $seccomp "$policy" \| sha256sum`; each comparison records which side ran and must be old against Zig. Fuzzing both sides (about 4,000 expand, 5,000 render, 2,700 project runs; 13 DIR states, 11 spellings, 10 umasks): after four fixes (the reopen under a umask without owner write, mktemp's line, a directory operand skipped, an empty DUMP) no difference but quirk 46. Plants in a scratch copy, each caught: by golden and the check, the stats line printed, the temp file left, a newline added to the key, the sort reversed, the directories 0755, a changed key byte, a rule dropped; by the check, comm's warnings dropped, each of the four fixes reverted, the old tools on both sides; by golden, a changed usage line, a missing set; by native-test, `close` without the generation bump, opens without `O_CLOEXEC`; by rootless, the project's stderr dropped or a stray line on it | this host, 2026-09-23, phase 2 (a) and its reviews |
+| the project compile, cold and warm (phase 2 a; reported, not gated) | `flong-seccomp project` on the host, a groups policy, strict names, median of 21 (p10-p90): cold 31.6 ms (28.1-33.1), warm 3.4 ms (2.8-3.5); an earlier run 37.7 ms (34.4-47.3) and 6.4 ms; the bash it replaces, cold 85.8 ms (80.9-89.0), warm 42.4 ms (38.1-45.8). A launch in `checks.rootless`, one sample each, three runs: cold 0.221, 0.181, 0.205 s, warm 0.153, 0.179, 0.182 s; on the parent 0dc291c, cold 0.277 s, warm 1.145 s | same, `rootless.nix`'s stderr subtest timed by the driver |
+| the gate subtest's one red run (phase 2 a; `rootless.nix:732-740`) | the output ended `…not starting the payloadrc=125`: the C flong-init's refusal is three `stderr` writes (`flong-init.c:60-64`) and teardown kills the sandbox right after closing the gate (`flong-launch.c:792-797`), so a kill between them drops the newline; not the Zig's (the `hooked` box has no project policy). The assertion now takes `rc=125` at the end of the output, on its own line or not; phase 3's one `writev` removes the race | this host, 2026-09-23, the failing log and a green re-run of the same derivation |
+| phase 2's derivations, `nix build --rebuild` | `seccomp` 10.9-11.6 s, bit-identical; flong-seccomp 139,360 bytes stripped (phase 1: 41,096: the subcommands, sha256, hash maps, sort), PT_GNU_STACK size 0, closure 38,052,096 bytes, no zig; `native-test` Debug 15.7 s, release 26.9 s; `native-analyze` 76.8 s; `native-lint` 4.5 s; `cross-aarch64` 13.1 s and P5's aarch64 archive 5.8 s; golden 5.7 s; the transition check 5.8 s. Local `nix flake check`, partly cached: 4 min 43 s and 5 min 11 s; the final one 35 min 23 s, beside a `--no-build --all-systems` evaluation that itself took 35 min 13 s (cause not investigated); test scripts native 18.3 s, parity 21.4 s, basic 83.6 s, rootless 113.0 s. The launcher's store path is unchanged (`rr1aja5r…-flong-launcher`) | same |
 
 **Reporting.** CI runs after a push and trunk commits are never amended, so
 each phase's first commit reports the previous push's CI flake-check time (run
@@ -185,7 +190,7 @@ At the root, `build.zig`, `build.zig.zon`, `.zwanzig.json`, `native.nix`,
 
 ### The descriptor layer: `fd.zig`
 
-The spike's table (`spike/fd-zig/src/fd.zig`), moved onto `sys.zig`. A handle
+The spike's table (`spike/fd-zig/src/fd.zig`, archived in phase 2), moved onto `sys.zig`. A handle
 is `{slot: u16, gen: u32}`; `close` bumps the generation; `raw()` on a stale
 handle panics; the kind is in the type. Every open is `O_CLOEXEC`.
 
@@ -294,7 +299,7 @@ Zig rejects 0: the smallest size that works, its `prlimit64` recorded).
 
 | binary | root | modules | libc | on panic |
 |---|---|---|---|---|
-| `flong-seccomp` | `seccomp/main.zig` | compile, expand, render, project, scmp, fd, sys, msg, errno, num; `std.crypto.hash.sha2.Sha256` | yes | `flong-seccomp: internal error: <msg>`, exit 1, the refusal callers handle; nothing on stdout |
+| `flong-seccomp` | `seccomp/main.zig` | compile, expand, render, project, scmp, fd, sys, msg, errno, num; `std.crypto.hash.sha2.Sha256` | yes | `flong-seccomp: internal error: <msg>` (under `render` and `project`, their own prefix, as their messages), exit 1, the refusal callers handle; nothing on stdout |
 | `flong-init` | `init.zig` | sys, msg, errno, num; no table, proc or allocator (DESIGN.md:1379-1383) | no | `flong-init: internal error: <msg>`, 125: the payload never ran |
 | `flong-sweeper` | `sweeper.zig` | record, cgroup, names, proc, sig, fd, sys, msg, errno, num | no | `flong-sweeper: …`, 125; its exit stops the holder and every session (`module.nix:936-941`), so it must be panic-free on hostile records |
 | `flong-launch` | `launch.zig` | spec, ns, cgroup, record, mount, tty, passwd, names, proc, sig, fd, sys, msg, errno, num | no | `flong-launch: …`, 125: a helper's 125 means "said why" (`flong-util.c:507-509`, `flong-ns.c:28-40`); the main process skips teardown, the sweeper releases, the watchdog restores the terminal, `--die-with-parent` ends the payload |
@@ -386,7 +391,7 @@ the child (`flong-mount.c:524`). flong-seccomp: an arena over `c_allocator`.
     (`GeneralPurposeAllocator`, `DebugAllocator` in `src/`).
 
   `lint` runs fdlint on `tests/zig/lint/bad.zig` (every planted line
-  reported, as `spike/fd-zig/build.zig:71-87`) and `good.zig` (nothing
+  reported, as the spike's `build.zig:71-87` did) and `good.zig` (nothing
   reported: `extern struct`, `callconv(.c)`, `builtin.os.tag`, an allowed
   `export fn`).
 - **zwanzig** on `src/`, method-name models (`receiver_type` and `fqn` do not
@@ -397,7 +402,8 @@ the child (`flong-mount.c:524`). flong-seccomp: an arena over `c_allocator`.
   `start`, `create`, `openTree`, `fsopen`, `fsmount`, `openNs`, `pidfdOpen`,
   `openPtmx`, `openSlave`, `reopenOut`), added with the function; closes
   `close`, `await`, `reapNow`, `release`. It must still report
-  `tests/zig/analyze/bugs.zig` (spike B1-B3, B6-B8); leaks come from
+  `tests/zig/analyze/bugs.zig` (spike B1-B3, B6-B8; B9-B11 on `fd.zig` from
+  phase 2); leaks come from
   `liveCount` and the `/proc/self/fd` property.
 - **compile-fail:** read on `pipe_w`; `pidfd` for `dir`; `dir` as
   `Spawn.cgroup`; `netns` to an `mntns` setns; `close` on `Held` or `Stdio`;
@@ -440,8 +446,8 @@ the child (`flong-mount.c:524`). flong-seccomp: an arena over `c_allocator`.
   integration` over the whole package (the proofs, then the spawn probe,
   walker, ns and pty drivers, on the branch `spec-probe`) for `checks.native`
   and `golden`. Phase 0's is per-proof derivations instead: it finds each
-  `spike/proofs/<pN>/default.nix` by `readDir` (`spike/proofs/README.md`),
-  for `checks.integration` and `checks.native`.
+  `tests/proofs/<pN>/default.nix` by `readDir` (`tests/proofs/README.md`;
+  `spike/proofs/` until phase 2), for `checks.integration` and `checks.native`.
 - **`deps = pkgs.zig_0_15.fetchDeps { pname; version; src = <build.zig*>;
   fetchAll = true; hash; }`** (`fetchAll` defaults to false, fetching no lazy
   dependency, `fetcher.nix:7-12, 37`), linked into `$ZIG_GLOBAL_CACHE_DIR/p`
@@ -648,7 +654,7 @@ visible difference the port requires. Fixes wait for Open decisions.
 | 34 | the project tool never shows the compiler's stats line on success (`policy.nix:201-205`) | Keep: the in-process compile suppresses it |
 | 35 | a project that denies every name renders `allow ` with no name (`policy.nix:179`, `mapfile` at `:98`), refused ("missing syscall name") | Keep (inferred; the phase-2 corpus pins it) |
 | 36 | the project key is sha256 of the compiler's store path, `\n`, and the rendered policy without its trailing newline (`policy.nix:179-184`); the compiler reads the policy plus one newline (`<<<`, `:201`) | Keep both. The path is the seccomp derivation's, which moves only with its own sources, `build.zig*`, libseccomp or Zig, not with launcher edits; caches are orphaned when it moves |
-| 37 | the project's temp file is `mktemp`'s `.KEY.XXXXXX`, then `mv -T` (`policy.nix:200-206`) | Mechanism: `.KEY.<6 random>`, `O_CREAT\|O_EXCL\|O_WRONLY` 0600, `renameat`; a panic leaves the name, the next compile uses another |
+| 37 | the project's temp file is `mktemp`'s `.KEY.XXXXXX`, then `mv -T` (`policy.nix:200-206`) | Mechanism: `.KEY.<6 random>`, `O_CREAT\|O_EXCL\|O_WRONLY` 0600, then opened again by name as the shell's `>` did (a umask without the owner's write bit refuses it, as before), `renameat`; mktemp's refusal keeps its own line; a panic leaves the name, the next compile uses another |
 | 38 | the tooling's messages: `flong-seccomp-project:` and `flong-seccomp-render:` prefixes (`policy.nix:86-94, 142-195`); in `project`, the compiler's captured lines keep their `flong-seccomp: line N:` prefix (`:201-205`), and an expand failure prints the expander's unprefixed line and exits 1 (`:173-176`) | Keep; only the usage lines change: `usage: flong-seccomp render DUMP NAMES 1\|13\|38\|log`, `usage: flong-seccomp project DUMP NAMES 1\|13\|38\|log DIR < POLICY`, and a new `usage: flong-seccomp expand DUMP SPEC...` |
 | 39 | `tty_finish` is safe on the zero struct, whose fds are 0 (`flong-tty.h`) | Moot: optionals |
 | 40 | a stale or wrong-kind handle reaches the wrong file in C silently | New: Zig panics, 125; fails closed |
@@ -657,6 +663,7 @@ visible difference the port requires. Fixes wait for Open decisions.
 | 43 | a redirected stderr stays where the caller sent it: in relay `stdio[2]` is the slave iff `isatty(2)` (`flong-tty.c:205-206`) | Keep |
 | 44 | after a hang-up the master is closed, and resize and the drain check for it (`flong-tty.c:281-282, 386-389`) | Keep: `tty.master = null` after `close`; resize and drain branch on null |
 | 45 | `launcher-start` is stamped when main begins and printed after the signalfd (`flong-launch.c:853, 887-889`) | Keep, `traceAt` |
+| 46 | the tooling on inputs no caller gives (phase 2's fuzz): `project` with an unreadable stdin printed bash's read error and compiled the tier without the project's lines, exit 0 (fails open); texts that named the old tools' store paths (`awk: /nix/store/…-expand.awk:N:`, `<script>: line N:`) or followed the locale (the word check `^@?[a-z0-9_-]+$`, gawk's multibyte warning, mktemp's quotes) | Change: `project` refuses (`reading the policy: <strerror>`), exit 1; flong's prefixes and the C locale's text, ASCII words; each exit status as before. None is test-asserted |
 
 ## Phases
 
@@ -703,7 +710,7 @@ production code. Proofs live in `spike/proofs/`, built by a first
 
 **Result (2026-09-23, this host):** P1-P6 pass, no fallback used; the
 answers and numbers are in Measured, the proofs in `spike/proofs/` (README
-there), the launcher and seccomp store paths unchanged. Still open for
+there; archived or moved to `tests/proofs/` in phase 2), the launcher and seccomp store paths unchanged. Still open for
 Accept: the `workflow_dispatch` run.
 
 **Accept:** every proof green in a `workflow_dispatch` run of the proof commit

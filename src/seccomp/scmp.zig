@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const sys = @import("sys");
+const fd = @import("fd");
 
 /// scmp_filter_ctx, a filter being built.
 pub const Filter = opaque {};
@@ -107,16 +108,20 @@ pub fn ruleAddArray(ctx: *Filter, action: u32, nr: c_int, cmps: []const ArgCmp) 
     return status(seccomp_rule_add_array(ctx, action, nr, @intCast(cmps.len), cmps.ptr));
 }
 
-/// Where a filter goes. Phase 2 adds the project's temp file, an
-/// Fd(.file) (ZIG.md, "Lint and analysis": exportBpf is one of the ways
-/// a descriptor's number leaves the table).
-pub const Out = enum { stdout };
+/// Where a filter goes: stdout, or the project's temp file (ZIG.md, "Lint
+/// and analysis": exportBpf is one of the ways a descriptor's number leaves
+/// the table).
+pub const Out = union(enum) {
+    stdout,
+    file: fd.File,
+};
 
 /// seccomp_export_bpf: the filter's bytes in one write (api.c:760, quirk
 /// 17).
 pub fn exportBpf(ctx: *const Filter, out: Out) ?sys.E {
-    const fd: c_int = switch (out) {
+    const n: c_int = switch (out) {
         .stdout => 1,
+        .file => |f| f.raw(),
     };
-    return status(seccomp_export_bpf(ctx, fd));
+    return status(seccomp_export_bpf(ctx, n));
 }

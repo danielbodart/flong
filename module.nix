@@ -469,13 +469,15 @@ let
     && config.security.wrappers ? ${w} && config.security.wrappers.${w}.enable;
 
   # The seccomp pipeline: the compiler, the tiers expanded from this system's
-  # own `systemd-analyze syscall-filter`, the fixed filters, and the tool that
-  # compiles a project's policy at launch. A filter's store path is named by
-  # its content, so declarations with equal policies share it.
+  # own `systemd-analyze syscall-filter`, and the fixed filters; the same
+  # compiler compiles a project's policy at launch (`flong-seccomp project`).
+  # A filter's store path is named by its content, so declarations with
+  # equal policies share it.
+  seccompCompiler = import ./seccomp { inherit pkgs; };
   seccomp = import ./seccomp/policy.nix {
     inherit pkgs lib;
     systemd = config.systemd.package;
-    compiler = import ./seccomp { inherit pkgs; };
+    compiler = seccompCompiler;
   };
 
   # How many user namespaces a nestedSandbox session may make below its own.
@@ -622,7 +624,7 @@ let
         seccomp_tier=${q (if s.tier == null then "" else "${seccomp.filterFor s}")}
         seccomp_fixed=(${qs ([ seccomp.fixed.audit seccomp.fixed.tty ] ++ lib.optional (! s.nestedSandbox) seccomp.fixed.nsmask)})
         seccomp_project=(${qs (lib.optionals (c.seccompPolicy != "")
-          [ "${seccomp.project}/bin/flong-seccomp-project" "${seccomp.namesFor s}" (seccomp.deny s) ])})
+          [ "${seccompCompiler}/bin/flong-seccomp" "project" "${seccomp.dump}" "${seccomp.namesFor s}" (seccomp.deny s) ])})
         seccomp_policy_snippet=${q c.seccompPolicy}
         export -n ${lib.concatStringsSep " " names}
         }

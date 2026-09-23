@@ -1,7 +1,0 @@
-{
-  "enabled_rules": ["store-violations-engine"],
-  "resource_models": [
-    { "kind": "open", "fqn": "posix.open" },
-    { "kind": "close", "fqn": "posix.close" }
-  ]
-}

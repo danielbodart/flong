@@ -1,6 +1,8 @@
 //! compile.zig: compiles a policy on stdin to one BPF program on stdout. A
 //! whole port of seccomp/flong-seccomp.c, function by function and in its
-//! order; each function cites the C it ports.
+//! order; each function cites the C it ports. `project` compiles from memory
+//! into its temp file, and prints no stats line (quirk 34), so the input,
+//! the output and the stats line are the caller's.
 //!
 //!   default N|allow           first directive, once: the action for any call
 //!                             no rule names, ERRNO(N) or ALLOW
@@ -26,6 +28,7 @@ const std = @import("std");
 const sys = @import("sys");
 const msg = @import("msg");
 const num = @import("num");
+const fd = @import("fd");
 const scmp = @import("scmp.zig");
 
 const max_line = 4095;
@@ -271,22 +274,47 @@ fn directive(p: *Policy, buf: [:0]u8) msg.Error!void {
     return rule(p, ctx, w[0..n]);
 }
 
-/// Reads stdin as getline(3) does, a line at a time, each without its
+/// Where a policy comes from: stdin, or text in memory, read as stdin is.
+pub const Input = union(enum) {
+    stdin,
+    text: []const u8,
+};
+
+const Source = struct {
+    input: Input,
+    at: usize = 0,
+
+    fn read(self: *Source, buf: []u8) sys.Result(usize) {
+        switch (self.input) {
+            .stdin => return fd.Stdio.in.read(buf),
+            .text => |t| {
+                const n = @min(buf.len, t.len - self.at);
+                @memcpy(buf[0..n], t[self.at..][0..n]);
+                self.at += n;
+                return .{ .ok = n };
+            },
+        }
+    }
+};
+
+/// Reads the input as getline(3) does, a line at a time, each without its
 /// newline and the last one with or without (flong-seccomp.c:293-325). A
 /// line is kept only up to max_line bytes and counted beyond, since a
 /// longer one is refused whatever it holds: the C's getline grew its buffer
 /// to the whole line, which no answer depended on. The one buffer is the
-/// arena's, taken before anything is read.
-pub fn compile(p: *Policy, gpa: std.mem.Allocator) msg.Error!void {
+/// arena's, taken before anything is read. The filter goes to `out`; the
+/// stats line is `stats`, the caller's to print.
+pub fn compile(p: *Policy, gpa: std.mem.Allocator, input: Input, out: scmp.Out) msg.Error!void {
     const line = gpa.alloc(u8, max_line + 1) catch
         return msg.fail(.NOMEM, "reading the policy", .{});
     var len: usize = 0; // the line's length so far, which may exceed max_line
     var pending = false; // bytes of a line read, its newline not yet
     var chunk: [4096]u8 = undefined;
     var read_error: ?sys.E = null;
+    var source: Source = .{ .input = input };
 
     reading: while (true) {
-        const got = switch (sys.read(0, &chunk)) {
+        const got = switch (source.read(&chunk)) {
             .ok => |n| n,
             .err => |e| {
                 read_error = e;
@@ -318,8 +346,12 @@ pub fn compile(p: *Policy, gpa: std.mem.Allocator) msg.Error!void {
     if (read_error) |e|
         return msg.fail(e, "reading the policy", .{});
     const ctx = p.ctx orelse return refuse(p, "empty policy: no default", null);
-    if (scmp.exportBpf(ctx, .stdout)) |e|
+    if (scmp.exportBpf(ctx, out)) |e|
         return msg.fail(e, "libseccomp could not export the filter", .{});
+}
+
+/// The C's last line on success (flong-seccomp.c:323).
+pub fn stats(p: *const Policy) void {
     msg.say("{d} rules, {d} names libseccomp does not know", .{ p.rules, p.unknown });
 }
 

@@ -1,19 +1,19 @@
-# What checks.native and the build-sandbox proofs run: the spike, built as a
-# zigSet, and every proof in spike/proofs/ (ZIG.md, "Phase 0: proofs"). Never
-# a flake output or package: flake.nix reaches it only through
-# checks.integration, which builds every derivation here, and checks.native,
-# which puts `vm` on its node.
+# What checks.native and the build-sandbox proofs run: every proof in
+# tests/proofs/ (ZIG.md, "Phase 0: proofs" and "Phase 2"). Never a flake
+# output or package: flake.nix reaches it only through checks.integration,
+# which builds every derivation here, and checks.native, which puts `vm` on
+# its node.
 #
 # Every value is a derivation:
-#   spike        the spike's `install`, a plain zigSet
 #   <pN>         a proof's `build`, whose own build runs its assertions
 #   <pN>-bins    a proof's `bins`, a tree with bin/
 #   vm           every proof's bins joined, for the VM node's PATH, with
 #                passthru.vmScripts, the proofs' testScript fragments in order
 #
-# A proof is a directory spike/proofs/<pN>/ holding a default.nix; the
-# contract is spike/proofs/README.md. Adding one needs no edit here or in
-# tests/native.nix.
+# A proof is a directory tests/proofs/<pN>/ holding a default.nix; the
+# contract is tests/proofs/README.md. Adding one needs no edit here or in
+# tests/native.nix. The spike and the retired proofs are in
+# ~/Projects/flong-spikes-archive/zig.
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:11-20
 # does, since zig_0_15 is that nixpkgs' (ZIG.md, "Decided").
@@ -34,17 +34,8 @@ let
   # their arguments. A proof passes its own root.
   inherit (import ../native.nix { inherit pkgs; }) zigSet zigDeps;
 
-  spikeRoot = ../spike/fd-zig;
-
-  # The spike's install needs src/ only.
-  spike = zigSet {
-    pname = "fd-spike";
-    root = spikeRoot;
-    files = [ (spikeRoot + "/src") ];
-  };
-
-  # Each spike/proofs/<pN>/default.nix, in name order.
-  proofsDir = ../spike/proofs;
+  # Each tests/proofs/<pN>/default.nix, in name order.
+  proofsDir = ./proofs;
   proofNames =
     if builtins.pathExists proofsDir then
       lib.sort (a: b: a < b) (
@@ -59,7 +50,7 @@ let
   proofs = lib.genAttrs proofNames (
     name:
     import (proofsDir + "/${name}") {
-      inherit pkgs lib zigSet zigDeps spikeRoot;
+      inherit pkgs lib zigSet zigDeps;
     }
   );
 
@@ -80,4 +71,4 @@ let
     ) proofNames;
   };
 in
-{ inherit spike vm; } // builds // bins
+{ inherit vm; } // builds // bins
