@@ -18,7 +18,11 @@
 //!
 //! Phase 2 has the kinds flong-seccomp needs, `file` and `dir` (ZIG.md,
 //! "Descriptor kinds"); each later phase adds its own, with its minting
-//! functions and zwanzig's open model for each (.zwanzig.json).
+//! functions and zwanzig's open model for each (.zwanzig.json). Phase 4
+//! adds the mount helper's (flong-mount.c): `path` (O_PATH), `tree` (a
+//! detached mount), `fsctx` (a filesystem being configured), the four
+//! namespaces it enters, `pipe_r` (the ready pipe) and `pidfd` (the
+//! leader's, adopted); and `adoptForeign`, for the shim alone.
 //!
 //!   Fd(k)       an owned handle: `close` once, then every copy is stale
 //!   Held(k)     `h.holdUntilExit()`: the same descriptor, no `close`, for
@@ -35,7 +39,48 @@
 const std = @import("std");
 const sys = @import("sys");
 
-pub const Kind = enum(u8) { file, dir };
+pub const Kind = enum(u8) {
+    file,
+    dir,
+    /// O_PATH: a place, not its contents (flong-mount.c:145, 314-353).
+    path,
+    /// A detached mount: open_tree's clone or fsmount's new one.
+    tree,
+    /// fsopen's filesystem context.
+    fsctx,
+    userns,
+    mntns,
+    netns,
+    cgroupns,
+    pipe_r,
+    pidfd,
+};
+
+/// A namespace setns enters, with the kind of descriptor naming it.
+pub const Ns = enum {
+    user,
+    mnt,
+    net,
+    cgroup,
+
+    fn kind(comptime ns: Ns) Kind {
+        return switch (ns) {
+            .user => .userns,
+            .mnt => .mntns,
+            .net => .netns,
+            .cgroup => .cgroupns,
+        };
+    }
+
+    fn flag(comptime ns: Ns) u32 {
+        return switch (ns) {
+            .user => sys.CLONE.NEWUSER,
+            .mnt => sys.CLONE.NEWNS,
+            .net => sys.CLONE.NEWNET,
+            .cgroup => sys.CLONE.NEWCGROUP,
+        };
+    }
+};
 
 /// Slots in the table: 1024, the default soft RLIMIT_NOFILE, where the C
 /// would get EMFILE (quirk 41). The spike had 64 (fd.zig:22).
@@ -152,6 +197,16 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
             release(s);
         }
 
+        /// `close`, answering close(2)'s errno, as flong-mount.c:285 reads
+        /// it. The handle is stale whatever it answers.
+        pub fn closeChecked(self: Self) sys.Result(void) {
+            if (own == .held) @compileError("close on a Held descriptor: it is kept until the process exits");
+            const s = live(self.slot, self.gen, k);
+            const r = sys.closeChecked(s.raw);
+            release(s);
+            return r;
+        }
+
         /// The same descriptor, kept until the process exits: the Held
         /// handle has no `close`. This one stays usable, a copy of it.
         pub fn holdUntilExit(self: Self) Held(k) {
@@ -170,7 +225,7 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
         // ---- file ----
 
         pub fn read(self: Self, buf: []u8) sys.Result(usize) {
-            comptime need("read", &.{.file});
+            comptime need("read", &.{ .file, .pipe_r });
             return sys.read(self.raw(), buf);
         }
 
@@ -196,7 +251,7 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
         }
 
         pub fn fstat(self: Self) sys.Result(sys.Stat) {
-            comptime need("fstat", &.{ .file, .dir });
+            comptime need("fstat", &.{ .file, .dir, .path, .tree });
             return sys.fstat(self.raw());
         }
 
@@ -209,13 +264,13 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
         // ---- dir: calls on paths relative to it ----
 
         pub fn mkdirat(self: Self, path: [*:0]const u8, mode: sys.mode_t) sys.Result(void) {
-            comptime need("mkdirat", &.{.dir});
+            comptime need("mkdirat", &.{ .dir, .path, .tree });
             return sys.mkdirat(self.raw(), path, mode);
         }
 
         /// unlinkat(2); `flags` is 0 or AT.REMOVEDIR.
         pub fn unlinkat(self: Self, path: [*:0]const u8, flags: u32) sys.Result(void) {
-            comptime need("unlinkat", &.{.dir});
+            comptime need("unlinkat", &.{ .dir, .path });
             return sys.unlinkat(self.raw(), path, flags);
         }
 
@@ -236,6 +291,80 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
             comptime need("getdents64", &.{.dir});
             return sys.getdents64(self.raw(), buf);
         }
+
+        /// fchownat(2) of `path` under it; "" with AT.EMPTY_PATH is the
+        /// file itself (flong-mount.c:219, 336).
+        pub fn fchownat(self: Self, path: [*:0]const u8, uid: u32, gid: u32, flags: u32) sys.Result(void) {
+            comptime need("fchownat", &.{ .dir, .path, .tree });
+            return sys.fchownat(self.raw(), path, uid, gid, flags);
+        }
+
+        // ---- path and tree: mounts ----
+
+        /// The unique id of the mount the file is on (flong-mount.c:57-64).
+        pub fn mountId(self: Self) sys.Result(u64) {
+            comptime need("mountId", &.{ .path, .tree });
+            return sys.mountId(self.raw());
+        }
+
+        /// mount_setattr(2) of the mount the file is on (AT_EMPTY_PATH),
+        /// with AT_RECURSIVE when `recursive` (flong-mount.c:157, 395, 492).
+        pub fn mountSetattr(self: Self, recursive: bool, attr: *const sys.MountAttr) sys.Result(void) {
+            comptime need("mountSetattr", &.{ .path, .tree });
+            const flags = sys.AT.EMPTY_PATH | (if (recursive) sys.AT_RECURSIVE else 0);
+            return sys.mountSetattr(self.raw(), "", flags, attr);
+        }
+
+        /// move_mount(2) of this detached tree onto `to` (both
+        /// MOVE_MOUNT_*_EMPTY_PATH, flong-mount.c:431, 448): nothing is
+        /// resolved by name.
+        pub fn moveTo(self: Self, to: Fd(.path)) sys.Result(void) {
+            comptime need("moveTo", &.{.tree});
+            return sys.moveMount(self.raw(), "", to.raw(), "", sys.MOVE_MOUNT_F_EMPTY_PATH | sys.MOVE_MOUNT_T_EMPTY_PATH);
+        }
+
+        // ---- fsctx: fsconfig ----
+
+        /// FSCONFIG_SET_STRING key=value.
+        pub fn setString(self: Self, key: [*:0]const u8, value: [*:0]const u8) sys.Result(void) {
+            comptime need("setString", &.{.fsctx});
+            return sys.fsconfig(self.raw(), sys.FSCONFIG.SET_STRING, key, value, 0);
+        }
+
+        /// FSCONFIG_SET_FLAG key.
+        pub fn setFlag(self: Self, key: [*:0]const u8) sys.Result(void) {
+            comptime need("setFlag", &.{.fsctx});
+            return sys.fsconfig(self.raw(), sys.FSCONFIG.SET_FLAG, key, null, 0);
+        }
+
+        /// FSCONFIG_SET_FD key to `dir`'s descriptor: a directory only, as
+        /// FSCONFIG_SET_FD's fget refuses an O_PATH one (flong-mount.c:221,
+        /// 226-228). One of the ways a number leaves the table.
+        pub fn setFd(self: Self, key: [*:0]const u8, dir: anytype) sys.Result(void) {
+            comptime need("setFd", &.{.fsctx});
+            const T = @TypeOf(dir);
+            if (!@hasDecl(T, "kind") or T.kind != .dir)
+                @compileError("FsCtx.setFd of a " ++ (if (@hasDecl(T, "kind")) @tagName(T.kind) else @typeName(T)) ++ " descriptor: FSCONFIG_SET_FD takes a directory, never O_PATH");
+            return sys.fsconfig(self.raw(), sys.FSCONFIG.SET_FD, key, null, dir.raw());
+        }
+
+        /// FSCONFIG_CMD_CREATE: the superblock.
+        pub fn create(self: Self) sys.Result(void) {
+            comptime need("create", &.{.fsctx});
+            return sys.fsconfig(self.raw(), sys.FSCONFIG.CMD_CREATE, null, null, 0);
+        }
+
+        // ---- namespaces ----
+
+        /// setns(2) into `ns`, which must be the namespace this descriptor
+        /// names: entering a network namespace's descriptor as a mount
+        /// namespace does not compile.
+        pub fn setns(self: Self, comptime ns: Ns) sys.Result(void) {
+            comptime need("setns", &.{ .userns, .mntns, .netns, .cgroupns });
+            if (comptime ns.kind() != k)
+                @compileError("setns(." ++ @tagName(ns) ++ ") of a " ++ @tagName(k) ++ " descriptor");
+            return sys.setns(self.raw(), ns.flag());
+        }
     };
 }
 
@@ -250,10 +379,12 @@ pub const Cwd = struct {
 };
 pub const cwd: Cwd = .{};
 
-/// The number of `at`, a directory handle (owned or held) or `cwd`.
+/// The number of `at`, a directory handle (owned or held), `cwd`, or an
+/// O_PATH handle or a detached tree, which name a directory as well
+/// (flong-mount.c:283-284, 384).
 fn dirRaw(at: anytype) sys.fd_t {
     const T = @TypeOf(at);
-    if (!@hasDecl(T, "kind") or T.kind != .dir)
+    if (!@hasDecl(T, "kind") or (T.kind != .dir and T.kind != .path and T.kind != .tree))
         @compileError("a directory handle or fd.cwd, not " ++ @typeName(T));
     return at.raw();
 }
@@ -271,6 +402,101 @@ pub fn openFile(at: anytype, path: [*:0]const u8, flags: sys.O, mode: sys.mode_t
 /// A directory under `at`, `O_RDONLY|O_DIRECTORY|O_CLOEXEC`.
 pub fn openDir(at: anytype, path: [*:0]const u8) Error!sys.Result(Dir) {
     return adopted(.dir, sys.openat(dirRaw(at), path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0));
+}
+
+/// openat(2) with O_PATH under `at`, O_CLOEXEC added: `flags` may add
+/// O_DIRECTORY and O_NOFOLLOW (flong-mount.c:599).
+pub fn openPath(at: anytype, path: [*:0]const u8, flags: sys.O) Error!sys.Result(Fd(.path)) {
+    var f = flags;
+    f.PATH = true;
+    f.CLOEXEC = true;
+    return adopted(.path, sys.openat(dirRaw(at), path, f, 0));
+}
+
+/// One component of a walk (flong-mount.c:29, 49-53, 318-335): openat2 of
+/// `name` under `at` with O_PATH, O_DIRECTORY when `directory`, and
+/// RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH, so a symlink,
+/// the last component's included, is ELOOP and nothing leaves `at`. The
+/// only RESOLVE_BENEATH caller.
+pub fn walkOpen(at: Fd(.path), name: [*:0]const u8, directory: bool) Error!sys.Result(Fd(.path)) {
+    const flags: sys.O = .{ .PATH = true, .DIRECTORY = directory, .CLOEXEC = true };
+    const how: sys.OpenHow = .{
+        .flags = @as(u32, @bitCast(flags)),
+        .mode = 0,
+        .resolve = sys.RESOLVE.NO_SYMLINKS | sys.RESOLVE.NO_MAGICLINKS | sys.RESOLVE.BENEATH,
+    };
+    return adopted(.path, sys.openat2(at.raw(), name, &how));
+}
+
+/// The flags an exact or following source open takes for kind `k`: O_PATH
+/// for a bind (flong-mount.c:145), O_RDONLY|O_DIRECTORY for an overlay's
+/// lower (:221).
+fn sourceFlags(comptime k: Kind) sys.O {
+    return switch (k) {
+        .path => .{ .PATH = true, .CLOEXEC = true },
+        .dir => .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true },
+        else => @compileError("a mount source is opened as a path or a dir, not a " ++ @tagName(k)),
+    };
+}
+
+/// An exact source (flong-mount.c:120): openat2 from AT_FDCWD with
+/// RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS, so a symlink anywhere on it
+/// is ELOOP. `k` is .path or .dir.
+pub fn openExact(comptime k: Kind, path: [*:0]const u8) Error!sys.Result(Fd(k)) {
+    const how: sys.OpenHow = .{
+        .flags = @as(u32, @bitCast(sourceFlags(k))),
+        .mode = 0,
+        .resolve = sys.RESOLVE.NO_SYMLINKS | sys.RESOLVE.NO_MAGICLINKS,
+    };
+    return adopted(k, sys.openat2(sys.AT.FDCWD, path, &how));
+}
+
+/// Any other source (flong-mount.c:121): open(2), following symlinks as
+/// its author intended. `k` is .path or .dir.
+pub fn openFollowing(comptime k: Kind, path: [*:0]const u8) Error!sys.Result(Fd(k)) {
+    return adopted(k, sys.openat(sys.AT.FDCWD, path, sourceFlags(k), 0));
+}
+
+/// open_tree(2) of `path` under `at` (a path or a tree), with
+/// OPEN_TREE_CLOEXEC added: `flags` holds OPEN_TREE_CLONE, AT_EMPTY_PATH,
+/// AT_RECURSIVE (flong-mount.c:148, 392).
+pub fn openTree(at: anytype, path: [*:0]const u8, flags: u32) Error!sys.Result(Fd(.tree)) {
+    const T = @TypeOf(at);
+    if (!@hasDecl(T, "kind") or (T.kind != .path and T.kind != .tree))
+        @compileError("open_tree under a path or a tree, not " ++ @typeName(T));
+    return adopted(.tree, sys.openTree(at.raw(), path, flags | sys.OPEN_TREE_CLOEXEC));
+}
+
+/// fsopen(2) of the filesystem type `name`, FSOPEN_CLOEXEC.
+pub fn fsopen(name: [*:0]const u8) Error!sys.Result(Fd(.fsctx)) {
+    return adopted(.fsctx, sys.fsopen(name, sys.FSOPEN_CLOEXEC));
+}
+
+/// fsmount(2) of a created context, FSMOUNT_CLOEXEC, with the mount
+/// attributes `attrs`: a detached tree.
+pub fn fsmount(ctx: Fd(.fsctx), attrs: u32) Error!sys.Result(Fd(.tree)) {
+    return adopted(.tree, sys.fsmount(ctx.raw(), sys.FSMOUNT_CLOEXEC, attrs));
+}
+
+/// The pidfd's process's namespace of kind `k`, through the pidfd
+/// ioctls (flong-mount.c:546-551): only the caller may ask, and the
+/// process is never looked up by number.
+pub fn openNs(pidfd: Fd(.pidfd), comptime k: Kind) Error!sys.Result(Fd(k)) {
+    const request = switch (k) {
+        .mntns => sys.PIDFD_GET_MNT_NAMESPACE,
+        .netns => sys.PIDFD_GET_NET_NAMESPACE,
+        .cgroupns => sys.PIDFD_GET_CGROUP_NAMESPACE,
+        else => @compileError("no pidfd ioctl answers a " ++ @tagName(k)),
+    };
+    return adopted(k, sys.ioctlFd(pidfd.raw(), request, 0));
+}
+
+/// A descriptor a C caller opened and handed over, as kind `k`: the
+/// mount-helper shim's (src/hybrid/mount_c.zig) U1, ready read end and
+/// leader's pidfd (ZIG.md, "The mount-helper shim"). The lint allows it
+/// there alone. It is not checked: the C knows what it passed.
+pub fn adoptForeign(comptime k: Kind, raw: sys.fd_t) Error!Fd(k) {
+    return adopt(k, raw);
 }
 
 // ---- stdio ----

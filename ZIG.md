@@ -129,6 +129,8 @@ By this plan (each detailed below):
 | the Zig flong-init (phase 3 a) | 40,312 bytes, static, stripped, no INTERP, PT_GNU_STACK size 0 (the C 17,408, dynamic, glibc); aarch64: static, no interpreter. The launcher set is `flong-launcher-0` (zigSet's version); Nix's fixup now strips the `$CC` binaries with `-S` (flong-launch 107,648 to 107,224 bytes, flong-sweeper 50,088 to 49,808); closure 43,825,072 bytes (54,318,016 before). `sys.zig` is a seccomp source, so seccomp's path moved once (quirk 36); a scratch edit of `src/init.zig`, `launcher/*.c` or `launcher/*.h` leaves seccomp's drv path unchanged, the launcher's moving (the control) | same, `readelf -lW`, `file`, `nix path-info -S` |
 | phase 3's derivations, `nix build --rebuild` | `launcher` 11.7-12.1 s, `seccomp` 10.8-11.4 s, each bit-identical; the transition subtest 2.4 s. Local `nix flake check -L`, alone, partly cached: 161.7 s and 291.8 s; `--no-build --all-systems` after it 276.8-278.9 s; test scripts native 33.7 s, parity 21.2 s, basic 83.8 s, rootless 110.1 s | same |
 | `nix build .#bench`, C flong-init (57e2de0) against Zig (phase 3 a; reported, not gated) | medians of 20, three runs, ms, median (p10-p90) per run. No network: C 31.8 (26.8-35.4), 31.0 (26.4-34.0), 31.8 (30.0-34.9); Zig 32.9 (28.5-35.8), 29.5 (27.3-33.5), 33.5 (30.4-34.5). Pasta + nft hook: C 60.1, 56.1, 57.0; Zig 58.3, 52.8, 49.0. Forwarded port: C 78.2, 72.9, 73.4; Zig 75.2, 78.1, 70.1. Cold: C 376.9, 365.9, 367.9; Zig 370.8, 379.5, 367.9. Within the runs' spread | same, `numbers.md` of each |
+| the Zig mount helper in the C launcher (phase 4 a) | `libflong-mount.a` (ReleaseSafe, stripped, pic, no libc, no compiler-rt): 185,626 bytes, `T flong_mount_main` its only global, needing `memcpy` and `memset` only (`sys.clockRealtime` makes the syscall in a library, as std's vDSO lookup would add `getauxval`); aarch64 183,778 bytes, needing `getauxval`, `memcpy`, `memset`. `flong-launch` 234,976 bytes after `strip -S` (107,224 before), the launcher closure 43,952,824 bytes (43,825,072); the clash check holds on the real link (no glibc name defined; `memcpy`, `memset`, `__stack_chk_fail` from glibc). `rootless.nix` passes unchanged with the Zig helper; its transition subtest runs the refusals and their controls, the declaration's mounts (each mount's `/proc/self/mountinfo` options included), the protected paths, the prepared-root symlink and the trace under both helpers, output and status equal; the swap race 20+20 under each, 0 escapes (Zig 15-20 refused, the rest contained; C 17-23), and 16 extra-mount cases (symlinks on the way, protected paths through a link, tmpfs and overlay under a caller's directory with host owner and mode, masks, sysfs, home) equal under both. The walker (`checks.native`): a path open following symlinks escapes 11-67 of 200 under the swapper (29 in the commit's run), the walk 0 of 400. Plants a review found missed, now caught: `walkOpen` without `RESOLVE_BENEATH` (`/..` walks out), a last-component file following a symlink (relative links), `/run` left writable, the transition running one launcher twice. Plants in a scratch copy, each caught: compiler-rt bundled (the clash check: more globals), `flong-launch` linked `-s` (the clash check: no symbols), a mirror field of the wrong size (test-libc's layout check), a walk without `RESOLVE_NO_SYMLINKS` (the walker's transcript and race), masks without `noexec` (only the transition subtest) | this host, 2026-09-23, phase 4 (a), `nm`, `nix path-info -S` |
+| phase 4 (a)'s derivations and runs | `launcher` 14.5 s (`nix build --rebuild`, bit-identical); test scripts rootless 109.2-115.7 s, native 16.0-25.4 s (the walker's subtest 0.2 s), basic 80.2 s, parity 20.2 s; the transition subtest 7.2 s. Local `nix flake check -L`, alone: green, 5 min 0.7 s, then 321.1 s for the commit; `--no-build --all-systems` 280.3 s; `launcher` again 15.5 s, bit-identical. CI before it (e07049a, run 35918252132): `nix flake check` 7 min 49 s. `sys.zig` moved seccomp's store path once more (quirk 36) | same |
 
 **Reporting.** CI runs after a push and trunk commits are never amended, so
 each phase's first commit reports the previous push's CI flake-check time (run
@@ -346,7 +348,9 @@ the child (`flong-mount.c:524`). flong-seccomp: an arena over `c_allocator`.
   its own panic, `bundle_compiler_rt = false`, `stack_check = false`,
   `stack_protector = false`. Stack probing is what needed
   `__zig_probe_stack` (measured); without it the remaining references are
-  `memcpy` and `memset`, plus `getauxval` on aarch64, all glibc's, and
+  `memcpy` and `memset`, plus `getauxval` on aarch64 (and on x86_64 but
+  for `sys.clockRealtime` making the raw syscall in the library, std's vDSO
+  lookup needing it; measured phase 4), all glibc's, and
   nothing of Zig's takes a glibc name (measured, P5, P6). **The link,** in the launcher
   derivation with today's `cflags` (`launcher/default.nix:31-47`); the
   archive is never installed:
@@ -406,8 +410,10 @@ the child (`flong-mount.c:524`). flong-seccomp: an arena over `c_allocator`.
   `openDir`, `openPath`, `walkOpen`, `openExact`, `openFollowing`,
   `openCgroup`, `memfd`, `inotifyInit`, `openSignalfd`, `pipe`, `fork`,
   `start`, `create`, `openTree`, `fsopen`, `fsmount`, `openNs`, `pidfdOpen`,
-  `openPtmx`, `openSlave`, `reopenOut`), added with the function; closes
-  `close`, `await`, `reapNow`, `release`. It must still report
+  `openPtmx`, `openSlave`, `reopenOut`, and `adoptForeign`), added with the
+  function; closes `close`, `await`, `reapNow`, `release` (a close model for
+  `fd.closeChecked` is not honoured, measured phase 4: its double close is
+  the table's to catch at run time). It must still report
   `tests/zig/analyze/bugs.zig` (spike B1-B3, B6-B8; B9-B11 on `fd.zig` from
   phase 2); leaks come from
   `liveCount` and the `/proc/self/fd` property.
@@ -564,14 +570,17 @@ uio,capability,prctl,limits}.h`, `asm/{ioctls,signal,unistd}.h` (L3 adds
 `asm/termbits.h`) from Zig's bundled headers,
 for x86_64 and (in `cross-aarch64`) aarch64, each with `-target
 <arch>-linux-musl` so only Zig's headers are read, asserting each took its
-arch's headers (`__NR_openat` 257 or 56; P4's `abi_test.zig` is the model); phases 4-7, `flong-mount.h`'s layout.
+arch's headers (`__NR_openat` 257 or 56; P4's `abi_test.zig` is the model); phases 4-7, `flong-mount.h`'s layout
+(`tests/zig/libc_mount.zig`: the header includes glibc's `sys/types.h`, so
+x86_64 only, offsets and sizes; translate-c reads `_Noreturn` as `void`).
 
 **`checks.native`** (one node, lingering alice with subordinate ranges,
 `systemd-run --user -p Delegate=yes`, `unshare -Urm` where needed), binaries
 from `tests/integration.nix`: `clone3(CLONE_INTO_CGROUP)` into an `O_PATH`
 leaf, read back; the spawn probe (held descriptors equal the keep list and
 argv numbers; `SigBlk`, `SigIgn`, dispositions default; stdio remap over every
-permutation); the walker (phase 4: a symlink on the way and last, EEXIST
+permutation); the walker (phase 4: a symlink on the way and last, absolute
+and relative, `..` refused, EEXIST
 from a concurrent make, file and directory masks, ENOTDIR on the way, a
 directory at a file destination, overlaps, and 2×200 walks against
 `tests/probes.nix`'s swapper, 0 escapes); cgroup create, limits, undo, kill,
@@ -823,9 +832,9 @@ rootless.nix and `tests/native.nix`, so the walker test has the swapper.
   mount API in `sys.zig` (abi.zig drops its copies); the phase-4 kinds.
 - **(a)** The shipped `flong-launch` links the library;
   `flong-launch-cmount` is built in the check. No module option: the subtest
-  copies each generated wrapper it uses (`plain`, `esc`, `race`, `swapper`)
-  and `sed`s its `launcher=` line (`module.nix:610`) to the check-only
-  binary. Mount refusals, the declaration's mounts, the protect and symlink
+  copies each generated wrapper it uses (`plain`, `mounts`, `esc`, `race`;
+  the race runs the swapper through `plain`) and `sed`s its `launcher=` line
+  (`module.nix:612`) to the check-only binary. Mount refusals, the declaration's mounts, the protect and symlink
   refusals and the swap race run under both: stderr and status equal, 0
   escapes. `checks.native` gains the walker. **(b)** Delete `flong-mount.c`,
   `mount_run`'s prototype, the C-only variant, P5, the subtest; DESIGN.md's

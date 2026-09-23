@@ -1355,7 +1355,9 @@ Component costs are quoted in their sections, with their harness.
 Three programs, installed side by side by `native.nix`'s `launcher` set:
 `flong-launch` and `flong-sweeper`, C in `launcher/`, built by `$CC` with
 `-std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror` and fortify (an unchecked
-`write`, `read` or `fscanf` is an error); and `flong-init`, Zig
+`write`, `read` or `fscanf` is an error), `flong-launch` linking the mount
+helper, Zig (`src/mount.zig`, through `src/hybrid/mount_c.zig`), as a static
+library with no libc and no compiler-rt; and `flong-init`, Zig
 (`src/init.zig`, static, no libc), which `ZIG.md` is porting the rest to. The
 store paths they run (bwrap, pasta, tini, flong-init) and
 `/run/wrappers/bin/newuidmap` and `newgidmap` are compiled in, so the wrapper
@@ -1516,7 +1518,7 @@ bwrap --userns <U1> --userns2 <U2> [--assert-userns-disabled]
 | 11 | the session cgroup, limits, leaves | `cg_session_create` | `cgroup-made` |
 | 12 | open the seccomp files; the info, ready and gate pipes; bwrap in the sandbox leaf | `fl_spawn` | |
 | 13 | read `--info-fd` until `child-pid`; hold the leader's pidfd and network namespace; append `leader=` | `rec_set_leader` | `bwrap-child` |
-| 14 | fork the mount helper, which prepares sources, waits for the ready byte, then mounts `/sys`, the declared mounts and `/run` read-only | `fl_fork`, `mount_run` | `sandbox-ready`, `mounts-done` |
+| 14 | fork the mount helper, which prepares sources, waits for the ready byte, then mounts `/sys`, the declared mounts and `/run` read-only | `fl_fork`, `flong_mount_main` (`src/mount.zig`) | `sandbox-ready`, `mounts-done` |
 | 15 | `postStart` in the hooks leaf, waited for | `fl_spawn`, `fl_reap` | `hook-done` |
 | 16 | pasta in the pasta leaf, ready when the spawned pasta exits 0 | `fl_spawn`, `fl_reap` | `pasta-up` |
 | 17 | save modes, start the watchdog, then raw (relay); take queued signals; copy the window size; write the gate byte | `tty_start`, `fl_take_signal` | `gate-open` |

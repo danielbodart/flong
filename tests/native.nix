@@ -17,6 +17,79 @@ let
   # rootless.nix's ioctl-probe and swapper; the swapper races the walker
   # (ZIG.md phase 4).
   probes = import ./probes.nix;
+
+  # The walker's fixture and runs (ZIG.md, "Tests", checks.native; phase
+  # 4): flong-walker (tests/zig/walker.zig) drives src/mount.zig's walk,
+  # masks and source check as root of a user and mount namespace of its
+  # own, over a tmpfs at /tmp/walk. Each run prints "$ ARGS", what it said
+  # and "rc=N"; the race prints its counts. Run under `unshare --user
+  # --map-root-user --mount`.
+  walkerScript = hostPkgs.writeShellScript "walker-runs" ''
+    set -u
+    R=/tmp/walk
+    mkdir -p $R
+    mount -t tmpfs walk $R
+    cd $R
+    mkdir -p a d pre prot protx view/deep/x ws/sub/deep/x
+    echo file > f
+    ln -s /etc link
+    ln -s $R/view a/sl
+    ln -s $R/prot toprot
+    ln -s $R/view ws/sublink
+    ln -s d rel
+    ln -s f relf
+    run() { echo "\$ $*"; flong-walker "$@" 2>&1; echo "rc=$?"; }
+    # A symlink on the way, and last; a file on the way, and last; a
+    # directory where a file's clone would go; what the walk makes.
+    run walk $R /a/new/deeper dir create
+    run walk $R /link/x dir create
+    run walk $R /a/sl dir create
+    run walk $R /f/x dir create
+    run walk $R /f dir exist
+    run walk $R /d file exist
+    # A symlink last that stays inside the root, to a directory and to a
+    # file: RESOLVE_BENEATH alone would follow both, so only
+    # RESOLVE_NO_SYMLINKS refuses them. A '..', out of the root and out of
+    # a directory on the way: spec_parse never passes one, so only
+    # RESOLVE_BENEATH refuses it here (fd.zig, walkOpen).
+    run walk $R /rel dir exist
+    run walk $R /relf file exist
+    run walk $R /.. dir exist
+    run walk $R /a/../f file exist
+    run walk $R /a/newfile file create
+    test -d a/new/deeper && test -f a/newfile && echo made-both
+    # EEXIST: the name made by another before the walker's own make.
+    run made $R pre
+    run made $R fresh
+    run walk $R /pre/sub dir create
+    # Masks of a file and of a directory, and of nothing.
+    run mask $R /f
+    stat -c 'mode %a' f d
+    echo x 2>&1 > f | sed 's/.*: //'
+    awk -v f=$R/f '$5 == f { print "f", $6 }' /proc/self/mountinfo
+    run mask $R /d
+    stat -c 'mode %a' d
+    touch d/x 2>&1 | sed 's/.*: //'
+    awk -v d=$R/d '$5 == d { print "d", $6 }' /proc/self/mountinfo
+    run mask $R /absent
+    # The protected paths, by the kernel's resolved path: through a
+    # symlink, refused; exact, the symlink refused; a name that only
+    # starts with a protected one, taken.
+    run source $R/toprot following $R/prot
+    run source $R/toprot exact $R/prot
+    run source $R/protx following $R/prot
+    # The swap race: sub and a symlink to the view exchanged as fast as
+    # the swapper can. The control first: opened by path, it escapes.
+    swapper $R/ws &
+    swapping=$!
+    until [ -L $R/ws/sub ]; do :; done
+    echo "naive $(flong-walker naive $R /ws/sub/deep/x 200 $R/view)"
+    echo "exists $(flong-walker race $R /ws/sub/deep/x 200 $R/view exists 2>$R/race.err)"
+    echo "missing $(flong-walker race $R /ws/sub/deep/y 200 $R/view missing 2>>$R/race.err)"
+    kill $swapping
+    echo "said $(sed 's/y[0-9]*$/yN/' $R/race.err | sort -u | tr '\n' '|')"
+    echo "view $(ls $R/view/deep | tr '\n' ' ')"
+  '';
 in
 {
   name = "flong-native";
@@ -101,5 +174,97 @@ in
         # The control: the gate open, DIR there, tini runs the payload.
         out = init_run("/tmp/init-gate", "/tmp")
         assert out.endswith("rc=0\n"), out
+
+    with subtest("the walker: symlinks, a file on the way, masks, EEXIST, protected paths, and the swap race"):
+        # src/mount.zig through flong-walker (tests/zig/walker.zig), as root
+        # of alice's own user and mount namespace, over a tmpfs at
+        # /tmp/walk (the script: walkerScript, above).
+        out = machine.succeed(as_alice("unshare --user --map-root-user --mount ${walkerScript}"))
+        print(out)
+        R = "/tmp/walk"
+        want = f"""$ walk {R} /a/new/deeper dir create
+    ok {R}/a/new/deeper
+    rc=0
+    $ walk {R} /link/x dir create
+    flong-walker: a symlink is on the way to /link/x
+    rc=1
+    $ walk {R} /a/sl dir create
+    flong-walker: a symlink is on the way to /a/sl
+    rc=1
+    $ walk {R} /f/x dir create
+    flong-walker: /f, on the way to /f/x, is not a directory
+    rc=1
+    $ walk {R} /f dir exist
+    flong-walker: /f is not a directory
+    rc=1
+    $ walk {R} /d file exist
+    flong-walker: /d is a directory and its source is not
+    rc=1
+    $ walk {R} /rel dir exist
+    flong-walker: a symlink is on the way to /rel
+    rc=1
+    $ walk {R} /relf file exist
+    flong-walker: a symlink is on the way to /relf
+    rc=1
+    $ walk {R} /.. dir exist
+    flong-walker: /..: Invalid cross-device link
+    rc=1
+    $ walk {R} /a/../f file exist
+    flong-walker: /a/../f: Invalid cross-device link
+    rc=1
+    $ walk {R} /a/newfile file create
+    ok {R}/a/newfile
+    rc=0
+    made-both
+    $ made {R} pre
+    existed
+    rc=0
+    $ made {R} fresh
+    session
+    rc=0
+    $ walk {R} /pre/sub dir create
+    ok {R}/pre/sub
+    rc=0
+    $ mask {R} /f
+    masked {R}/f
+    rc=0
+    mode 0
+    mode 755
+    Read-only file system
+    f ro,nosuid,nodev,noexec,relatime
+    $ mask {R} /d
+    masked {R}/d
+    rc=0
+    mode 0
+    Read-only file system
+    d ro,nosuid,nodev,noexec,relatime
+    $ mask {R} /absent
+    flong-walker: /absent: No such file or directory
+    rc=1
+    $ source {R}/toprot following {R}/prot
+    flong-walker: the mount source {R}/toprot is, holds or lies inside {R}/prot, which no session may reach
+    rc=1
+    $ source {R}/toprot exact {R}/prot
+    flong-walker: a symlink is on the way to {R}/toprot
+    rc=1
+    $ source {R}/protx following {R}/prot
+    ok {R}/protx
+    rc=0
+    """
+        assert out.startswith(want), out
+        race = dict(l.split(" ", 1) for l in out[len(want):].splitlines())
+        counts = {k: dict(kv.split("=") for kv in race[k].split()) for k in ("naive", "exists", "missing")}
+        # The control: the race is live, and a walk by path escapes it.
+        assert int(counts["naive"]["escaped"]) > 0, race
+        for k in ("exists", "missing"):
+            c = counts[k]
+            assert c["escaped"] == "0" and c["odd"] == "0", race
+            assert int(c["refused"]) + int(c["contained"]) == 200, race
+        # Every refusal was the symlink's, and nothing was made in the view.
+        said = set(l for l in race["said"].split("|") if l)
+        assert said <= {"flong-walker: a symlink is on the way to /ws/sub/deep/x",
+                        "flong-walker: a symlink is on the way to /ws/sub/deep/yN"}, race
+        assert (len(said) > 0) == (int(counts["exists"]["refused"]) + int(counts["missing"]["refused"]) > 0), race
+        assert race["view"] == "x ", race
   '' + lib.concatMapStrings (p: "\n# ${p.name}\n" + p.script) integration.vm.vmScripts;
 }

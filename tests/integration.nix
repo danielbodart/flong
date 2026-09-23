@@ -7,8 +7,11 @@
 # Every value is a derivation:
 #   <pN>         a proof's `build`, whose own build runs its assertions
 #   <pN>-bins    a proof's `bins`, a tree with bin/
-#   vm           every proof's bins joined, for the VM node's PATH, with
-#                passthru.vmScripts, the proofs' testScript fragments in order
+#   drivers      `zig build integration` over the package: bin/flong-walker
+#                (tests/zig/walker.zig, phase 4), for checks.native
+#   vm           every proof's bins and the drivers joined, for the VM
+#                node's PATH, with passthru.vmScripts, the proofs' testScript
+#                fragments in order
 #
 # A proof is a directory tests/proofs/<pN>/ holding a default.nix; the
 # contract is tests/proofs/README.md. Adding one needs no edit here or in
@@ -59,9 +62,25 @@ let
     name: p: lib.optionalAttrs (p ? bins) { "${name}-bins" = p.bins; }
   ) proofs;
 
+  # The drivers checks.native runs against flong's own modules (ZIG.md,
+  # "The Nix build": tests/integration.nix): static, no libc, stripped, as
+  # an installed artifact is.
+  drivers = zigSet {
+    pname = "flong-drivers";
+    steps = "integration";
+    files = [
+      ../src/sys.zig
+      ../src/fd.zig
+      ../src/msg.zig
+      ../src/errno.zig
+      ../src/mount.zig
+      ../tests/zig/walker.zig
+    ];
+  };
+
   vm = pkgs.symlinkJoin {
     name = "flong-proofs-vm";
-    paths = lib.attrValues bins;
+    paths = lib.attrValues bins ++ [ drivers ];
     passthru.vmScripts = lib.concatMap (
       name:
       lib.optional (proofs.${name} ? vmScript) {
@@ -71,4 +90,4 @@ let
     ) proofNames;
   };
 in
-{ inherit vm; } // builds // bins
+{ inherit vm drivers; } // builds // bins

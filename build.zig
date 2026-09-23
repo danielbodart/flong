@@ -23,7 +23,13 @@
 //!                 (tests/zig/analyze/); needs -Ddev=true
 //!   cross         flong-seccomp compiled for aarch64-linux, not linked,
 //!                 flong-init built for it (in cross/, with a dummy tini),
-//!                 and abi's aarch64 half
+//!                 the mount library for it (cross/libflong-mount.a), and
+//!                 abi's aarch64 half
+//!   mountlib      lib/libflong-mount.a, the Zig mount helper the C launcher
+//!                 links (src/hybrid/mount_c.zig; phases 4-7): no libc, no
+//!                 compiler-rt, one exported symbol
+//!   integration   the drivers checks.native runs (bin/flong-walker), built
+//!                 only by tests/integration.nix
 //!
 //! Every path a step reads is a lazy b.path, so an install set's derivation,
 //! which holds build.zig, build.zig.zon and its own sources only, configures
@@ -75,7 +81,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addFail("needs -Ddev=true").step);
     } else if (b.lazyDependency("minish", .{ .target = target, .optimize = optimize })) |minish| {
         // Each module's own tests, with the modules it imports.
-        for ([_][]const u8{ "sys", "errno", "msg", "num", "fd" }) |name| {
+        for ([_][]const u8{ "sys", "errno", "msg", "num", "fd", "mount" }) |name| {
             const m = modules(b, target, optimize);
             const t = b.addTest(.{ .name = name, .root_module = m.get(name) });
             test_step.dependOn(&b.addRunArtifact(t).step);
@@ -187,6 +193,39 @@ pub fn build(b: *std.Build) void {
         libc_step.dependOn(&b.addRunArtifact(t).step);
     }
 
+    {
+        // The shim's extern structs against flong-mount.h as the C launcher
+        // compiles it (ZIG.md, "The mount-helper shim"), and the shim run
+        // in a fork child, as the launcher runs it.
+        const m = modules(b, target, optimize);
+        const header = b.addTranslateC(.{
+            .root_source_file = b.path("tests/zig/mount.h"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        header.addIncludePath(b.path("launcher"));
+        if (target.query.isNativeOs() and target.query.isNativeAbi()) {
+            const paths = std.zig.system.NativePaths.detect(b.allocator, &target.result) catch @panic("OOM");
+            for (paths.include_dirs.items) |dir| header.addSystemIncludePath(.{ .cwd_relative = dir });
+        }
+        const t = b.addTest(.{
+            .name = "libc_mount",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/zig/libc_mount.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "sys", .module = m.sys },
+                    .{ .name = "mount_c", .module = mountShim(b, m, target, optimize) },
+                    .{ .name = "mount_h", .module = header.createModule() },
+                },
+            }),
+        });
+        libc_step.dependOn(&b.addRunArtifact(t).step);
+    }
+
     // ---- compile-fail: what must not compile, and the compiler's words ----
     const cf_step = b.step("compile-fail", "Check that each file in tests/zig/compile_fail/ fails to compile, and why");
     const cases = [_]struct { file: []const u8, expect: []const u8 }{
@@ -198,6 +237,8 @@ pub fn build(b: *std.Build) void {
         .{ .file = "read_on_dir.zig", .expect = "read on a dir descriptor" },
         .{ .file = "dir_for_file.zig", .expect = "expected type 'fd.Handle(.file,.owned)', found 'fd.Handle(.dir,.owned)'" },
         .{ .file = "file_as_at.zig", .expect = "a directory handle or fd.cwd, not fd.Handle(.file,.owned)" },
+        .{ .file = "setns_wrong_ns.zig", .expect = "setns(.mnt) of a netns descriptor" },
+        .{ .file = "setfd_path.zig", .expect = "FsCtx.setFd of a path descriptor: FSCONFIG_SET_FD takes a directory, never O_PATH" },
     };
     for (cases) |c| {
         // Every module of src/ is on the command line, each with its own
@@ -327,13 +368,25 @@ pub fn build(b: *std.Build) void {
                 "bugs.zig:79:28: error: [store-violations-engine] use after close", // B9, its target
                 "bugs.zig:86:46: error: [store-violations-engine] double-close", // B10
                 "bugs.zig:95:18: error: [store-violations-engine] double-close", // B11
+                "bugs.zig:149:15: error: [store-violations-engine] double-close", // B12, walkOpen
+                "bugs.zig:156:9: error: [store-violations-engine] use after close", // B13, openTree
+                "bugs.zig:163:9: error: [store-violations-engine] use after close", // B14, fsopen
+                "bugs.zig:172:12: error: [store-violations-engine] double-close", // B15, openExact
             }) |want| run.addCheck(.{ .expect_stdout_match = want });
-            // And those ten only: the ok* controls stay quiet.
-            run.addCheck(.{ .expect_stdout_match = "Found 10 issue(s):\n" });
+            // And those fourteen only: the ok* controls stay quiet.
+            run.addCheck(.{ .expect_stdout_match = "Found 14 issue(s):\n" });
             run.addCheck(.{ .expect_term = .{ .Exited = 1 } });
             analyze_step.dependOn(&run.step);
         }
     }
+
+    // ---- mountlib: the Zig mount helper for the C launcher ----
+    const mountlib_step = b.step("mountlib", "Build lib/libflong-mount.a, the mount helper the C launcher links");
+    mountlib_step.dependOn(&b.addInstallArtifact(mountLib(b, target, optimize), .{}).step);
+
+    // ---- integration: the drivers checks.native runs ----
+    const integration_step = b.step("integration", "Build the drivers checks.native runs: bin/flong-walker");
+    integration_step.dependOn(&b.addInstallArtifact(walker(b, target, optimize), .{}).step);
 
     // ---- cross: aarch64 ----
     // flong-seccomp for aarch64-linux, analysed and compiled but not linked
@@ -349,6 +402,13 @@ pub fn build(b: *std.Build) void {
             .dest_dir = .{ .override = .{ .custom = "cross" } },
         });
         cross_step.dependOn(&arm_init.step);
+        // The mount library for aarch64: native.nix's cross-aarch64 reads
+        // its symbols; the aarch64 C link is unchecked (ZIG.md, "The
+        // mount-helper shim").
+        const arm_lib = b.addInstallArtifact(mountLib(b, arm, optimize), .{
+            .dest_dir = .{ .override = .{ .custom = "cross" } },
+        });
+        cross_step.dependOn(&arm_lib.step);
     }
 
     // ---- abi: the kernel ABI against Zig's bundled headers ----
@@ -402,6 +462,7 @@ const Modules = struct {
     msg: *std.Build.Module,
     num: *std.Build.Module,
     fd: *std.Build.Module,
+    mount: *std.Build.Module,
 
     fn get(m: Modules, name: []const u8) *std.Build.Module {
         inline for (@typeInfo(Modules).@"struct".fields) |f| {
@@ -432,7 +493,83 @@ fn modules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .optimize = optimize,
         .imports = &.{.{ .name = "sys", .module = sys }},
     });
-    return .{ .sys = sys, .errno = errno, .msg = msg, .num = num, .fd = fd };
+    const mount = b.createModule(.{
+        .root_source_file = b.path("src/mount.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "sys", .module = sys }, .{ .name = "fd", .module = fd }, .{ .name = "msg", .module = msg } },
+    });
+    return .{ .sys = sys, .errno = errno, .msg = msg, .num = num, .fd = fd, .mount = mount };
+}
+
+/// src/hybrid/mount_c.zig as a module over `m`'s modules.
+fn mountShim(b: *std.Build, m: Modules, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("src/hybrid/mount_c.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sys", .module = m.sys },
+            .{ .name = "fd", .module = m.fd },
+            .{ .name = "msg", .module = m.msg },
+            .{ .name = "mount", .module = m.mount },
+        },
+    });
+}
+
+/// libflong-mount.a (ZIG.md, "The mount-helper shim"; P5's settings,
+/// tests/proofs/p5/build.zig): for Linux with no libc (`target`'s arch and
+/// CPU), position-independent, as the launcher is linked -pie by the
+/// cc-wrapper's hardening; single-threaded; stripped; no stack probing,
+/// which is what referenced compiler-rt's __zig_probe_stack; no stack
+/// protector; and no compiler-rt, whose memcpy, memset, memmove, memcmp,
+/// bcmp, __stack_chk_fail and __stack_chk_guard would take the C's calls
+/// from glibc. Every module of it gets the same settings.
+fn mountLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    var query = target.query;
+    query.os_tag = .linux;
+    query.abi = .none;
+    const t = b.resolveTargetQuery(query);
+    const m = modules(b, t, optimize);
+    const root = mountShim(b, m, t, optimize);
+    inline for (@typeInfo(Modules).@"struct".fields) |f| setLibrary(@field(m, f.name));
+    setLibrary(root);
+    const lib = b.addLibrary(.{ .name = "flong-mount", .linkage = .static, .root_module = root });
+    lib.bundle_compiler_rt = false;
+    return lib;
+}
+
+fn setLibrary(module: *std.Build.Module) void {
+    module.pic = true;
+    module.single_threaded = true;
+    module.strip = true;
+    module.stack_check = false;
+    module.stack_protector = false;
+}
+
+/// flong-walker (tests/zig/walker.zig): the mount helper's walk, masks and
+/// protected-path check, driven from a shell in checks.native. Static, no
+/// libc, stripped, as an installed artifact.
+fn walker(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const m = modules(b, target, optimize);
+    const exe = b.addExecutable(.{
+        .name = "flong-walker",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/zig/walker.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = true,
+            .single_threaded = true,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "fd", .module = m.fd },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "mount", .module = m.mount },
+            },
+        }),
+    });
+    exe.stack_size = 0;
+    return exe;
 }
 
 /// flong-seccomp's root module, the settings every installed artifact has

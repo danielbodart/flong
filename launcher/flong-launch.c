@@ -550,7 +550,7 @@ static int start_mount_helper(struct launch *l)
 	if (pid < 0)
 		return -1;
 	if (pid == 0)
-		_exit(mount_run(&job));
+		flong_mount_main(&job, fl_tracing);
 	/* The helper holds the only read end now, so it alone sees the ready
 	 * byte, or EOF when bwrap dies first. */
 	fl_close(&l->ready);

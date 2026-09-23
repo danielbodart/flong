@@ -139,3 +139,44 @@ pub fn ok5Held() !fd.Held(.dir) {
     const d = try msg.check(fd.openDir(fd.cwd, "/"), "x", .{});
     return d.holdUntilExit();
 }
+
+// ---- phase 4's B12-B15: the mount helper's kinds (src/mount.zig) ----
+
+// B12: a walk's component closed twice
+pub fn b12WalkClosedTwice(root: fd.Fd(.path)) !void {
+    const next = try msg.check(fd.walkOpen(root, "srv", true), "x", .{});
+    next.close();
+    next.close();
+}
+
+// B13: a detached tree attached after it was closed
+pub fn b13TreeMovedAfterClose(src: fd.Fd(.path), dest: fd.Fd(.path)) !void {
+    const t = try msg.check(fd.openTree(src, "", 0), "x", .{});
+    t.close();
+    _ = t.moveTo(dest);
+}
+
+// B14: a filesystem context created after it was closed
+pub fn b14FsctxAfterClose() !void {
+    const ctx = try msg.check(fd.fsopen("tmpfs"), "x", .{});
+    ctx.close();
+    _ = ctx.create();
+}
+
+// B15: an exact source closed twice. (A close through closeChecked is
+// not one zwanzig sees, even modelled as a close: the table's generation
+// catches that one at run time.)
+pub fn b15ExactClosedTwice() !void {
+    const s = try msg.check(fd.openExact(.path, "/srv"), "x", .{});
+    s.close();
+    s.close();
+}
+
+// OK6: the walk's own step: the previous component closed once, the next
+// returned
+pub fn ok6WalkStep(root: fd.Fd(.path)) !fd.Fd(.path) {
+    const a = try msg.check(fd.walkOpen(root, "srv", true), "x", .{});
+    const b = try msg.check(fd.walkOpen(a, "work", true), "x", .{});
+    a.close();
+    return b;
+}

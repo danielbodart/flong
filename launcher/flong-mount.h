@@ -86,5 +86,6 @@ struct fl_mount_job {
  * why not. The launcher calls _exit(mount_run(&job)) and waits for the
  * helper's pidfd; the gate opens only on 0. */
 int mount_run(const struct fl_mount_job *job);
+_Noreturn void flong_mount_main(const struct fl_mount_job *job, int tracing);
 
 #endif

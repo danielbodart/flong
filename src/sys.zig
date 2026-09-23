@@ -15,7 +15,10 @@
 //! getdents64), pread, pwrite, fstat, flock, and getrandom for the project
 //! tool's temp names; phase 3 what flong-init calls (setgroups, prctl,
 //! capset, the TIOCSCTTY ioctl, rt_sigaction, rt_sigprocmask, chdir,
-//! close_range, execve), each as glibc makes it (flong-init.c:195-238).
+//! close_range, execve), each as glibc makes it (flong-init.c:195-238);
+//! phase 4 the mount helper's (flong-mount.c): openat2, the mount API,
+//! statx's unique mount id and statmount, setns and unshare, the fs and res
+//! ids, fchownat, umask, readlinkat, umount2 and the pidfd namespace ioctls.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -229,9 +232,17 @@ pub fn getrandom(buf: []u8) Result(void) {
 
 /// CLOCK_REALTIME, as fl_trace stamps a stage (flong-util.c:127). It cannot
 /// fail with a valid clock and pointer; the vDSO answers when there is one.
+/// In a library (the mount helper's, linked into the C launcher) it is the
+/// syscall: std's vDSO lookup would ask getauxval, which a library leaves
+/// to its host's libc (std/os/linux.zig:515-525), one more name the C link
+/// would have to resolve (ZIG.md, "The mount-helper shim").
 pub fn clockRealtime() timespec {
     var t: timespec = undefined;
-    _ = linux.clock_gettime(.REALTIME, &t);
+    if (builtin.output_mode == .Lib) {
+        _ = linux.syscall2(.clock_gettime, @intFromEnum(linux.CLOCK.REALTIME), @intFromPtr(&t));
+    } else {
+        _ = linux.clock_gettime(.REALTIME, &t);
+    }
     return t;
 }
 
@@ -365,6 +376,249 @@ pub fn closeRange(first: u32, last: u32, flags: u32) Result(void) {
 /// execve(2). It returns only on failure, with the errno.
 pub fn execve(path: [*:0]const u8, argv_: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) E {
     return E.init(linux.execve(path, argv_, envp));
+}
+
+// ---- the mount helper (flong-mount.c) ----
+
+/// openat2's `how` (linux/openat2.h), OPEN_HOW_SIZE_VER0.
+pub const OpenHow = extern struct {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+};
+
+/// openat2's resolve flags (linux/openat2.h).
+pub const RESOLVE = struct {
+    pub const NO_XDEV: u64 = 0x01;
+    pub const NO_MAGICLINKS: u64 = 0x02;
+    pub const NO_SYMLINKS: u64 = 0x04;
+    pub const BENEATH: u64 = 0x08;
+    pub const IN_ROOT: u64 = 0x10;
+};
+
+/// openat2(2), as flong-mount.c:49-53 makes it: `how` passed whole, its
+/// size the struct's. Not retried: the C does not, and no open here is of
+/// a FIFO. fd.zig is its only caller, and adds O_CLOEXEC.
+pub fn openat2(dir: fd_t, path: [*:0]const u8, how: *const OpenHow) Result(fd_t) {
+    return result(fd_t, linux.syscall4(.openat2, @bitCast(@as(isize, dir)), @intFromPtr(path), @intFromPtr(how), @sizeOf(OpenHow)));
+}
+
+/// mount_setattr's attributes (linux/mount.h, `struct mount_attr`),
+/// MOUNT_ATTR_SIZE_VER0.
+pub const MountAttr = extern struct {
+    attr_set: u64 = 0,
+    attr_clr: u64 = 0,
+    propagation: u64 = 0,
+    userns_fd: u64 = 0,
+};
+
+/// The mount attributes (linux/mount.h), for fsmount's and mount_setattr's
+/// flags.
+pub const MOUNT_ATTR = struct {
+    pub const RDONLY: u32 = 0x01;
+    pub const NOSUID: u32 = 0x02;
+    pub const NODEV: u32 = 0x04;
+    pub const NOEXEC: u32 = 0x08;
+};
+
+/// open_tree(2)'s flags (linux/mount.h); OPEN_TREE_CLOEXEC is O_CLOEXEC,
+/// the same bit on x86_64 and aarch64.
+pub const OPEN_TREE_CLONE: u32 = 1;
+pub const OPEN_TREE_CLOEXEC: u32 = 0o2000000;
+/// AT_RECURSIVE (linux/fcntl.h): the whole tree, submounts included.
+pub const AT_RECURSIVE: u32 = 0x8000;
+
+/// move_mount(2)'s flags (linux/mount.h).
+pub const MOVE_MOUNT_F_EMPTY_PATH: u32 = 0x04;
+pub const MOVE_MOUNT_T_EMPTY_PATH: u32 = 0x40;
+
+/// fsopen(2) and fsmount(2)'s close-on-exec flags (linux/mount.h).
+pub const FSOPEN_CLOEXEC: u32 = 0x01;
+pub const FSMOUNT_CLOEXEC: u32 = 0x01;
+
+/// fsconfig(2)'s commands (linux/mount.h, `enum fsconfig_command`).
+pub const FSCONFIG = struct {
+    pub const SET_FLAG: u32 = 0;
+    pub const SET_STRING: u32 = 1;
+    pub const SET_FD: u32 = 5;
+    pub const CMD_CREATE: u32 = 6;
+};
+
+/// umount2(2)'s flags (sys/mount.h).
+pub const MNT_DETACH: u32 = 2;
+pub const UMOUNT_NOFOLLOW: u32 = 8;
+
+pub fn openTree(dir: fd_t, path: [*:0]const u8, flags: u32) Result(fd_t) {
+    return result(fd_t, linux.syscall3(.open_tree, @bitCast(@as(isize, dir)), @intFromPtr(path), flags));
+}
+
+pub fn moveMount(from_dir: fd_t, from: [*:0]const u8, to_dir: fd_t, to: [*:0]const u8, flags: u32) Result(void) {
+    return result(void, linux.syscall5(.move_mount, @bitCast(@as(isize, from_dir)), @intFromPtr(from), @bitCast(@as(isize, to_dir)), @intFromPtr(to), flags));
+}
+
+pub fn fsopen(name: [*:0]const u8, flags: u32) Result(fd_t) {
+    return result(fd_t, linux.syscall2(.fsopen, @intFromPtr(name), flags));
+}
+
+/// fsconfig(2): `key` and `value` null where the command takes none, as
+/// the C passes NULL (flong-mount.c:177, 226-230).
+pub fn fsconfig(fd: fd_t, cmd: u32, key: ?[*:0]const u8, value: ?[*:0]const u8, aux: i32) Result(void) {
+    return result(void, linux.syscall5(.fsconfig, @bitCast(@as(isize, fd)), cmd, @intFromPtr(key), @intFromPtr(value), @bitCast(@as(isize, aux))));
+}
+
+pub fn fsmount(fd: fd_t, flags: u32, attrs: u32) Result(fd_t) {
+    return result(fd_t, linux.syscall3(.fsmount, @bitCast(@as(isize, fd)), flags, attrs));
+}
+
+/// mount_setattr(2), `attr` passed whole, its size the struct's.
+pub fn mountSetattr(dir: fd_t, path: [*:0]const u8, flags: u32, attr: *const MountAttr) Result(void) {
+    return result(void, linux.syscall5(.mount_setattr, @bitCast(@as(isize, dir)), @intFromPtr(path), flags, @intFromPtr(attr), @sizeOf(MountAttr)));
+}
+
+pub fn umount2(path: [*:0]const u8, flags: u32) Result(void) {
+    return result(void, linux.umount2(path, flags));
+}
+
+/// STATX_MNT_ID_UNIQUE (linux/stat.h): the unique mount id, never reused,
+/// kept by a detached tree once attached (flong-mount.c:55-64).
+pub const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
+
+/// statx(2) of the file `fd` is on (AT_EMPTY_PATH), for its unique mount
+/// id, which std's Statx holds at 0x90 as __pad2[0] (tests/zig/abi.zig).
+pub fn mountId(fd: fd_t) Result(u64) {
+    var st: linux.Statx = undefined;
+    return switch (result(void, linux.statx(fd, "", AT.EMPTY_PATH, STATX_MNT_ID_UNIQUE, &st))) {
+        .ok => .{ .ok = st.__pad2[0] },
+        .err => |e| .{ .err = e },
+    };
+}
+
+/// statmount's and listmount's request (linux/mount.h, `struct
+/// mnt_id_req`), VER0: the header's fifth field, mnt_ns_id, is VER1 (kernel
+/// 6.11), and the kernel reads `size` bytes.
+pub const MntIdReq = extern struct {
+    size: u32 = mnt_id_req_size_ver0,
+    spare: u32 = 0,
+    mnt_id: u64,
+    param: u64,
+};
+pub const mnt_id_req_size_ver0 = 24;
+
+/// statmount's mask bits (linux/mount.h).
+pub const STATMOUNT_MNT_BASIC: u64 = 0x02;
+
+/// statmount's fixed part (linux/mount.h, `struct statmount`), up to its
+/// variable `str[]`: 512 bytes, all a STATMOUNT_MNT_BASIC answer fills.
+pub const StatMount = extern struct {
+    size: u32,
+    mnt_opts: u32,
+    mask: u64,
+    sb_dev_major: u32,
+    sb_dev_minor: u32,
+    sb_magic: u64,
+    sb_flags: u32,
+    fs_type: u32,
+    mnt_id: u64,
+    mnt_parent_id: u64,
+    mnt_id_old: u32,
+    mnt_parent_id_old: u32,
+    mnt_attr: u64,
+    mnt_propagation: u64,
+    mnt_peer_group: u64,
+    mnt_master: u64,
+    propagate_from: u64,
+    mnt_root: u32,
+    mnt_point: u32,
+    mnt_ns_id: u64,
+    fs_subtype: u32,
+    sb_source: u32,
+    opt_num: u32,
+    opt_array: u32,
+    opt_sec_num: u32,
+    opt_sec_array: u32,
+    __spare2: [46]u64,
+};
+
+/// statmount(2) of `req` into `buf`, its size the struct's
+/// (flong-mount.c:257-260).
+pub fn statmount(req: *const MntIdReq, buf: *StatMount) Result(void) {
+    return result(void, linux.syscall4(.statmount, @intFromPtr(req), @intFromPtr(buf), @sizeOf(StatMount), 0));
+}
+
+comptime {
+    std.debug.assert(@sizeOf(OpenHow) == 24);
+    std.debug.assert(@sizeOf(MountAttr) == 32);
+    std.debug.assert(@sizeOf(MntIdReq) == mnt_id_req_size_ver0);
+    std.debug.assert(@sizeOf(StatMount) == 512);
+    std.debug.assert(@offsetOf(linux.Statx, "__pad2") == 0x90);
+}
+
+/// The namespaces setns and unshare name (linux/sched.h).
+pub const CLONE = struct {
+    pub const NEWNS: u32 = 0x00020000;
+    pub const NEWCGROUP: u32 = 0x02000000;
+    pub const NEWUSER: u32 = 0x10000000;
+    pub const NEWNET: u32 = 0x40000000;
+};
+
+/// setns(2); std wraps none (ZIG.md, "Measured": P3).
+pub fn setns(fd: fd_t, nstype: u32) Result(void) {
+    return result(void, linux.syscall2(.setns, @bitCast(@as(isize, fd)), nstype));
+}
+
+pub fn unshare(flags: u32) Result(void) {
+    return result(void, linux.unshare(flags));
+}
+
+/// setresuid(2) and setresgid(2): the 32-bit id calls, x86_64's and
+/// aarch64's only ones, as glibc makes them in a single-threaded process.
+pub fn setresuid(r: u32, e: u32, s: u32) Result(void) {
+    return result(void, linux.syscall3(.setresuid, r, e, s));
+}
+
+pub fn setresgid(r: u32, e: u32, s: u32) Result(void) {
+    return result(void, linux.syscall3(.setresgid, r, e, s));
+}
+
+/// setfsuid(2) and setfsgid(2): each answers the id before the call, never
+/// an error, so a caller reads the new one back with an invalid id (-1),
+/// as flong-mount.c:71-78 does. x86_64 and aarch64 have the 32-bit calls
+/// under these names; the 16-bit ones' 32-bit successors (setfsuid32) are
+/// the 32-bit arches', which flong does not build for.
+pub fn setfsuid(uid: u32) u32 {
+    return @truncate(linux.syscall1(.setfsuid, uid));
+}
+
+pub fn setfsgid(gid: u32) u32 {
+    return @truncate(linux.syscall1(.setfsgid, gid));
+}
+
+/// fchownat(2); `flags` takes AT.SYMLINK_NOFOLLOW and AT.EMPTY_PATH.
+pub fn fchownat(dir: fd_t, path: [*:0]const u8, uid: u32, gid: u32, flags: u32) Result(void) {
+    return result(void, linux.syscall5(.fchownat, @bitCast(@as(isize, dir)), @intFromPtr(path), uid, gid, flags));
+}
+
+/// umask(2): the old mask; it cannot fail.
+pub fn umask(mask: mode_t) mode_t {
+    return @truncate(linux.syscall1(.umask, mask));
+}
+
+/// readlinkat(2) into `buf`: the length, never NUL-terminated, cut at
+/// `buf.len` as the kernel cuts it.
+pub fn readlinkat(dir: fd_t, path: [*:0]const u8, buf: []u8) Result(usize) {
+    return result(usize, linux.readlinkat(dir, path, buf.ptr, buf.len));
+}
+
+/// The pidfd namespace ioctls (linux/pidfd.h, _IO(PIDFS_IOCTL_MAGIC, n)),
+/// each answering a new descriptor on the pidfd's process's namespace;
+/// only a caller with the process's ptrace access may ask (kernel 6.11).
+pub const PIDFD_GET_CGROUP_NAMESPACE: u32 = 0xff01;
+pub const PIDFD_GET_MNT_NAMESPACE: u32 = 0xff03;
+pub const PIDFD_GET_NET_NAMESPACE: u32 = 0xff04;
+
+/// ioctl(2) with an integer argument, whose value is a new descriptor.
+pub fn ioctlFd(fd: fd_t, request: u32, arg: usize) Result(fd_t) {
+    return result(fd_t, linux.syscall3(.ioctl, @bitCast(@as(isize, fd)), request, arg));
 }
 
 test "read and write carry the errno" {
