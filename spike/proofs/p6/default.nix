@@ -9,7 +9,8 @@
 #          comptime asserts against Zig's aarch64 headers, and the arch
 #          assert still firing on a planted x86_64 number? Under qemu-aarch64
 #          in `unshare -Urm`, do fsopen, fsconfig, fsmount and move_mount
-#          round-trip by their aarch64 numbers?
+#          round-trip by their aarch64 numbers? That run is in the VM
+#          (vmScript): CI's build sandbox refuses the uid_map write.
 #   p5     does the shim-settings archive build for aarch64-linux-none, with
 #          proof_main its only global definition and nothing undefined that
 #          glibc does not define? The aarch64 C link is out of scope: the
@@ -79,18 +80,6 @@ let
       grep -q 'p4: aarch64: __NR_openat is 56, expected 257' plant.log || { cat plant.log; exit 1; }
       echo "abi -Dplant=arch: p4: aarch64: __NR_openat is 56, expected 257" | tee -a $out/facts
 
-      # qemu-user 11.1 has no statmount (457): the run gets through the
-      # new mount API and stops there with NOSYS, from qemu, not the kernel
-      # (p4-mount built for x86_64 passes the same call natively).
-      d=$(mktemp -d)
-      if unshare -Urm ${qemu} $out/aarch64/p4-mount $d > mount.log 2>&1; then
-        grep -qx 'p4: all ok' mount.log
-      else
-        grep -qx 'p4: FAIL: statmount a: NOSYS' mount.log || { cat mount.log; echo "p6: p4-mount failed before statmount"; exit 1; }
-      fi
-      grep -q '^p4: ok: fsopen tmpfs, fsconfig mode size create, fsmount' mount.log
-      grep -q '^p4: ok: move_mount: DIR/a is mount' mount.log
-      sed 's/^/qemu-aarch64 p4-mount: /; s/mount [0-9]* (DIR.s is [0-9]*)/mount N/' mount.log | tee -a $out/facts
     '';
   };
 
@@ -132,4 +121,25 @@ in
   build = pkgs.linkFarm "p6" {
     inherit spike p4 p5;
   };
+
+  bins = pkgs.runCommand "p6-bins" { } ''
+    mkdir -p $out/bin
+    ln -s ${p4}/aarch64/p4-mount $out/bin/p6-p4-mount-aarch64
+  '';
+
+  # qemu-user 11.1 has no statmount (457): the run gets through the new
+  # mount API and stops there with NOSYS, from qemu, not the kernel
+  # (p4-mount built for x86_64 passes the same call natively).
+  vmScript = ''
+    with subtest("p6: the aarch64 mount calls under qemu-aarch64 and unshare -Urm"):
+        out = machine.succeed(as_alice(
+            "d=$(mktemp -d); "
+            "unshare -Urm ${qemu} $(command -v p6-p4-mount-aarch64) $d > /tmp/p6.log 2>&1; "
+            "cat /tmp/p6.log"))
+        print(out)
+        lines = out.splitlines()
+        assert "p4: all ok" in lines or "p4: FAIL: statmount a: NOSYS" in lines, "p6: p4-mount failed before statmount"
+        assert any(l.startswith("p4: ok: fsopen tmpfs, fsconfig mode size create, fsmount") for l in lines)
+        assert any(l.startswith("p4: ok: move_mount: DIR/a is mount") for l in lines)
+  '';
 }
