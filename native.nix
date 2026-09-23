@@ -4,7 +4,7 @@
 # paths; the checks of the Zig package; the dependency fetch they share.
 #
 # Phase 1 has the seccomp set, which seccomp/default.nix imports; phase 3
-# adds launcher, phase 6 fixtures.
+# adds launcher, which launcher/default.nix imports; phase 6 fixtures.
 # tests/integration.nix builds phase 0's proofs with the same zigSet.
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:11-20
@@ -139,6 +139,67 @@ let
     files = [ ./src/seccomp ] ++ shared;
   };
 
+  # The C launcher's compiler flags (launcher/default.nix before phase 3),
+  # a bash array's words: the store paths of the programs it runs are
+  # compiled in, so the wrapper cannot hand it a different bwrap, pasta,
+  # tini or flong-init. newuidmap and newgidmap are NixOS's setuid wrappers,
+  # which have no store path. -Werror with the cc-wrapper's hardening.
+  # FLONG_INIT names the Zig flong-init installed beside it, in the same
+  # $out, so it is given as a shell word expanding $out.
+  launcherCflags = ''
+    -std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror
+    -DFLONG_BWRAP='"${pkgs.bubblewrap}/bin/bwrap"'
+    -DFLONG_PASTA='"${pkgs.passt}/bin/pasta"'
+    -DFLONG_TINI='"${pkgs.tini}/bin/tini"'
+    -DFLONG_NEWUIDMAP='"/run/wrappers/bin/newuidmap"'
+    -DFLONG_NEWGIDMAP='"/run/wrappers/bin/newgidmap"'
+    -DFLONG_INIT="\"$out/bin/flong-init\""
+  '';
+
+  # flong-launch, flong-sweeper and flong-init side by side in one $out
+  # (tests/rootless.nix:636-641 finds the sweeper beside the launcher):
+  # flong-init is Zig, -Dtini its compiled-in tini; the rest is still C,
+  # built by $CC with launcherCflags (ZIG.md, "Phase 3"). The fileset holds
+  # src/ but for the seccomp set's and the fixtures' own sources, and
+  # launcher/'s C, so neither set's edits move the other (ZIG.md, "The Nix
+  # build"). flong-init.c stays in launcher/ until phase 3 (b); only
+  # checks.native's transition subtest builds it.
+  launcher = zigSet {
+    pname = "flong-launcher";
+    set = "launcher";
+    flags = "-Dtini=${pkgs.tini}/bin/tini";
+    files = [
+      (lib.fileset.difference ./src (
+        lib.fileset.unions [
+          ./src/seccomp
+          (lib.fileset.maybeMissing ./src/fixtures)
+        ]
+      ))
+      (lib.fileset.fileFilter (f: f.hasExt "c" || f.hasExt "h") ./launcher)
+    ];
+    nativeBuildInputs = [
+      pkgs.file
+      pkgs.binutils
+    ];
+    extra = ''
+      # flong-init: static, no INTERP, and no stack size in PT_GNU_STACK,
+      # so the start code leaves RLIMIT_STACK alone (quirk 20; ZIG.md,
+      # "Measured": P2).
+      file -b $out/bin/flong-init | tee /dev/stderr | grep -q 'statically linked'
+      readelf -lW $out/bin/flong-init > $TMPDIR/init.phdrs
+      if grep -q INTERP $TMPDIR/init.phdrs; then echo "flong-init has an INTERP"; exit 1; fi
+      [[ $(awk '$1 == "GNU_STACK" { print $6 }' $TMPDIR/init.phdrs) == 0x000000 ]]
+      cd launcher
+      cflags=(${launcherCflags})
+      $CC "''${cflags[@]}" -o $out/bin/flong-launch \
+        flong-launch.c flong-spec.c flong-ns.c flong-cgroup.c flong-record.c \
+        flong-mount.c flong-tty.c flong-util.c
+      $CC "''${cflags[@]}" -o $out/bin/flong-sweeper \
+        flong-sweeper.c flong-cgroup.c flong-record.c flong-util.c
+      cd ..
+    '';
+  };
+
   # The unit and property tests, and test-libc against this nixpkgs' glibc,
   # in Debug and in ReleaseSafe.
   test =
@@ -191,19 +252,24 @@ let
     # compiled and not linked, since the flake has no aarch64 libseccomp
     # here; tests/zig/abi.zig's aarch64 half, and its controls, each plant
     # failing the build naming what differs on both arches; and P5's archive
-    # for aarch64 with its clash check (tests/proofs/p5). Phase 3 adds the
-    # launcher set with dummy paths.
+    # for aarch64 with its clash check (tests/proofs/p5); flong-init for
+    # aarch64 with a dummy tini, the launcher set's Zig.
     cross-aarch64 = pkgs.linkFarm "cross-aarch64" {
       flong = zigSet {
         pname = "cross-aarch64";
         files = [
           ./src/seccomp
+          ./src/init.zig
           ./tests/zig/abi.zig
           ./tests/zig/abi.h
         ]
         ++ shared;
         steps = "cross";
+        nativeBuildInputs = [ pkgs.file ];
         extra = ''
+          # flong-init for aarch64, with a dummy tini: static, no INTERP.
+          file -b $out/cross/flong-init | tee /dev/stderr | grep -q 'ARM aarch64.*statically linked'
+          if file -b $out/cross/flong-init | grep -q interpreter; then exit 1; fi
           for plant in arch offset; do
             if zig build abi -Dabi-plant=$plant $zigDefaultCpuFlag $zigDefaultOptimizeFlag >plant-$plant.log 2>&1; then
               echo "cross-aarch64: abi passed with -Dabi-plant=$plant"; exit 1
@@ -226,6 +292,8 @@ in
     zigDeps
     deps
     seccomp
+    launcher
+    launcherCflags
     checks
     ;
 }

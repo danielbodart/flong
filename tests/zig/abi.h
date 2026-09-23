@@ -13,4 +13,9 @@
 #include <linux/pidfd.h>
 #include <linux/stat.h>
 #include <linux/uio.h>
+#include <linux/capability.h>
+#include <linux/prctl.h>
+#include <linux/limits.h>
+#include <asm/ioctls.h>
+#include <asm/signal.h>
 #include <asm/unistd.h>

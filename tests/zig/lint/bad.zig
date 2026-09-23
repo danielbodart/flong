@@ -57,3 +57,7 @@ pub fn unproven(s: []const u8) u64 {
 
 var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{}; // alloc
 var dbg: std.heap.DebugAllocator(.{}) = .{}; // alloc
+
+pub fn slots() usize {
+    return sys.argvSlots().len; // argv
+}

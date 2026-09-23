@@ -1,10 +1,11 @@
 # Phase 0 proofs
 
 Each proof answers one question of ZIG.md's "Phase 0: proofs" by a build that
-fails when the answer is no. Phase 2 moved the three still standing here
-from `spike/proofs/` (ZIG.md, "Phase 2"); the spike and the retired proofs,
-P1, P4's round trip and P6's qemu run, are in
-`~/Projects/flong-spikes-archive/zig`. A proof is a directory
+fails when the answer is no. Phase 2 moved the three then standing here
+from `spike/proofs/` (ZIG.md, "Phase 2"), and phase 3 retired P2 (its last
+version is `tests/proofs/p2/` at 57e2de0); the spike and the other retired
+proofs, P1, P4's round trip and P6's qemu run, are in
+`~/Projects/flong-spikes-archive/zig`, beside P2's spike version. A proof is a directory
 `tests/proofs/<pN>/` holding a `default.nix`; `tests/integration.nix` finds it with
 `builtins.readDir`, so adding one needs no edit there, in `tests/native.nix`
 or in `flake.nix`. As a flake only sees tracked files, `git add` the
@@ -76,11 +77,6 @@ column 0, like the rest of the testScript.
 
 ## The proofs
 
-- `p2`: flong-init's start code as pid 1. `p2-init` (flong-init's no-libc,
-  `stack_size = 0` settings), the `p2-init-default` control, the C
-  flong-init, and `p2-pid1` (bwrap `--as-pid-1` with the strict/log stack):
-  the first syscall after `execve`, audit records, a planted panic, `ulimit -s`.
-  Until phase 3's strace subtest replaces it.
 - `p3`: processes. `clone3` into a delegated `O_PATH` leaf, the `noreturn`
   fork (`compile-fail` and at run time), a fork after `setns(CLONE_NEWUSER)`.
   Stays in `checks.native`.
@@ -89,6 +85,13 @@ column 0, like the rest of the testScript.
   clash check. Its `aarch64` attribute, the archive for aarch64 and its
   symbols (P6's piece), is built by `cross-aarch64` (native.nix). Until
   phase 4's clash check on the real link replaces it.
+
+Retired in phase 3: `p2`, flong-init's start code as pid 1, whose run as
+pid 1 through bwrap under the strict/log stack is now the C-against-Zig
+strace subtest of `tests/native.nix` (the first call after the Zig's
+`execve` is its `setgroups`), with the real `flong-init`; its stack checks
+are rootless's `ulimit -s` subtest and the launcher set's `PT_GNU_STACK`
+check (native.nix).
 
 Retired in phase 2: `p1` (native.nix's derivations answer it every build),
 `p4` (its ABI asserts are `tests/zig/abi.zig`, in `test-libc` and

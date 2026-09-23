@@ -1352,11 +1352,14 @@ Component costs are quoted in their sections, with their harness.
 
 ## The native launcher
 
-Three programs, in `launcher/`, built by `runCommandCC` with
+Three programs, installed side by side by `native.nix`'s `launcher` set:
+`flong-launch` and `flong-sweeper`, C in `launcher/`, built by `$CC` with
 `-std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror` and fortify (an unchecked
-`write`, `read` or `fscanf` is an error). The store paths they run (bwrap,
-pasta, tini, flong-init) and `/run/wrappers/bin/newuidmap` and `newgidmap` are
-compiled in, so the wrapper cannot point the launcher at another bwrap.
+`write`, `read` or `fscanf` is an error); and `flong-init`, Zig
+(`src/init.zig`, static, no libc), which `ZIG.md` is porting the rest to. The
+store paths they run (bwrap, pasta, tini, flong-init) and
+`/run/wrappers/bin/newuidmap` and `newgidmap` are compiled in, so the wrapper
+cannot point the launcher at another bwrap.
 
 C, not Zig: the BPF and the runtime were identical, but a clean Zig build took
 78–93 s against C's 1.6 s and needs a 1.8 GiB compiler, and a typed config

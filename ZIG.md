@@ -124,6 +124,11 @@ By this plan (each detailed below):
 | the project compile, cold and warm (phase 2 a; reported, not gated) | `flong-seccomp project` on the host, a groups policy, strict names, median of 21 (p10-p90): cold 31.6 ms (28.1-33.1), warm 3.4 ms (2.8-3.5); an earlier run 37.7 ms (34.4-47.3) and 6.4 ms; the bash it replaces, cold 85.8 ms (80.9-89.0), warm 42.4 ms (38.1-45.8). A launch in `checks.rootless`, one sample each, three runs: cold 0.221, 0.181, 0.205 s, warm 0.153, 0.179, 0.182 s; on the parent 0dc291c, cold 0.277 s, warm 1.145 s | same, `rootless.nix`'s stderr subtest timed by the driver |
 | the gate subtest's one red run (phase 2 a; `rootless.nix:732-740`) | the output ended `…not starting the payloadrc=125`: the C flong-init's refusal is three `stderr` writes (`flong-init.c:60-64`) and teardown kills the sandbox right after closing the gate (`flong-launch.c:792-797`), so a kill between them drops the newline; not the Zig's (the `hooked` box has no project policy). The assertion now takes `rc=125` at the end of the output, on its own line or not; phase 3's one `writev` removes the race | this host, 2026-09-23, the failing log and a green re-run of the same derivation |
 | phase 2's derivations, `nix build --rebuild` | `seccomp` 10.9-11.6 s, bit-identical; flong-seccomp 139,360 bytes stripped (phase 1: 41,096: the subcommands, sha256, hash maps, sort), PT_GNU_STACK size 0, closure 38,052,096 bytes, no zig; `native-test` Debug 15.7 s, release 26.9 s; `native-analyze` 76.8 s; `native-lint` 4.5 s; `cross-aarch64` 13.1 s and P5's aarch64 archive 5.8 s; golden 5.7 s; the transition check 5.8 s. Local `nix flake check`, partly cached: 4 min 43 s and 5 min 11 s; the final one 35 min 23 s, beside a `--no-build --all-systems` evaluation that itself took 35 min 13 s (cause not investigated); test scripts native 18.3 s, parity 21.4 s, basic 83.6 s, rootless 113.0 s. The launcher's store path is unchanged (`rr1aja5r…-flong-launcher`) | same |
+| `nix flake check` in CI, before phase 3 | 8 min 10 s (the step; the run 8 min 33 s) | run 35907715248, 3cb27fb |
+| the Zig flong-init against the C (phase 3 a) | `checks.native`'s transition subtest, both as pid 1 through bwrap under strict/log, audit, tty and nsmask, `strace -f -ff`: the window from the first `setgroups` (or the message) to `execve` or `exit_group` equal call for call on five paths, tini's exec 97 calls, gate EOF 94, chdir 95, TIOCSCTTY refused 89, an argv refusal 2; the outputs byte-equal; the Zig makes no call before the window; no audit record from any of the 10 runs, an `io_uring_setup` control logged (syscall=425). The compare needs two normalisations: the C's malloc (`brk`, `mmap`) left out, the Zig allocating nothing; each run of stderr writes one entry, the C's stdio writing a message in pieces, so the Zig's one `writev` per message is counted apart (exactly 1 per path, the C's more than 1 as the control). Plants in a scratch copy, each caught: chdir and `close_range` swapped, `close_range` gone (native, and basic's payload descriptors), a message in pieces, a refusal's byte (golden), TIOCSCTTY after the signal reset, the mask emptied before the reset, a 64 KiB and the default stack (a `prlimit64` before `setgroups`; rootless's `ulimit -s` saw 16384). Differential outside the VM: 4,000 random argvs and 9 large ones (60,000 groups, 131,000-byte words), and 21 paths under `unshare --map-root-user --map-auto`, 0 differences. Two differences no caller can see: GROUPS' commas are not overwritten (strtok_r), and a one-byte READY write returning 0 prints `Success` where the C printed a stale errno. The pid-1 panic is no longer run (P2 gone; the same `msg.onPanic` as flong-seccomp's) | this host, 2026-09-23, phase 3 (a) and its reviews |
+| the Zig flong-init (phase 3 a) | 40,312 bytes, static, stripped, no INTERP, PT_GNU_STACK size 0 (the C 17,408, dynamic, glibc); aarch64: static, no interpreter. The launcher set is `flong-launcher-0` (zigSet's version); Nix's fixup now strips the `$CC` binaries with `-S` (flong-launch 107,648 to 107,224 bytes, flong-sweeper 50,088 to 49,808); closure 43,825,072 bytes (54,318,016 before). `sys.zig` is a seccomp source, so seccomp's path moved once (quirk 36); a scratch edit of `src/init.zig`, `launcher/*.c` or `launcher/*.h` leaves seccomp's drv path unchanged, the launcher's moving (the control) | same, `readelf -lW`, `file`, `nix path-info -S` |
+| phase 3's derivations, `nix build --rebuild` | `launcher` 11.7-12.1 s, `seccomp` 10.8-11.4 s, each bit-identical; the transition subtest 2.4 s. Local `nix flake check -L`, alone, partly cached: 161.7 s and 291.8 s; `--no-build --all-systems` after it 276.8-278.9 s; test scripts native 33.7 s, parity 21.2 s, basic 83.8 s, rootless 110.1 s | same |
+| `nix build .#bench`, C flong-init (57e2de0) against Zig (phase 3 a; reported, not gated) | medians of 20, three runs, ms, median (p10-p90) per run. No network: C 31.8 (26.8-35.4), 31.0 (26.4-34.0), 31.8 (30.0-34.9); Zig 32.9 (28.5-35.8), 29.5 (27.3-33.5), 33.5 (30.4-34.5). Pasta + nft hook: C 60.1, 56.1, 57.0; Zig 58.3, 52.8, 49.0. Forwarded port: C 78.2, 72.9, 73.4; Zig 75.2, 78.1, 70.1. Cold: C 376.9, 365.9, 367.9; Zig 370.8, 379.5, 367.9. Within the runs' spread | same, `numbers.md` of each |
 
 **Reporting.** CI runs after a push and trunk commits are never amended, so
 each phase's first commit reports the previous push's CI flake-check time (run
@@ -172,6 +177,7 @@ At the root, `build.zig`, `build.zig.zon`, `.zwanzig.json`, `native.nix`,
   `rt_sigaction`. Each wrapper returns `Result(T) = union(enum) { ok: T,
   err: linux.E }`. EINTR is retried where the C retries it.
 - **Re-exports** what the lint bans elsewhere (`argv()`, `environ()`,
+  `argvSlots()`, the kernel's writable slots flong-init execs from,
   `path_max`) and `exitGroup(u8) noreturn`.
 - **Adds**, each `extern struct` or constant with a comptime assert:
   `clone3`, `CloneArgs` (88 bytes); `close_range`; `setns` (std wraps
@@ -383,8 +389,8 @@ the child (`flong-mount.c:524`). flong-seccomp: an arena over `c_allocator`.
   - `raw-number`: `.raw` outside `sys`, `fd`, `proc`, `sig`,
     `seccomp/scmp.zig`; the ways out are `passFd`, `selfPath`, `pidPath`,
     `FsCtx.setFd`, `scmp.exportBpf(ctx, Fd(.file))`.
-  - `argv`: `sys.argv`/`sys.environ` outside the roots and `proc.zig`
-    (Spawn's default envp).
+  - `argv`: `sys.argv`/`sys.argvSlots`/`sys.environ` outside the roots and
+    `proc.zig` (Spawn's default envp).
   - `handle-guts` (`.slot`, `.gen`) outside `fd.zig`; `adopt-foreign`
     outside `hybrid/mount_c.zig`; `debug-output` (`debug.print`, `std.log`);
     `catch-unreachable` without `// proven: <why>` on the line; `alloc`
@@ -554,7 +560,8 @@ and `tests/integration.nix`. It records only what flong's code determines:
 (`tests/zig/libc_*.zig`); `scmp.zig` against `seccomp.h`; `sys.O_TMPFILE`
 against `fcntl.h`; in `tests/zig/abi.zig`, every `sys.zig` struct and
 constant against `addTranslateC` of `linux/{mount,openat2,sched,pidfd,stat,
-capability}.h`, `asm/termbits.h`, `asm/unistd.h` from Zig's bundled headers,
+uio,capability,prctl,limits}.h`, `asm/{ioctls,signal,unistd}.h` (L3 adds
+`asm/termbits.h`) from Zig's bundled headers,
 for x86_64 and (in `cross-aarch64`) aarch64, each with `-target
 <arch>-linux-musl` so only Zig's headers are read, asserting each took its
 arch's headers (`__NR_openat` 257 or 56; P4's `abi_test.zig` is the model); phases 4-7, `flong-mount.h`'s layout.
@@ -785,9 +792,11 @@ golden cases, the payload-descriptor subtest.
 - **(a)** A `checks.native` subtest, the C init built in the check: `strace
   -f` of both as pid 1 through bwrap under the strict stack with `log =
   true`, over tini's exec, a gate EOF (125), a failing chdir and an argv
-  refusal; per path the ordered syscalls from the first `setgroups` to
-  `execve` or exit, arguments normalised, are equal, and neither leaves an
-  audit record; the Zig makes no syscall between its `execve` and that
+  refusal (and TIOCSCTTY refused, which alone places the ioctl); per path
+  the ordered syscalls from the first `setgroups` to `execve` or exit,
+  arguments normalised, the C's `brk`/`mmap` left out and a message's
+  writes one entry, are equal; the Zig writes each message once; neither
+  leaves an audit record; the Zig makes no syscall between its `execve` and that
   `setgroups` (P2's check: the audit compare alone cannot see start code,
   measured). P2 goes. **(b)** Delete `flong-init.c`, the subtest;
   DESIGN.md:1379's row.

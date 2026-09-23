@@ -665,6 +665,9 @@ in
         # sets 16 MiB, ZIG.md "Measured", P2) would show here and not above.
         out = machine.succeed(as_user("ulimit -S -s 4096; ulimit -H -s; plain 'ulimit -S -s; ulimit -H -s'")).split()
         assert len(out) == 3 and out[1:] == ["4096", out[0]], out
+        # The hard limit is above the soft one, else the soft one had nowhere
+        # to rise and the check above could not fail.
+        assert out[0] == "unlimited" or int(out[0]) > 4096, out
         # The control: another value arrives as itself, so the one above is
         # not a constant of the session.
         out = machine.succeed(as_user("ulimit -s 6144; plain 'ulimit -s'"))

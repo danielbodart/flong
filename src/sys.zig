@@ -13,9 +13,12 @@
 //! argv, and the exit; phase 2 the opens and closes of fd.zig, the calls on
 //! a directory (mkdirat, unlinkat, renameat, fstatat, fchmodat,
 //! getdents64), pread, pwrite, fstat, flock, and getrandom for the project
-//! tool's temp names.
+//! tool's temp names; phase 3 what flong-init calls (setgroups, prctl,
+//! capset, the TIOCSCTTY ioctl, rt_sigaction, rt_sigprocmask, chdir,
+//! close_range, execve), each as glibc makes it (flong-init.c:195-238).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 
 /// The kernel's errno. Non-exhaustive: a number the enum does not name is
@@ -78,6 +81,15 @@ pub fn environ() []const [*:0]const u8 {
 /// "Measured"), so every root ends here instead.
 pub fn exitGroup(status: u8) noreturn {
     linux.exit_group(status);
+}
+
+/// The kernel's argv as the process may rewrite it: the pointer slots are
+/// the kernel's own, null-terminated past the last (argv[argc] == NULL), so
+/// a tail of it is an exec argv as it stands (flong-init.c:222-237). The
+/// strings are not written. Confined to the roots as `argv` is.
+pub fn argvSlots() [][*:0]const u8 {
+    const a = std.os.argv;
+    return @ptrCast(a);
 }
 
 fn result(comptime T: type, rc: usize) Result(T) {
@@ -221,6 +233,138 @@ pub fn clockRealtime() timespec {
     var t: timespec = undefined;
     _ = linux.clock_gettime(.REALTIME, &t);
     return t;
+}
+
+// ---- flong-init (flong-init.c:195-238) ----
+
+/// NGROUPS_MAX (linux/limits.h): the most supplementary groups setgroups
+/// takes.
+pub const ngroups_max = 65536;
+
+/// setgroups(2), the 32-bit gid call on both arches. `list` null is the C's
+/// setgroups(0, NULL) (flong-init.c:116-117, 195); strace shows the pointer.
+pub fn setgroups(list: ?[]const u32) Result(void) {
+    const n = if (list) |l| l.len else 0;
+    const ptr = if (list) |l| @intFromPtr(l.ptr) else 0;
+    return result(void, linux.syscall2(.setgroups, n, ptr));
+}
+
+/// prctl(2)'s options flong-init uses (linux/prctl.h).
+pub const PR = struct {
+    pub const CAPBSET_READ = 23;
+    pub const CAPBSET_DROP = 24;
+    pub const CAP_AMBIENT = 47;
+    pub const CAP_AMBIENT_CLEAR_ALL = 4;
+};
+
+/// prctl(2) with glibc's five arguments, the unused ones 0. The value is
+/// the call's (PR_CAPBSET_READ answers 0 or 1).
+pub fn prctl(option: u32, arg2: usize) Result(usize) {
+    return result(usize, linux.syscall5(.prctl, option, arg2, 0, 0, 0));
+}
+
+/// struct __user_cap_header_struct (linux/capability.h). Not std's
+/// cap_user_header_t, whose pid is a usize where the kernel has an int.
+pub const CapHeader = extern struct {
+    version: u32,
+    pid: i32,
+};
+
+/// struct __user_cap_data_struct (linux/capability.h).
+pub const CapData = extern struct {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+};
+
+/// _LINUX_CAPABILITY_VERSION_3, and its _LINUX_CAPABILITY_U32S_3 data
+/// structs.
+pub const cap_version_3 = 0x20080522;
+pub const cap_u32s_3 = 2;
+
+comptime {
+    std.debug.assert(@sizeOf(CapHeader) == 8);
+    std.debug.assert(@sizeOf(CapData) == 12);
+}
+
+/// capset(2) of the calling thread (pid 0): every set to `data`.
+pub fn capset(data: *const [cap_u32s_3]CapData) Result(void) {
+    var header: CapHeader = .{ .version = cap_version_3, .pid = 0 };
+    return result(void, linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(data)));
+}
+
+/// TIOCSCTTY (asm-generic/ioctls.h, x86_64's and aarch64's).
+pub const TIOCSCTTY = 0x540E;
+
+/// ioctl(2) with an integer argument.
+pub fn ioctl(fd: fd_t, request: u32, arg: usize) Result(void) {
+    return result(void, linux.syscall3(.ioctl, @bitCast(@as(isize, fd)), request, arg));
+}
+
+/// The kernel's struct sigaction for rt_sigaction (asm-generic/signal.h's
+/// order, x86_64's and aarch64's): the handler, flags, the restorer, then a
+/// 64-bit mask.
+pub const KSigaction = extern struct {
+    handler: usize,
+    flags: c_ulong,
+    restorer: usize,
+    mask: u64,
+};
+
+pub const SIG = struct {
+    pub const DFL = 0;
+    pub const INT = 2;
+    pub const QUIT = 3;
+    pub const SETMASK = 2;
+};
+
+/// SA_RESTORER, which glibc sets on x86_64 with its __restore_rt, the
+/// kernel needing it there to return from a handler; glibc's aarch64 sets
+/// none, the kernel using the vDSO's (glibc sysdeps/unix/sysv/linux/
+/// x86_64/libc_sigaction.c, SET_SA_RESTORER).
+pub const sa_restorer = 0x04000000;
+
+/// rt_sigaction(2) resetting `sig` to SIG_DFL with an empty mask and no
+/// old action, as glibc's sigaction makes the call (flong-init.c:169-172):
+/// on x86_64 with SA_RESTORER and std's restore_rt, which a default
+/// disposition never calls, so the call is the C's argument for argument.
+/// Not std's sigaction, which asserts on SIGKILL and SIGSTOP
+/// (linux.zig:1857-1861).
+pub fn sigDefault(sig: u6) Result(void) {
+    const x86 = builtin.cpu.arch == .x86_64;
+    const act: KSigaction = .{
+        .handler = SIG.DFL,
+        .flags = if (x86) sa_restorer else 0,
+        .restorer = if (x86) @intFromPtr(&linux.restore_rt) else 0,
+        .mask = 0,
+    };
+    return result(void, linux.syscall4(.rt_sigaction, sig, @intFromPtr(&act), 0, @sizeOf(u64)));
+}
+
+/// rt_sigprocmask(SIG_SETMASK, {}, NULL): an empty signal mask.
+pub fn emptyMask() Result(void) {
+    const none: u64 = 0;
+    return result(void, linux.syscall4(.rt_sigprocmask, SIG.SETMASK, @intFromPtr(&none), 0, @sizeOf(u64)));
+}
+
+/// close(2) whose errno the caller reads, as flong-init.c:208 does. Not
+/// retried: the descriptor is gone whatever it returns.
+pub fn closeChecked(fd: fd_t) Result(void) {
+    return result(void, linux.close(fd));
+}
+
+pub fn chdir(path: [*:0]const u8) Result(void) {
+    return result(void, linux.chdir(path));
+}
+
+/// close_range(2); `last` ~0 is every descriptor from `first` on.
+pub fn closeRange(first: u32, last: u32, flags: u32) Result(void) {
+    return result(void, linux.syscall3(.close_range, first, last, flags));
+}
+
+/// execve(2). It returns only on failure, with the errno.
+pub fn execve(path: [*:0]const u8, argv_: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) E {
+    return E.init(linux.execve(path, argv_, envp));
 }
 
 test "read and write carry the errno" {

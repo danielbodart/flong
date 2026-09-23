@@ -26,7 +26,7 @@
 //!                  tests/zig/abi.zig, tests/zig/libc_*.zig
 //!   raw-number     .raw, a descriptor's number. Not in the syscall layer,
 //!                  src/seccomp/scmp.zig, tests
-//!   argv           sys.argv, sys.environ. Not in the roots
+//!   argv           sys.argv, sys.argvSlots, sys.environ. Not in the roots
 //!                  (src/seccomp/main.zig, init.zig, sweeper.zig,
 //!                  launch.zig), src/proc.zig (Spawn's default envp), tests
 //!   handle-guts    .slot, .gen: a handle's fields. Not in src/fd.zig, tests
@@ -192,7 +192,7 @@ fn lint(a: std.mem.Allocator, out: *std.Io.Writer, name: []const u8, src: [:0]co
                 if (after_std and in(x, &.{ "os", "fs", "c", "posix", "process" })) rules[0] = .@"raw-namespace";
                 if (after_period and std.mem.eql(u8, x, "posix")) rules[1] = .posix;
                 if (after_period and std.mem.eql(u8, x, "raw")) rules[0] = .@"raw-number";
-                if (after_period and after.is(prev2, "sys") and in(x, &.{ "argv", "environ" })) rules[0] = .argv;
+                if (after_period and after.is(prev2, "sys") and in(x, &.{ "argv", "argvSlots", "environ" })) rules[0] = .argv;
                 if (after_period and in(x, &.{ "slot", "gen" })) rules[0] = .@"handle-guts";
                 if (after_period and std.mem.eql(u8, x, "adoptForeign")) rules[0] = .@"adopt-foreign";
                 if (after_period and after.is(prev2, "debug") and std.mem.eql(u8, x, "print")) rules[0] = .@"debug-output";

@@ -4,7 +4,8 @@
 //!
 //!   install       -Dset=seccomp (flong-seccomp and its subcommands; needs
 //!                 -Dself, the project key's compiler path), launcher
-//!                 (phase 3) or fixtures (phase 6)
+//!                 (flong-init; needs -Dtini, the tini it execs; the C
+//!                 beside it is native.nix's) or fixtures (phase 6)
 //!   test          unit and property tests, Debug, or ReleaseSafe with
 //!                 -Drelease=true (as every step); needs -Ddev=true
 //!   test-libc     errno.zig and num.zig against glibc, scmp.zig against
@@ -21,6 +22,7 @@
 //!   analyze       zwanzig over src/, and over its planted bugs
 //!                 (tests/zig/analyze/); needs -Ddev=true
 //!   cross         flong-seccomp compiled for aarch64-linux, not linked,
+//!                 flong-init built for it (in cross/, with a dummy tini),
 //!                 and abi's aarch64 half
 //!
 //! Every path a step reads is a lazy b.path, so an install set's derivation,
@@ -46,6 +48,7 @@ pub fn build(b: *std.Build) void {
     // Compiled-in paths have no default: a missing one fails the install
     // that needs it, as flong-init.c:52-54's #error does.
     const self = b.option([]const u8, "self", "flong-seccomp's own store path, the seccomp derivation's $out");
+    const tini = b.option([]const u8, "tini", "tini's store path, which flong-init execs");
     const abi_plant = b.option(AbiPlant, "abi-plant", "Plant a mismatch in tests/zig/abi.zig: arch, offset") orelse .none;
 
     // ---- install ----
@@ -56,7 +59,11 @@ pub fn build(b: *std.Build) void {
         } else {
             install.dependOn(&b.addFail("-Dset=seccomp needs -Dself=PATH, flong-seccomp's own store path").step);
         },
-        .launcher => install.dependOn(&b.addFail("-Dset=launcher arrives in phase 3").step),
+        .launcher => if (tini) |path| {
+            b.installArtifact(init(b, target, optimize, path));
+        } else {
+            install.dependOn(&b.addFail("-Dset=launcher needs -Dtini=PATH, tini's store path").step);
+        },
         .fixtures => install.dependOn(&b.addFail("-Dset=fixtures arrives in phase 6").step),
     } else {
         install.dependOn(&b.addFail("install needs -Dset=seccomp|launcher|fixtures").step);
@@ -99,6 +106,11 @@ pub fn build(b: *std.Build) void {
                     },
                 }),
             });
+            test_step.dependOn(&b.addRunArtifact(t).step);
+        }
+        {
+            // flong-init's argv parsing, in its root module.
+            const t = b.addTest(.{ .name = "init", .root_module = initModule(b, target, optimize, "/nix/store/test-only/bin/tini") });
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
         const m = modules(b, target, optimize);
@@ -260,6 +272,7 @@ pub fn build(b: *std.Build) void {
             "bad.zig:55:47: catch-unreachable",
             "bad.zig:58:19: alloc",
             "bad.zig:59:19: alloc",
+            "bad.zig:62:16: argv",
         }) |want| run.addCheck(.{ .expect_stdout_match = want });
         run.addCheck(.{ .expect_term = .{ .Exited = 1 } });
         lint_step.dependOn(&run.step);
@@ -329,6 +342,14 @@ pub fn build(b: *std.Build) void {
     const cross_step = b.step("cross", "Compile flong-seccomp for aarch64-linux, without linking, and abi's aarch64 half");
     const arm = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu });
     cross_step.dependOn(&seccompUnlinked(b, arm, optimize).step);
+    {
+        // flong-init links no libc, so it is built whole; native.nix's
+        // cross-aarch64 reads its ELF header.
+        const arm_init = b.addInstallArtifact(init(b, arm, optimize, "/nix/store/cross-check-only/bin/tini"), .{
+            .dest_dir = .{ .override = .{ .custom = "cross" } },
+        });
+        cross_step.dependOn(&arm_init.step);
+    }
 
     // ---- abi: the kernel ABI against Zig's bundled headers ----
     const abi_step = b.step("abi", "Check tests/zig/abi.zig against Zig's bundled headers, x86_64 and aarch64");
@@ -446,7 +467,7 @@ fn seccomp(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     root.linkSystemLibrary("seccomp", .{});
     const exe = b.addExecutable(.{ .name = "flong-seccomp", .root_module = root });
     // No stack size in PT_GNU_STACK: the start code then leaves RLIMIT_STACK
-    // alone (start.zig:545-578; tests/proofs/p2).
+    // alone (start.zig:545-578; ZIG.md, "Measured": P2).
     exe.stack_size = 0;
     return exe;
 }
@@ -457,6 +478,37 @@ fn seccompUnlinked(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         .name = "flong-seccomp",
         .root_module = seccompModule(b, target, optimize, "/nix/store/cross-check-only"),
     });
+    exe.stack_size = 0;
+    return exe;
+}
+
+/// flong-init's root module (src/init.zig; ZIG.md, "Per binary"): sys,
+/// msg, errno, num, and tini's path compiled in (flong-init.c:52-54). The
+/// settings every installed artifact has, and no libc: static.
+fn initModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, tini: []const u8) *std.Build.Module {
+    const m = modules(b, target, optimize);
+    const config = b.addOptions();
+    config.addOption([]const u8, "tini", tini);
+    return b.createModule(.{
+        .root_source_file = b.path("src/init.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = true,
+        .single_threaded = true,
+        .imports = &.{
+            .{ .name = "sys", .module = m.sys },
+            .{ .name = "errno", .module = m.errno },
+            .{ .name = "msg", .module = m.msg },
+            .{ .name = "num", .module = m.num },
+            .{ .name = "config", .module = config.createModule() },
+        },
+    });
+}
+
+fn init(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, tini: []const u8) *std.Build.Step.Compile {
+    const exe = b.addExecutable(.{ .name = "flong-init", .root_module = initModule(b, target, optimize, tini) });
+    // No stack size in PT_GNU_STACK: the start code then leaves RLIMIT_STACK
+    // to bwrap's, tini's and the payload's (quirk 20; ZIG.md, "Measured": P2).
     exe.stack_size = 0;
     return exe;
 }

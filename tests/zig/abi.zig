@@ -212,6 +212,66 @@ fn iovecLayout() usize {
     return pairs.len;
 }
 
+/// sys.CapHeader and sys.CapData against linux/capability.h's
+/// __user_cap_header_struct and __user_cap_data_struct: flong-init's
+/// capset (phase 3).
+fn capLayout() usize {
+    const Pair = struct { []const u8, []const u8 };
+    const header = [_]Pair{ .{ "version", "version" }, .{ "pid", "pid" } };
+    const data = [_]Pair{ .{ "effective", "effective" }, .{ "permitted", "permitted" }, .{ "inheritable", "inheritable" } };
+    inline for (.{ .{ sys.CapHeader, c.struct___user_cap_header_struct, header, "cap header" }, .{ sys.CapData, c.struct___user_cap_data_struct, data, "cap data" } }) |t| {
+        inline for (t[2]) |p| {
+            const mo = @offsetOf(t[0], p[0]);
+            const co = @offsetOf(t[1], p[1]) + (if (options.plant == .offset) 1 else 0);
+            if (mo != co) fail("{s}.{s}: offset {d}, header {d}", .{ t[3], p[0], mo, co });
+            if (@sizeOf(@FieldType(t[0], p[0])) != @sizeOf(@FieldType(t[1], p[1])))
+                fail("{s}.{s}: size differs", .{ t[3], p[0] });
+        }
+        if (@sizeOf(t[0]) != @sizeOf(t[1])) fail("{s}: size {d}, header {d}", .{ t[3], @sizeOf(t[0]), @sizeOf(t[1]) });
+    }
+    return header.len + data.len;
+}
+
+/// sys.KSigaction against asm/signal.h's struct sigaction, the kernel's
+/// (x86_64's own, aarch64's asm-generic/signal.h with SA_RESTORER defined):
+/// flong-init's rt_sigaction (phase 3), whose layout strace checks on
+/// x86_64 only.
+fn sigactionLayout() usize {
+    const pairs = .{ .{ "handler", "sa_handler" }, .{ "flags", "sa_flags" }, .{ "restorer", "sa_restorer" }, .{ "mask", "sa_mask" } };
+    inline for (pairs) |p| {
+        const mo = @offsetOf(sys.KSigaction, p[0]);
+        const co = @offsetOf(c.struct_sigaction, p[1]) + (if (options.plant == .offset) 1 else 0);
+        if (mo != co) fail("sigaction.{s}: offset {d}, header {d}", .{ p[0], mo, co });
+        if (@sizeOf(@FieldType(sys.KSigaction, p[0])) != @sizeOf(@FieldType(c.struct_sigaction, p[1])))
+            fail("sigaction.{s}: size differs from {s}", .{ p[0], p[1] });
+    }
+    if (@sizeOf(sys.KSigaction) != @sizeOf(c.struct_sigaction))
+        fail("sigaction: size {d}, header {d}", .{ @sizeOf(sys.KSigaction), @sizeOf(c.struct_sigaction) });
+    return pairs.len;
+}
+
+/// flong-init's constants in sys.zig against their macros (phase 3).
+fn initConstants() usize {
+    const pairs = .{
+        .{ "ngroups_max", sys.ngroups_max, c.NGROUPS_MAX },
+        .{ "PR.CAPBSET_READ", sys.PR.CAPBSET_READ, c.PR_CAPBSET_READ },
+        .{ "PR.CAPBSET_DROP", sys.PR.CAPBSET_DROP, c.PR_CAPBSET_DROP },
+        .{ "PR.CAP_AMBIENT", sys.PR.CAP_AMBIENT, c.PR_CAP_AMBIENT },
+        .{ "PR.CAP_AMBIENT_CLEAR_ALL", sys.PR.CAP_AMBIENT_CLEAR_ALL, c.PR_CAP_AMBIENT_CLEAR_ALL },
+        .{ "cap_version_3", sys.cap_version_3, c._LINUX_CAPABILITY_VERSION_3 },
+        .{ "cap_u32s_3", sys.cap_u32s_3, c._LINUX_CAPABILITY_U32S_3 },
+        .{ "TIOCSCTTY", sys.TIOCSCTTY, c.TIOCSCTTY },
+        .{ "SIG.INT", sys.SIG.INT, c.SIGINT },
+        .{ "SIG.QUIT", sys.SIG.QUIT, c.SIGQUIT },
+        .{ "SIG.SETMASK", sys.SIG.SETMASK, c.SIG_SETMASK },
+        .{ "sa_restorer", sys.sa_restorer, c.SA_RESTORER },
+    };
+    inline for (pairs) |p| {
+        if (p[1] != p[2]) fail("sys.{s}: {d}, header {d}", .{ p[0], p[1], p[2] });
+    }
+    return pairs.len;
+}
+
 /// std's Statx against the header's struct statx: its fields are the
 /// header's with stx_ dropped, but for the spares, and __pad2 starts at
 /// stx_mnt_id (0x90), where phase 4 reads the unique mount id.
@@ -263,7 +323,11 @@ fn sameConstants() usize {
 
 /// The calls `mine` is for, by std's SYS for this arch, against asm/unistd.h.
 fn sameSyscalls() usize {
-    const names = .{ "open_tree", "move_mount", "fsopen", "fsconfig", "fsmount", "mount_setattr", "openat2", "statmount", "statx", "clone3", "pidfd_open", "openat" };
+    const names = .{
+        "open_tree", "move_mount", "fsopen",       "fsconfig",       "fsmount", "mount_setattr", "openat2", "statmount", "statx", "clone3", "pidfd_open", "openat",
+        // flong-init's (phase 3)
+        "setgroups", "prctl",      "rt_sigaction", "rt_sigprocmask", "chdir",   "close_range",   "execve",  "capset",
+    };
     inline for (names) |name| {
         const h = @field(c, "__NR_" ++ name);
         const s = @intFromEnum(@field(linux.SYS, name));
@@ -300,6 +364,9 @@ pub const report = blk: {
         .clone_args = sameLayout(mine.clone_args, c.struct_clone_args, "clone_args"),
         .iovec = iovecLayout(),
         .statx = statxLayout(),
+        .cap = capLayout(),
+        .sigaction = sigactionLayout(),
+        .init = initConstants(),
         .constants = sameConstants(),
         .syscalls = sameSyscalls(),
         .stx_mnt_id = @offsetOf(c.struct_statx, "stx_mnt_id"),
@@ -311,10 +378,10 @@ comptime {
 }
 
 test "the kernel ABI matches Zig's bundled headers" {
-    std.debug.print("abi: {s}: __NR_openat {d}, LINUX_VERSION_CODE {d}, stx_mnt_id at 0x{x}; fields compared: open_how {d}, mount_attr {d}, mnt_id_req {d}, statmount {d}, clone_args {d}, iovec {d}, Statx {d}; constants {d}, syscalls {d}\n", .{
+    std.debug.print("abi: {s}: __NR_openat {d}, LINUX_VERSION_CODE {d}, stx_mnt_id at 0x{x}; fields compared: open_how {d}, mount_attr {d}, mnt_id_req {d}, statmount {d}, clone_args {d}, iovec {d}, Statx {d}, capability {d}, sigaction {d}; constants {d} and flong-init's {d}, syscalls {d}\n", .{
         report.arch,       report.openat,     report.version,    report.stx_mnt_id,
         report.open_how,   report.mount_attr, report.mnt_id_req, report.statmount,
-        report.clone_args, report.iovec,      report.statx,      report.constants,
-        report.syscalls,
+        report.clone_args, report.iovec,      report.statx,      report.cap,
+        report.sigaction,  report.constants,  report.init,       report.syscalls,
     });
 }
