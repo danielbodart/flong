@@ -1,0 +1,4 @@
+expand
+@DUMP@
+@GOLDEN@/tooling/expand-strict.stdout
+/dev/stdin

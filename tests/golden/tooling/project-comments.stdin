@@ -1,0 +1,7 @@
+# a comment
+
+   
+	# indented
+#tight
+allow ptrace
+  deny   read	write 

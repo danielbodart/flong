@@ -14,14 +14,21 @@
 #                  syntax: `<&-` closes stdin, `>&-` stdout, `<.` makes stdin
 #                  the (empty) working directory
 #   NAME.stdout    stdout (empty if absent and there is no NAME.bpf)
-#   NAME.bpf       stdout, when it is a filter libseccomp wrote
+#   NAME.bpf       a filter libseccomp wrote: stdout, or, when NAME.stdout
+#                  exists too, the file its first line names, relative to
+#                  the case's working directory
 #   NAME.stderr    stderr (empty if absent)
+#   NAME.tree      the working directory afterwards, one `MODE PATH` line
+#                  per entry (find's %M %P), bytewise sorted by path (empty
+#                  if absent)
 #
 # Each case runs with an empty environment in an empty working directory of
 # its own. A value only the check can know, such as a store path or a project
-# key, is a set's `vars` entry: @NAME@ in NAME.args, NAME.stdout and
-# NAME.stderr is replaced by it before the run and the compare. `.bpf` and
-# `.stdin` files are compared and fed as they are.
+# key, is a set's `vars` entry, or one its `caseVars` prints for the case:
+# @NAME@ in NAME.args, NAME.stdout, NAME.stderr and NAME.tree is replaced by
+# it before the run and the compare. `.bpf` and `.stdin` files are compared
+# and fed as they are. A set's other files (inputs its cases name, and
+# `caseVars`'s) are not cases.
 #
 # A .bpf file depends on libseccomp as well as on flong, so a set holding
 # them has a LIBSECCOMP file, libseccomp's version and a newline, and the
@@ -56,6 +63,58 @@
 let
   inherit (pkgs) lib;
 
+  # The seccomp tooling of seccomp/policy.nix as it is today, over
+  # golden/dump.txt in place of the live `systemd-analyze syscall-filter`,
+  # so a systemd bump changes no case. dump.txt is that dump as policy.nix's
+  # `dump` makes it (comment lines dropped) from systemd 261.2, so `dump`
+  # here has the same bytes.
+  analyze = pkgs.writeShellScriptBin "systemd-analyze" ''
+    [ "$*" = syscall-filter ] || exit 99
+    exec ${pkgs.coreutils}/bin/cat ${./golden/dump.txt}
+  '';
+  policy = import ../seccomp/policy.nix {
+    inherit pkgs lib;
+    systemd = analyze;
+    compiler = seccomp;
+  };
+
+  # `tooling SUB DUMP ARG...` runs today's tools in the argv of the
+  # subcommands that replace them (ZIG.md quirks 16 and 38), so that
+  # phase 2 (a) runs the same cases with `flong-seccomp` as the program:
+  # `expand DUMP SPEC...` is policy.nix:29-30's command line; `render DUMP
+  # NAMES DENY` and `project DUMP NAMES DENY DIR` drop DUMP, which is
+  # built into the bash (policy.nix:33, 176), and run it. Only the usage
+  # lines differ, and those cases are the tooling-usage set.
+  tooling = pkgs.writeShellApplication {
+    name = "tooling";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.gawk
+    ];
+    text = ''
+      sub=$1
+      shift
+      if (($# > 0)); then
+        if [[ $1 != "${policy.dump}" ]]; then
+          echo "tooling: DUMP is not ${policy.dump}: $1" >&2
+          exit 99
+        fi
+        shift
+      fi
+      case $sub in
+        expand)
+          awk -f ${../seccomp/expand.awk} ${policy.dump} "$@" | LC_ALL=C sort
+          ;;
+        render) exec ${policy.render}/bin/flong-seccomp-render "$@" ;;
+        project) exec ${policy.project}/bin/flong-seccomp-project "$@" ;;
+        *)
+          echo "tooling: no subcommand $sub" >&2
+          exit 99
+          ;;
+      esac
+    '';
+  };
+
   # Each set's program and derived values. A set whose directory does not
   # exist is skipped.
   sets = {
@@ -69,6 +128,38 @@ let
       program = "${seccomp}/bin/flong-seccomp";
       vars = { };
     };
+
+    # Recorded from the awk and bash of 2026-09-23 (seccomp/expand.awk,
+    # seccomp/policy.nix:81-209) over golden/dump.txt, through `tooling`
+    # above: expand-* the names of every tier variant and the expander's
+    # refusals, render-* the rendered policies, project-* a project corpus.
+    # parity.groups and strict.groups are copies of seccomp/'s. A project
+    # case that compiles has NAME.policy, the policy it renders, from which
+    # the check derives its key, KEY, as policy.nix:183 does: the sha256 of
+    # the compiler's store path, a newline, and the policy without its
+    # trailing newline (quirk 36).
+    tooling = {
+      program = "${tooling}/bin/tooling";
+      vars = {
+        DUMP = "${policy.dump}";
+        GOLDEN = "${cases}";
+      };
+      caseVars = ''
+        if [[ -e $dir/$name.policy ]]; then
+          key=$(printf '%s\n%s' ${seccomp} "$(<"$dir/$name.policy")" | sha256sum)
+          echo "KEY=''${key%% *}"
+        fi
+      '';
+    };
+
+    # The tooling's usage errors, the one text phase 2 (a) changes (quirks
+    # 16 and 38): the same program as `tooling`, and its cases rewritten.
+    tooling-usage = {
+      program = "${tooling}/bin/tooling";
+      vars = {
+        DUMP = "${policy.dump}";
+      };
+    };
   };
 
   cases = lib.fileset.toSource {
@@ -81,7 +172,8 @@ let
   # The shell both the check and golden-update source: run_case and expect.
   lib-sh = pkgs.writeText "golden-lib.sh" ''
     # run_case PROGRAM DIR NAME OUT [VAR=VALUE]...: runs case NAME of DIR,
-    # leaving its stdout, stderr and status in OUT.
+    # leaving its stdout, stderr and status in OUT, its working directory in
+    # OUT/work, and that directory's listing in OUT/tree.
     run_case() {
       local program=$1 dir=$2 name=$3 out=$4 stdin=/dev/null redirect= work kv i
       shift 4
@@ -100,7 +192,8 @@ let
       if [[ -e $dir/$name.redirect ]]; then
         redirect=$(<"$dir/$name.redirect")
       fi
-      work=$(mktemp -d)
+      work=$out/work
+      mkdir "$work"
       set +e
       (
         cd "$work" || exit 1
@@ -109,7 +202,20 @@ let
       )
       echo $? >"$out/status"
       set -e
-      rm -rf "$work"
+      (cd "$work" && find . -mindepth 1 -printf '%M %P\n' | LC_ALL=C sort -k 2) >"$out/tree"
+    }
+
+    # written DIR NAME OUT: the file case NAME's .bpf is compared with, from
+    # its run in OUT: stdout, or the file stdout names when NAME.stdout
+    # exists too.
+    written() {
+      local dir=$1 name=$2 out=$3 path
+      if [[ -e $dir/$name.stdout ]]; then
+        IFS= read -r path <"$out/stdout" || true
+        printf '%s\n' "$out/work/$path"
+      else
+        printf '%s\n' "$out/stdout"
+      fi
     }
 
     # expect FILE OUT [VAR=VALUE]...: writes FILE to OUT with every @VAR@
@@ -131,12 +237,21 @@ let
     }
   '';
 
-  # A set's program and vars as bash words: PROGRAM VAR=VALUE...
-  setWords =
-    s:
-    lib.escapeShellArgs (
-      [ s.program ] ++ lib.mapAttrsToList (k: v: "${k}=${v}") s.vars
-    );
+  # A call of FN (run_set or prepare) for set NAME: its case_vars, then FN
+  # NAME PROGRAM VAR=VALUE... with the set's vars. case_vars DIR NAME prints
+  # the case's own VAR=VALUE lines.
+  setCall =
+    fn: name: s:
+    ''
+      case_vars() {
+        local dir=$1 name=$2
+        :
+        ${s.caseVars or ""}
+      }
+      ${fn} ${name} ${
+        lib.escapeShellArgs ([ s.program ] ++ lib.mapAttrsToList (k: v: "${k}=${v}") s.vars)
+      }
+    '';
 
   libseccompVersion = pkgs.libseccomp.version;
 
@@ -145,7 +260,7 @@ let
       {
         nativeBuildInputs = [ pkgs.diffutils ];
         passthru = {
-          inherit update;
+          inherit update tooling;
         };
       }
       ''
@@ -164,20 +279,34 @@ let
         failed=0
         mkdir -p $out
         run_set() {
-          local set=$1 program=$2 dir=${cases}/$1 status name got stdout n=0
+          local set=$1 program=$2 dir=${cases}/$1 status name got bpf n=0
+          local -a vars
           shift 2
           for status in "$dir"/*.status; do
             name=$(basename "$status" .status)
+            mapfile -t vars < <(case_vars "$dir" "$name")
             got=$(mktemp -d)
-            run_case "$program" "$dir" "$name" "$got" "$@"
+            run_case "$program" "$dir" "$name" "$got" "$@" "''${vars[@]}"
             expect "$status" "$got/status.want"
-            expect "$dir/$name.stderr" "$got/stderr.want" "$@"
+            expect "$dir/$name.stderr" "$got/stderr.want" "$@" "''${vars[@]}"
+            expect "$dir/$name.tree" "$got/tree.want" "$@" "''${vars[@]}"
+            expect "$dir/$name.stdout" "$got/stdout.want" "$@" "''${vars[@]}"
             if [[ -e $dir/$name.bpf ]]; then
-              stdout=$dir/$name.bpf
-              ${lib.optionalString (!x86_64) ''stdout=$got/stdout # x86_64's bytes; see above''}
-            else
-              expect "$dir/$name.stdout" "$got/stdout.want" "$@"
-              stdout=$got/stdout.want
+              bpf=$dir/$name.bpf
+              ${lib.optionalString (!x86_64) ''bpf=$(written "$dir" "$name" "$got") # x86_64's bytes; see above''}
+              if ! cmp -s "$bpf" "$(written "$dir" "$name" "$got")"; then
+                echo "golden: $set/$name: filter differs:" >&2
+                cmp -l "$bpf" "$(written "$dir" "$name" "$got")" 2>&1 | head -n 20 >&2 || true
+                failed=1
+              fi
+            fi
+            if [[ -e $dir/$name.bpf && ! -e $dir/$name.stdout ]]; then
+              : # stdout is the filter, compared above
+            elif ! cmp -s "$got/stdout.want" "$got/stdout"; then
+              echo "golden: $set/$name: stdout differs:" >&2
+              diff -a "$got/stdout.want" "$got/stdout" | head -c 4096 >&2 || true
+              echo >&2
+              failed=1
             fi
             if ! cmp -s "$got/status.want" "$got/status"; then
               echo "golden: $set/$name: status $(<"$got/status"), not $(<"$got/status.want")" >&2
@@ -189,9 +318,9 @@ let
               echo >&2
               failed=1
             fi
-            if ! cmp -s "$stdout" "$got/stdout"; then
-              echo "golden: $set/$name: stdout differs:" >&2
-              cmp -l "$stdout" "$got/stdout" 2>&1 | head -n 20 >&2 || true
+            if ! cmp -s "$got/tree.want" "$got/tree"; then
+              echo "golden: $set/$name: working directory differs:" >&2
+              diff -a "$got/tree.want" "$got/tree" | head -c 4096 >&2 || true
               failed=1
             fi
             rm -rf "$got"
@@ -201,10 +330,7 @@ let
         }
         ${lib.concatStrings (
           lib.mapAttrsToList (
-            name: s:
-            lib.optionalString (builtins.pathExists (./golden + "/${name}")) ''
-              run_set ${name} ${setWords s}
-            ''
+            name: s: lib.optionalString (builtins.pathExists (./golden + "/${name}")) (setCall "run_set" name s)
           ) sets
         )}
         if ((failed)); then
@@ -222,6 +348,7 @@ let
     runtimeInputs = [
       pkgs.coreutils
       pkgs.diffutils
+      pkgs.findutils
       (import ./parity { inherit pkgs; })
     ];
     text = ''
@@ -237,7 +364,8 @@ let
 
       # Every new byte is made and judged before any file is written.
       prepare() {
-        local set=$1 program=$2 dir=tests/golden/$1 bpf name got
+        local set=$1 program=$2 dir=tests/golden/$1 bpf name got filter
+        local -a vars
         shift 2
         if [[ $(<"$dir/LIBSECCOMP") == "$want" ]]; then
           echo "golden-update: $dir/LIBSECCOMP already says $want; at one version a changed byte is a bug" >&2
@@ -246,22 +374,31 @@ let
         mkdir -p "$new/$set"
         for bpf in "$dir"/*.bpf; do
           name=$(basename "$bpf" .bpf)
+          mapfile -t vars < <(case_vars "$dir" "$name")
           got=$(mktemp -d)
-          run_case "$program" "$PWD/$dir" "$name" "$got" "$@"
+          run_case "$program" "$PWD/$dir" "$name" "$got" "$@" "''${vars[@]}"
           expect "$dir/$name.status" "$got/status.want"
-          expect "$dir/$name.stderr" "$got/stderr.want" "$@"
-          if ! cmp -s "$got/status.want" "$got/status" || ! cmp -s "$got/stderr.want" "$got/stderr"; then
-            echo "golden-update: $set/$name: its stderr or status changed, which golden-update does not record:" >&2
+          expect "$dir/$name.stderr" "$got/stderr.want" "$@" "''${vars[@]}"
+          expect "$dir/$name.tree" "$got/tree.want" "$@" "''${vars[@]}"
+          if [[ -e $dir/$name.stdout ]]; then
+            expect "$dir/$name.stdout" "$got/stdout.want" "$@" "''${vars[@]}"
+          else
+            cp "$got/stdout" "$got/stdout.want"
+          fi
+          if ! cmp -s "$got/status.want" "$got/status" || ! cmp -s "$got/stderr.want" "$got/stderr" ||
+            ! cmp -s "$got/tree.want" "$got/tree" || ! cmp -s "$got/stdout.want" "$got/stdout"; then
+            echo "golden-update: $set/$name: its stderr, status, stdout or working directory changed, which golden-update does not record:" >&2
             cat "$got/stderr" >&2
             exit 1
           fi
-          bpfdump eval -k "$bpf" -k "$got/stdout" "$bpf" >"$got/old.eval"
-          bpfdump eval -k "$bpf" -k "$got/stdout" "$got/stdout" >"$got/new.eval"
+          filter=$(written "$dir" "$name" "$got")
+          bpfdump eval -k "$bpf" -k "$filter" "$bpf" >"$got/old.eval"
+          bpfdump eval -k "$bpf" -k "$filter" "$filter" >"$got/new.eval"
           if ! diff -u "$got/old.eval" "$got/new.eval" >&2; then
             echo "golden-update: $set/$name: bpfdump eval differs: libseccomp changed what the policy means" >&2
             exit 1
           fi
-          cp "$got/stdout" "$new/$set/$name.bpf"
+          cp "$filter" "$new/$set/$name.bpf"
           rm -rf "$got"
         done
       }
@@ -276,7 +413,7 @@ let
         printf '%s\n' "$want" >"tests/golden/$set/LIBSECCOMP"
         echo "golden-update: tests/golden/$set/LIBSECCOMP is $want"
       }
-      ${lib.concatStrings (lib.mapAttrsToList (name: s: "prepare ${name} ${setWords s}\n") bpfSets)}
+      ${lib.concatStrings (lib.mapAttrsToList (setCall "prepare") bpfSets)}
       ${lib.concatMapStrings (name: "write ${name}\n") (lib.attrNames bpfSets)}
     '';
   };

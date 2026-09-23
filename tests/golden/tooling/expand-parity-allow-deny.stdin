@@ -1,0 +1,6 @@
+ptrace
+@mount
+@keyring
+userfaultfd
+-ptrace
+-@swap

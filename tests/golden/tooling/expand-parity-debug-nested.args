@@ -1,0 +1,4 @@
+expand
+@DUMP@
+@GOLDEN@/tooling/expand-parity.stdout
+/dev/stdin

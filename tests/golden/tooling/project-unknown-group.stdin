@@ -1,0 +1,2 @@
+allow ptrace
+allow @nosuch

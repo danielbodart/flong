@@ -1008,6 +1008,21 @@ in
         assert "the policy snippet fails" in out and out.split()[-1] == "rc=1", out
         assert machine.succeed(f"ls {cache}").split() == cached
 
+    with subtest("a launch with a project policy writes nothing to stderr"):
+        # Cold, compiling the policy, and warm, reusing it: nothing is said on
+        # success, the compiler's stats line included (ZIG.md quirk 34).
+        cache = f"{STATE}/seccomp"
+        policy = shlex.quote(learned_policy)
+        machine.succeed(f"rm -rf {cache}")
+        for run in ("cold", "warm"):
+            out = machine.succeed(as_user(f"FLONG_TEST_POLICY={policy} project 'echo payload-ran' 2>&1"))
+            assert out == "payload-ran\n", (run, out)
+            assert len(machine.succeed(f"ls {cache}").split()) == 1, run
+        # The control: the tool's own stderr does reach the caller's.
+        out = machine.succeed(as_user(
+            "FLONG_TEST_POLICY='allow no_such_call' project true 2>&1; echo rc=$?"))
+        assert "unknown syscall no_such_call" in out and out.split()[-1] == "rc=1", out
+
     with subtest("no timeouts: after its 90 s, the hook opens the gate and the payload runs"):
         machine.wait_until_succeeds("test -s /tmp/rc-patient")
         assert machine.succeed("cat /tmp/rc-patient").strip() == "0"

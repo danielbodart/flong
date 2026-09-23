@@ -1,0 +1,12 @@
+# The strict tier, the default: parity minus the calls the tools matrix does
+# without. strace and gdb need ptrace, which the debug loosening restores;
+# nested sandboxes need @mount, which nestedSandbox restores.
+-@keyring
+-userfaultfd
+-@mount
+-io_uring_setup
+-io_uring_enter
+-io_uring_register
+-ptrace
+-process_vm_readv
+-process_vm_writev

@@ -1,0 +1,4 @@
+render
+@DUMP@
+@GOLDEN@/tooling/expand-strict.stdout
+2

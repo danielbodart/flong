@@ -1,0 +1,563 @@
+default 38
+allow _llseek
+allow _newselect
+allow accept
+allow accept4
+allow access
+allow alarm
+allow arch_prctl
+allow arm_fadvise64_64
+allow bind
+allow brk
+allow cacheflush
+allow cachestat
+allow capget
+allow capset
+allow chdir
+allow chmod
+allow chown
+allow chown32
+allow clock_getres
+allow clock_getres_time64
+allow clock_gettime
+allow clock_gettime64
+allow clock_nanosleep
+allow clock_nanosleep_time64
+allow clone
+allow clone3
+allow close
+allow close_range
+allow connect
+allow copy_file_range
+allow creat
+allow dup
+allow dup2
+allow dup3
+allow epoll_create
+allow epoll_create1
+allow epoll_ctl
+allow epoll_ctl_old
+allow epoll_pwait
+allow epoll_pwait2
+allow epoll_wait
+allow epoll_wait_old
+allow eventfd
+allow eventfd2
+allow execve
+allow execveat
+allow exit
+allow exit_group
+allow faccessat
+allow faccessat2
+allow fadvise64
+allow fadvise64_64
+allow fallocate
+allow fchdir
+allow fchmod
+allow fchmodat
+allow fchmodat2
+allow fchown
+allow fchown32
+allow fchownat
+allow fcntl
+allow fcntl64
+allow fdatasync
+allow fgetxattr
+allow file_getattr
+allow file_setattr
+allow flistxattr
+allow flock
+allow fork
+allow fremovexattr
+allow fsetxattr
+allow fstat
+allow fstat64
+allow fstatat
+allow fstatat64
+allow fstatfs
+allow fstatfs64
+allow fsync
+allow ftruncate
+allow ftruncate64
+allow futex
+allow futex_time64
+allow futex_waitv
+allow futimesat
+allow get_mempolicy
+allow get_robust_list
+allow get_thread_area
+allow getcpu
+allow getcwd
+allow getdents
+allow getdents64
+allow getegid
+allow getegid32
+allow geteuid
+allow geteuid32
+allow getgid
+allow getgid32
+allow getgroups
+allow getgroups32
+allow getitimer
+allow getpeername
+allow getpgid
+allow getpgrp
+allow getpid
+allow getppid
+allow getpriority
+allow getrandom
+allow getresgid
+allow getresgid32
+allow getresuid
+allow getresuid32
+allow getrlimit
+allow getrusage
+allow getsid
+allow getsockname
+allow getsockopt
+allow gettid
+allow gettimeofday
+allow getuid
+allow getuid32
+allow getxattr
+allow getxattrat
+allow inotify_add_watch
+allow inotify_init
+allow inotify_init1
+allow inotify_rm_watch
+allow io_cancel
+allow io_destroy
+allow io_getevents
+allow io_pgetevents
+allow io_pgetevents_time64
+allow io_setup
+allow io_submit
+allow ioctl
+allow ioprio_get
+allow ioprio_set
+allow ipc
+allow kcmp
+allow kill
+allow landlock_add_rule
+allow landlock_create_ruleset
+allow landlock_restrict_self
+allow lchown
+allow lchown32
+allow lgetxattr
+allow link
+allow linkat
+allow listen
+allow listmount
+allow listxattr
+allow listxattrat
+allow llistxattr
+allow llseek
+allow lremovexattr
+allow lseek
+allow lsetxattr
+allow lsm_get_self_attr
+allow lsm_list_modules
+allow lstat
+allow lstat64
+allow madvise
+allow mbind
+allow membarrier
+allow memfd_create
+allow migrate_pages
+allow mincore
+allow mkdir
+allow mkdirat
+allow mknod
+allow mknodat
+allow mmap
+allow mmap2
+allow move_pages
+allow mprotect
+allow mq_getsetattr
+allow mq_notify
+allow mq_open
+allow mq_timedreceive
+allow mq_timedreceive_time64
+allow mq_timedsend
+allow mq_timedsend_time64
+allow mq_unlink
+allow mremap
+allow mseal
+allow msgctl
+allow msgget
+allow msgrcv
+allow msgsnd
+allow msync
+allow munmap
+allow name_to_handle_at
+allow nanosleep
+allow newfstat
+allow newfstatat
+allow nice
+allow oldfstat
+allow oldlstat
+allow oldolduname
+allow oldstat
+allow olduname
+allow open
+allow open_tree
+allow openat
+allow openat2
+allow pause
+allow personality
+allow pidfd_open
+allow pidfd_send_signal
+allow pipe
+allow pipe2
+allow poll
+allow ppoll
+allow ppoll_time64
+allow prctl
+allow pread64
+allow preadv
+allow preadv2
+allow prlimit64
+allow process_madvise
+allow pselect6
+allow pselect6_time64
+allow ptrace
+allow pwrite64
+allow pwritev
+allow pwritev2
+allow readahead
+allow readdir
+allow readlink
+allow readlinkat
+allow readv
+allow reboot
+allow recv
+allow recvfrom
+allow recvmmsg
+allow recvmmsg_time64
+allow recvmsg
+allow remap_file_pages
+allow removexattr
+allow removexattrat
+allow rename
+allow renameat
+allow renameat2
+allow restart_syscall
+allow riscv_flush_icache
+allow riscv_hwprobe
+allow rmdir
+allow rseq
+allow rt_sigaction
+allow rt_sigpending
+allow rt_sigprocmask
+allow rt_sigqueueinfo
+allow rt_sigreturn
+allow rt_sigsuspend
+allow rt_sigtimedwait
+allow rt_sigtimedwait_time64
+allow rt_tgsigqueueinfo
+allow sched_get_priority_max
+allow sched_get_priority_min
+allow sched_getaffinity
+allow sched_getattr
+allow sched_getparam
+allow sched_getscheduler
+allow sched_rr_get_interval
+allow sched_rr_get_interval_time64
+allow sched_setaffinity
+allow sched_setattr
+allow sched_setparam
+allow sched_setscheduler
+allow sched_yield
+allow seccomp
+allow select
+allow semctl
+allow semget
+allow semop
+allow semtimedop
+allow semtimedop_time64
+allow send
+allow sendfile
+allow sendfile64
+allow sendmmsg
+allow sendmsg
+allow sendto
+allow set_mempolicy
+allow set_mempolicy_home_node
+allow set_robust_list
+allow set_thread_area
+allow set_tid_address
+allow set_tls
+allow setdomainname
+allow setfsgid
+allow setfsgid32
+allow setfsuid
+allow setfsuid32
+allow setgid
+allow setgid32
+allow setgroups
+allow setgroups32
+allow sethostname
+allow setitimer
+allow setns
+allow setpgid
+allow setpriority
+allow setregid
+allow setregid32
+allow setresgid
+allow setresgid32
+allow setresuid
+allow setresuid32
+allow setreuid
+allow setreuid32
+allow setrlimit
+allow setsid
+allow setsockopt
+allow setuid
+allow setuid32
+allow setxattr
+allow setxattrat
+allow shmat
+allow shmctl
+allow shmdt
+allow shmget
+allow shutdown
+allow sigaction
+allow sigaltstack
+allow signal
+allow signalfd
+allow signalfd4
+allow sigpending
+allow sigprocmask
+allow sigreturn
+allow sigsuspend
+allow socket
+allow socketcall
+allow socketpair
+allow splice
+allow stat
+allow stat64
+allow statfs
+allow statfs64
+allow statmount
+allow statx
+allow swapcontext
+allow symlink
+allow symlinkat
+allow sync
+allow sync_file_range
+allow sync_file_range2
+allow syncfs
+allow sysinfo
+allow tee
+allow tgkill
+allow time
+allow timer_create
+allow timer_delete
+allow timer_getoverrun
+allow timer_gettime
+allow timer_gettime64
+allow timer_settime
+allow timer_settime64
+allow timerfd_create
+allow timerfd_gettime
+allow timerfd_gettime64
+allow timerfd_settime
+allow timerfd_settime64
+allow times
+allow tkill
+allow truncate
+allow truncate64
+allow ugetrlimit
+allow umask
+allow uname
+allow unlink
+allow unlinkat
+allow unshare
+allow uretprobe
+allow utime
+allow utimensat
+allow utimensat_time64
+allow utimes
+allow vfork
+allow vhangup
+allow vmsplice
+allow wait4
+allow waitid
+allow waitpid
+allow writev
+errno 1 _sysctl
+errno 1 acct
+errno 1 add_key
+errno 1 adjtimex
+errno 1 afs_syscall
+errno 1 arc_gettls
+errno 1 arc_settls
+errno 1 arc_usr_cmpxchg
+errno 1 atomic_barrier
+errno 1 atomic_cmpxchg_32
+errno 1 bdflush
+errno 1 bpf
+errno 1 break
+errno 1 breakpoint
+errno 1 cachectl
+errno 1 chroot
+errno 1 clock_adjtime
+errno 1 clock_adjtime64
+errno 1 clock_settime
+errno 1 clock_settime64
+errno 1 create_module
+errno 1 delete_module
+errno 1 dipc
+errno 1 exec_with_loader
+errno 1 execv
+errno 1 fanotify_init
+errno 1 fanotify_mark
+errno 1 finit_module
+errno 1 fsconfig
+errno 1 fsmount
+errno 1 fsopen
+errno 1 fspick
+errno 1 ftime
+errno 1 futex_requeue
+errno 1 futex_wait
+errno 1 futex_wake
+errno 1 get_kernel_syms
+errno 1 get_tls
+errno 1 getdomainname
+errno 1 getdtablesize
+errno 1 gethostname
+errno 1 getpagesize
+errno 1 getpmsg
+errno 1 getxgid
+errno 1 getxpid
+errno 1 getxuid
+errno 1 gtty
+errno 1 idle
+errno 1 init_module
+errno 1 io_uring_enter
+errno 1 io_uring_register
+errno 1 io_uring_setup
+errno 1 ioperm
+errno 1 iopl
+errno 1 kern_features
+errno 1 kexec_file_load
+errno 1 kexec_load
+errno 1 keyctl
+errno 1 listns
+errno 1 lock
+errno 1 lookup_dcookie
+errno 1 lsm_set_self_attr
+errno 1 map_shadow_stack
+errno 1 memfd_secret
+errno 1 memory_ordering
+errno 1 mlock
+errno 1 mlock2
+errno 1 mlockall
+errno 1 modify_ldt
+errno 1 mount
+errno 1 mount_setattr
+errno 1 move_mount
+errno 1 mpx
+errno 1 multiplexer
+errno 1 munlock
+errno 1 munlockall
+errno 1 old_adjtimex
+errno 1 oldumount
+errno 1 open_by_handle_at
+errno 1 open_tree_attr
+errno 1 or1k_atomic
+errno 1 osf_fstat
+errno 1 osf_fstatfs
+errno 1 osf_fstatfs64
+errno 1 osf_getdirentries
+errno 1 osf_getdomainname
+errno 1 osf_getitimer
+errno 1 osf_getrusage
+errno 1 osf_getsysinfo
+errno 1 osf_gettimeofday
+errno 1 osf_lstat
+errno 1 osf_mount
+errno 1 osf_proplist_syscall
+errno 1 osf_select
+errno 1 osf_set_program_attributes
+errno 1 osf_setitimer
+errno 1 osf_setsysinfo
+errno 1 osf_settimeofday
+errno 1 osf_shmat
+errno 1 osf_sigprocmask
+errno 1 osf_sigstack
+errno 1 osf_stat
+errno 1 osf_statfs
+errno 1 osf_statfs64
+errno 1 osf_swapon
+errno 1 osf_syscall
+errno 1 osf_sysinfo
+errno 1 osf_usleep_thread
+errno 1 osf_utimes
+errno 1 osf_utsname
+errno 1 osf_wait4
+errno 1 pciconfig_iobase
+errno 1 pciconfig_read
+errno 1 pciconfig_write
+errno 1 perf_event_open
+errno 1 perfctr
+errno 1 pidfd_getfd
+errno 1 pivot_root
+errno 1 pkey_alloc
+errno 1 pkey_free
+errno 1 pkey_mprotect
+errno 1 process_mrelease
+errno 1 process_vm_readv
+errno 1 process_vm_writev
+errno 1 prof
+errno 1 profil
+errno 1 putpmsg
+errno 1 query_module
+errno 1 quotactl
+errno 1 quotactl_fd
+errno 1 read
+errno 1 request_key
+errno 1 rseq_slice_yield
+errno 1 rtas
+errno 1 s390_guarded_storage
+errno 1 s390_pci_mmio_read
+errno 1 s390_pci_mmio_write
+errno 1 s390_runtime_instr
+errno 1 s390_sthyi
+errno 1 sched_get_affinity
+errno 1 sched_set_affinity
+errno 1 security
+errno 1 sethae
+errno 1 setpgrp
+errno 1 settimeofday
+errno 1 sgetmask
+errno 1 spu_create
+errno 1 spu_run
+errno 1 ssetmask
+errno 1 stime
+errno 1 stty
+errno 1 subpage_prot
+errno 1 swapoff
+errno 1 swapon
+errno 1 switch_endian
+errno 1 sys_debug_setcontext
+errno 1 syscall
+errno 1 sysfs
+errno 1 syslog
+errno 1 sysmips
+errno 1 timerfd
+errno 1 tuxcall
+errno 1 ulimit
+errno 1 umount
+errno 1 umount2
+errno 1 uprobe
+errno 1 uselib
+errno 1 userfaultfd
+errno 1 usr26
+errno 1 usr32
+errno 1 ustat
+errno 1 utrap_install
+errno 1 vm86
+errno 1 vm86old
+errno 1 vserver
+errno 1 write

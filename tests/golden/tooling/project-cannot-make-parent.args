@@ -1,0 +1,5 @@
+project
+@DUMP@
+@GOLDEN@/tooling/expand-strict.stdout
+1
+/dev/null/seccomp

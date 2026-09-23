@@ -1,0 +1,9 @@
+# a comment
+
+	# indented
+#tight
+  read # trailing
+write close
+	fsync	
+  -write
+getpid
