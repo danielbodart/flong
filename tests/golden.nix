@@ -13,6 +13,10 @@
 #   NAME.redirect  more redirections, applied after the others, in bash
 #                  syntax: `<&-` closes stdin, `>&-` stdout, `<.` makes stdin
 #                  the (empty) working directory
+#   NAME.setup     bash, sourced with `set -e` in the case's working
+#                  directory before the program runs, in the shell that then
+#                  execs it: it makes what the arguments name, and a umask it
+#                  sets is the program's
 #   NAME.stdout    stdout (empty if absent and there is no NAME.bpf)
 #   NAME.bpf       a filter libseccomp wrote: stdout, or, when NAME.stdout
 #                  exists too, the file its first line names, relative to
@@ -22,8 +26,8 @@
 #                  per entry (find's %M %P), bytewise sorted by path (empty
 #                  if absent)
 #
-# Each case runs with an empty environment in an empty working directory of
-# its own. A value only the check can know, such as a store path or a project
+# Each case runs with an empty environment in a working directory of its
+# own, empty but for what NAME.setup makes. A value only the check can know, such as a store path or a project
 # key, is a set's `vars` entry, or one its `caseVars` prints for the case:
 # @NAME@ in NAME.args, NAME.stdout, NAME.stderr and NAME.tree is replaced by
 # it before the run and the compare. `.bpf` and `.stdin` files are compared
@@ -136,6 +140,36 @@ let
       vars = { };
     };
 
+    # Recorded from the C of 2026-09-24 (launcher/flong-sweeper.c and
+    # flong-record.c:46-89's state_open, deleted in phase 5 b): the usage
+    # line, then every refusal of the state directory and its sessions/
+    # (the open, the owner and the mode, sessions/ made under the umask or
+    # found as it is), in the order it makes them, and a message over 1 KiB
+    # cut to 1023 bytes (ZIG.md quirk 22). holder-* pass the state
+    # directory and stop at the next refusal, cg_holder_self's
+    # (flong-cgroup.c:279-296), since a builder is never in a holder unit's
+    # supervisor leaf; OWN is the cgroup that message names, as
+    # own_cgroup (:95-119) spells it. Not reached here: root (uid 0, which
+    # rootless.nix:629-642 has), fstat or mkdir failing on a directory the
+    # caller owns, and the holder's other refusals, which need a cgroup the
+    # sandbox does not give. CALLER is the builder's uid, OWNER that of the
+    # store directory GOLDEN.
+    sweeper = {
+      program = "${launcher}/bin/flong-sweeper";
+      vars = {
+        GOLDEN = "${cases}";
+      };
+      caseVars = ''
+        echo "CALLER=$(id -u)"
+        echo "OWNER=$(stat -c %u ${cases})"
+        own=$(sed -n 's/^0:://p' /proc/self/cgroup)
+        if [[ $own == / ]]; then
+          own=
+        fi
+        echo "OWN=/sys/fs/cgroup$own"
+      '';
+    };
+
     # The subcommands' usage errors, the one text phase 2 (a) changed
     # (quirk 38): rewritten from the bash's then, and expand's added.
     tooling-usage = {
@@ -159,7 +193,7 @@ let
     # leaving its stdout, stderr and status in OUT, its working directory in
     # OUT/work, and that directory's listing in OUT/tree.
     run_case() {
-      local program=$1 dir=$2 name=$3 out=$4 stdin=/dev/null redirect= work kv i
+      local program=$1 dir=$2 name=$3 out=$4 stdin=/dev/null redirect= setup=/dev/null work kv i
       shift 4
       local -a args=()
       if [[ -e $dir/$name.args ]]; then
@@ -176,11 +210,18 @@ let
       if [[ -e $dir/$name.redirect ]]; then
         redirect=$(<"$dir/$name.redirect")
       fi
+      if [[ -e $dir/$name.setup ]]; then
+        setup=$dir/$name.setup
+      fi
       work=$out/work
       mkdir "$work"
       set +e
       (
         cd "$work" || exit 1
+        set -e
+        # shellcheck source=/dev/null
+        source "$setup"
+        set +e
         # shellcheck disable=SC2016
         eval 'exec env -i "$program" "''${args[@]}" <"$stdin" >"$out/stdout" 2>"$out/stderr"' "$redirect"
       )

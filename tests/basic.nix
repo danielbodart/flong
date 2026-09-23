@@ -394,6 +394,28 @@ in
       command = [ "bash" "-c" ];
     };
 
+    # A hook that holds its launch until the test lets it go, so the session's
+    # record can be read while its launcher has written all of it
+    # (flong-launch.c:727, 522 and 755: the record, leader=, then the hook).
+    # The postStop is there to be named by poststop=; it says it ran.
+    flong.recorded = {
+      container = "netless";
+      user = "alice";
+      workspace = ''realpath /srv/work'';
+      postStart = ''
+        echo "$machine" > /tmp/recorded-hook
+        for _ in $(seq 1200); do
+          [ -e /tmp/recorded-go ] && exit 0
+          sleep 0.1
+        done
+        exit 1
+      '';
+      postStop = ''
+        echo "$machine" >> /tmp/recorded-stopped
+      '';
+      command = [ "bash" "-c" ];
+    };
+
     # A hook that refuses. The payload would outlive the launcher if nothing
     # killed it, which is exactly what must not happen to a session whose hook
     # never finished.
@@ -610,6 +632,7 @@ in
       guardReassign = exe "guardreassign";
       netless = exe "netless";
       hooked = exe "hooked";
+      recorded = exe "recorded";
       badHook = exe "badhook";
       argv = exe "argv";
       userPath = exe "userpath";
@@ -682,6 +705,24 @@ in
           pid = launcher_pid(name) if name else "[0-9]*"
           return f"pgrep -f '[-]-pid /proc/{pid}/fd/'"
 
+      # The pid and starttime (/proc/<pid>/stat's field 22) of the session's
+      # pid 1, found without its record: the one process of its sandbox leaf
+      # that is pid 1 in the pid namespace below the host's.
+      def pid1_of(leaf):
+          pids = machine.succeed(
+              f"for p in $(cat {leaf}/cgroup.procs); do "
+              "grep -qP '^NSpid:\\t\\d+\\t1$' /proc/$p/status && echo $p; done || true").split()
+          assert len(pids) == 1, pids
+          stat = machine.succeed(f"cat /proc/{pids[0]}/stat")
+          return pids[0], stat[stat.rindex(")") + 2:].split()[19]
+
+      # A record as tests/golden/records/ spells it, each @VAR@ replaced.
+      def golden_record(text, **values):
+          for k, v in values.items():
+              text = text.replace(f"@{k}@", v)
+          assert not re.search(r"@[A-Z]+@", text), text
+          return text
+
       NO_SESSIONS = f"test -z \"$(ls -A {STATE}/sessions)\""
       NO_SESSION_CGROUPS = f"test -z \"$(find {CG} -mindepth 2 -maxdepth 2 -type d)\""
       PREPARED = f"{STATE}/demo-*/prepared"
@@ -730,6 +771,48 @@ in
           # in every consumer's output.
           out = machine.succeed(by_caller("${launcher} 'true' 2>&1"))
           assert out == "", out
+
+      # The record contract (ZIG.md): the bytes the launcher writes, which a
+      # sweeper of either language must read. rec_create writes poststop=
+      # (when there is a postStop) and cgroup= in one write
+      # (flong-record.c:337-341), and rec_set_leader appends leader= once
+      # bwrap has said the child's pid (:391-398); nothing else is written
+      # before the hook runs.
+      with subtest("a record holds poststop=, cgroup= and leader=, byte for byte, during a hook"):
+          machine.succeed("rm -f /tmp/recorded-hook /tmp/recorded-go /tmp/recorded-stopped")
+          machine.succeed(by_caller("${recorded} 'true'") + " >/tmp/recorded-out 2>&1 &")
+          try:
+              name = machine.wait_until_succeeds("cat /tmp/recorded-hook").strip()
+              record = machine.succeed(f"cat {STATE}/sessions/{name}")
+              pid, start = pid1_of(f"{CG}/netless/{name}/sandbox")
+              poststop = machine.succeed(
+                  "grep -o '/nix/store/[a-z0-9]*-flong-poststop-recorded/bin/flong-poststop-recorded' "
+                  "${recorded} | sort -u").split()
+              assert len(poststop) == 1, poststop
+              want = golden_record(${builtins.toJSON (builtins.readFile ./golden/records/poststop)},
+                                   POSTSTOP=poststop[0], CGROUP=f"{CG}/netless/{name}",
+                                   PID=pid, START=start)
+              assert record == want, (record, want)
+          finally:
+              machine.succeed("touch /tmp/recorded-go")
+          machine.wait_until_fails(f"test -e {STATE}/sessions/{name}")
+          assert machine.succeed("cat /tmp/recorded-stopped").split() == [name], \
+              machine.succeed("cat /tmp/recorded-stopped")
+          out = machine.succeed("cat /tmp/recorded-out")
+          assert out == "", out
+
+      with subtest("a record without a postStop holds cgroup= and leader=, byte for byte"):
+          name = start_session("sleep 300")
+          try:
+              record = machine.succeed(f"cat {STATE}/sessions/{name}")
+              pid, start = pid1_of(f"{CG}/demo/{name}/sandbox")
+              want = golden_record(${builtins.toJSON (builtins.readFile ./golden/records/no-poststop)},
+                                   CGROUP=f"{CG}/demo/{name}", PID=pid, START=start)
+              assert record == want, (record, want)
+          finally:
+              machine.succeed(f"kill -TERM {launcher_pid(name)}")
+          machine.wait_until_fails(f"test -e {STATE}/sessions/{name}")
+          machine.wait_until_fails(f"test -e {CG}/demo/{name}")
 
       with subtest("the payload holds descriptors 0-2 and nothing else"):
           # flong-init closes everything above stderr before it execs tini

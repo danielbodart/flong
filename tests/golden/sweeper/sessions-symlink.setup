@@ -1,0 +1,2 @@
+mkdir -m 0700 state elsewhere
+ln -s ../elsewhere state/sessions

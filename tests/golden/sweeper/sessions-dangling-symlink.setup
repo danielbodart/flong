@@ -1,0 +1,2 @@
+mkdir -m 0700 state
+ln -s nowhere state/sessions

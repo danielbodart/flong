@@ -1,0 +1,1 @@
+mkfifo -m 0600 state
