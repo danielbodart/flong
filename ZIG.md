@@ -35,7 +35,7 @@ By the user (final; not revisited):
   v0.1.0, zwanzig v0.15.1, `build.zig.zon:8-16`).
 - **Scope.** Into Zig: the four programs; the C fixtures
   (`tests/parity/bpfdump.c`, `tests/parity/probe.c`, and the inline `swapper`
-  and `ioctl-probe` at `tests/rootless.nix:46-94`); the seccomp tooling
+  and `ioctl-probe`, `tests/probes.nix` since phase 4); the seccomp tooling
   (`seccomp/expand.awk`, and `flong-seccomp-render` and
   `flong-seccomp-project` at `seccomp/policy.nix:81-209`). Staying bash:
   `rootless-wrapper.bash` and module.nix's scripts (`flong-cache`, prepare,

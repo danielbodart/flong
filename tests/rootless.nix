@@ -34,69 +34,8 @@ let
     systemd.tmpfiles.rules = [ "L /home/alice/escape - - - - /escview" ];
   };
 
-  # ioctl-probe REQUEST prints the errno name of ioctl(0, REQUEST, buf), or
-  # ok. The buffer holds whatever a request it is asked about writes back:
-  # TCGETS on a real terminal writes a whole termios. With standard input not a terminal, a request the filters let
-  # through reaches the kernel and fails with ENOTTY, and one they refuse
-  # fails with the filter's errno. The request is passed whole, all 64 bits,
-  # which the C library's ioctl would truncate to an int.
-  #
-  # swapper DIR exchanges DIR/sub and DIR/sublink until it is killed, as a
-  # payload racing another session's mounts would.
-  probes = pkgs: pkgs.runCommandCC "flong-probes"
-    {
-      swapper = pkgs.writeText "swapper.c" ''
-        #include <fcntl.h>
-        #include <stdio.h>
-        #include <unistd.h>
-
-        int main(int argc, char **argv)
-        {
-        	if (argc != 2) {
-        		fputs("usage: swapper DIR\n", stderr);
-        		return 2;
-        	}
-        	if (chdir(argv[1]) != 0) {
-        		perror(argv[1]);
-        		return 1;
-        	}
-        	for (;;) {
-        		if (renameat2(AT_FDCWD, "sub", AT_FDCWD, "sublink", RENAME_EXCHANGE) != 0) {
-        			perror("renameat2");
-        			return 1;
-        		}
-        	}
-        }
-      '';
-      src = pkgs.writeText "ioctl-probe.c" ''
-        #include <errno.h>
-        #include <stdio.h>
-        #include <stdlib.h>
-        #include <string.h>
-        #include <sys/syscall.h>
-        #include <unistd.h>
-
-        int main(int argc, char **argv)
-        {
-        	char buf[256] = { 0 };
-        	if (argc != 2) {
-        		fputs("usage: ioctl-probe REQUEST\n", stderr);
-        		return 2;
-        	}
-        	unsigned long request = strtoul(argv[1], NULL, 0);
-        	if (syscall(SYS_ioctl, 0, request, buf) == 0) {
-        		puts("ok");
-        	} else {
-        		puts(strerrorname_np(errno));
-        	}
-        	return 0;
-        }
-      '';
-    } ''
-    mkdir -p $out/bin
-    $CC -std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror -o $out/bin/ioctl-probe $src
-    $CC -std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror -o $out/bin/swapper $swapper
-  '';
+  # ioctl-probe and swapper (tests/probes.nix).
+  probes = import ./probes.nix;
 
   # fence-probe tries, from inside a session, everything that would undo a
   # hook's network setup or the session's cgroup, and prints each attempt's
@@ -922,6 +861,51 @@ in
         out = machine.succeed(as_user("esc true 2>&1; echo rc=$?"))
         assert "a symlink is on the way" in out and out.split()[-1] == "rc=125", out
         machine.succeed("test -z \"$(ls -A /srv/race/view)\"")
+
+    with subtest("the mount helper's refusals: a destination twice, a directory for a file, a file on the way"):
+        # What the wrapper and module.nix's assertions keep a declaration
+        # from asking (rootless-wrapper.bash:100-116, 138-178; module.nix:685),
+        # so a copy of plain's wrapper hands the launcher one more mount
+        # (DEST SRC, flong-spec.c:83). The helper refuses before the gate
+        # opens, and the launcher says the mounts failed: 125
+        # (flong-launch.c:563-575). The workspace is /srv/work, bound there.
+        wrapper = machine.succeed("readlink -f \"$(command -v plain)\"").strip()
+        machine.succeed("mkdir /srv/work/adir && echo file > /srv/work/afile")
+        GATE = "flong-init: the gate closed without opening: not starting the payload"
+        FAILED = "flong-launch: the session's mounts failed; the payload does not run"
+
+        def extra_mount(tokens, payload="echo ok"):
+            line = f"spec+=({tokens})"
+            machine.succeed(
+                f"sed '/^exec \"\\$launcher\" /i {line}' {wrapper} > /tmp/plain-mount && "
+                "chmod 755 /tmp/plain-mount && "
+                f"test \"$(grep -cxF {shlex.quote(line)} /tmp/plain-mount)\" = 1")
+            return machine.succeed(as_user(f"/tmp/plain-mount {shlex.quote(payload)} 2>&1; echo rc=$?"))
+
+        # flong-init may or may not say the gate closed before teardown
+        # kills it (flong-launch.c:792-797); nothing else may be said.
+        def refused(tokens, message):
+            out = extra_mount(tokens)
+            lines = [l for l in out.splitlines() if l != GATE]
+            assert lines == [f"flong-launch: {message}", FAILED, "rc=125"], (tokens, out)
+
+        # The control: the copy launches, and a mount it adds lands.
+        out = extra_mount("")
+        assert out == "ok\nrc=0\n", out
+        out = extra_mount("mount bind-ro /srv/work/adir /srv/lower", "cat /srv/work/adir/seed; echo")
+        assert out == "from-the-lower-layer\nrc=0\n", out
+
+        # flong-mount.c:539-541, before any namespace is touched.
+        refused("mount bind-ro /srv/work /srv/lower", "/srv/work is mounted twice")
+        # flong-mount.c:361-364: a file's clone would not go on a directory.
+        refused("mount bind-ro /srv/work/adir /srv/work/afile",
+                "/srv/work/adir is a directory and its source is not")
+        # flong-mount.c:346-347, and :348-349 for the last component.
+        refused("mount bind-ro /srv/work/afile/x /srv/lower",
+                "/srv/work/afile, on the way to /srv/work/afile/x, is not a directory")
+        refused("mount bind-ro /srv/work/afile /srv/lower", "/srv/work/afile is not a directory")
+        machine.succeed("test -z \"$(ls -A /srv/work/adir)\" && test \"$(cat /srv/work/afile)\" = file")
+        machine.succeed("rm -r /srv/work/adir /srv/work/afile /tmp/plain-mount")
 
     with subtest("the swap race: nothing escapes the workspace"):
         out = machine.succeed(as_user("race-mounts 20"))

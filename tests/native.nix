@@ -14,6 +14,9 @@ let
   integration = import ./integration.nix { pkgs = hostPkgs; };
   # The launcher's output, for its flong-init (src/init.zig).
   launcher = import ../launcher { pkgs = hostPkgs; };
+  # rootless.nix's ioctl-probe and swapper; the swapper races the walker
+  # (ZIG.md phase 4).
+  probes = import ./probes.nix;
 in
 {
   name = "flong-native";
@@ -38,6 +41,7 @@ in
     environment.systemPackages = [
       pkgs.util-linux
       integration.vm
+      (probes pkgs)
     ];
   };
 
