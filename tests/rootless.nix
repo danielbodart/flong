@@ -1,4 +1,4 @@
-# The rootless engine, driven the way it is meant to be: by a lingering user
+# The engine, driven the way it is meant to be: by a lingering user
 # through her own user manager, on a host with no sudo at all. It covers a
 # launch cold and warm, the environment a payload is given, a postStart hook
 # with and without a network, that nothing of a session runs as host root,
@@ -329,7 +329,6 @@ in
     flong =
       let
         base = {
-          engine = "rootless";
           container = "box";
           user = "alice";
           command = [ "bash" "-c" ];

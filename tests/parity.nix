@@ -1,30 +1,24 @@
-# The rootless engine's parity with nspawn, measured in one VM with both
-# engines and one container declared three times: on nspawn with nspawn's own
-# filter, on rootless with seccomp.tier = "parity", and on rootless with the
-# default, strict.
+# The seccomp stacks a session actually runs under, measured in one VM with one
+# container declared twice: on seccomp.tier = "parity", and on the default,
+# strict.
 #
 # The live filters of each session's payload are dumped with
 # PTRACE_SECCOMP_GET_FILTER, as the driver's root, and evaluated over every
 # syscall number of x86_64, x32 and i386 with the same argument sweep: every
-# constant any of the three stacks compares an argument with. The rootless
-# stacks must be exactly the filters the build compiled. Then:
-#
-# - the parity tier and the audit mask against nspawn's stack must differ
-#   only where ROOTLESS.md says they do: the audit mask refuses more (it
-#   compares the low 32 bits, where nspawn's own is bypassed by setting a
-#   high bit, and it also covers i386's socketcall), and rseq_slice_yield,
-#   which systemd 261 lists in @known, so that the tier may refuse it with
-#   EPERM where nspawn's filter leaves it ENOSYS (on this VM's systemd both
-#   refuse it with EPERM, and the rows match);
-# - the whole parity stack, with the tty filter and the namespace mask, may
-#   differ further only by refusing ioctl's terminal requests and the
-#   namespace calls;
-# - strict against parity is printed for the record, and may only refuse
-#   more.
-#
+# constant either stack compares an argument with. Each stack must be exactly
+# the filters the build compiled, and strict may only refuse more than parity.
 # The spike's syscall probe then runs as the payload of each session, and
-# nspawn's and parity's outputs may differ only on the calls those filters
-# explain.
+# where strict answers differently from parity it is by refusing the call.
+#
+# The parity tier was proved against nspawn's own filter while both engines
+# existed (ROOTLESS.md phase 5, commit d48ad97): with the audit mask it matched
+# nspawn's stack except where the mask refuses more -- i386's socket and
+# socketcall, and an x86_64 socket with a high bit set in a0, which nspawn's
+# 64-bit compare let through -- and the whole stack differed further only by
+# the tty filter's ioctl rows and the namespace mask's clone, unshare, setns
+# and clone3 rows, all stricter. That VM held nspawn, which is gone, so the
+# comparison is not repeated here; the byte-for-byte match with the build's
+# filters is what keeps it true.
 { lib, ... }:
 
 let
@@ -92,13 +86,12 @@ in
           };
         in
         {
-          nspawned = base;
-          parity = base // { engine = "rootless"; seccomp.tier = "parity"; };
-          strict = base // { engine = "rootless"; };
+          parity = base // { seccomp.tier = "parity"; };
+          strict = base;
         };
 
       environment.systemPackages =
-        map (n: config.flong.${n}.launcher) [ "nspawned" "parity" "strict" ]
+        map (n: config.flong.${n}.launcher) [ "parity" "strict" ]
         ++ [ (tools pkgs) ];
 
       environment.etc = lib.mapAttrs' (n: f: lib.nameValuePair "flong-parity/${n}.bpf" { source = f; }) {
@@ -122,11 +115,8 @@ in
                 "--expand-environment=no -- /run/current-system/sw/bin/bash -c "
                 + shlex.quote(inner) + " </dev/null")
 
-    # A launch of SCRIPT through LAUNCHER: nspawn's from the driver's root
-    # shell, the rootless ones as alice.
+    # A launch of SCRIPT through LAUNCHER, as alice.
     def launch(launcher, script):
-        if launcher == "nspawned":
-            return f"cd /srv/work && nspawned {shlex.quote(script)}"
         return as_user(f"{launcher} {shlex.quote(script)}")
 
     # The payload's live filters, dumped while it sleeps, as D/TAG.N.bpf.
@@ -185,65 +175,27 @@ in
         arch, nr, name, args, ra, rb = d
         return f"{arch:6} {nr:4} {name:24} {args:28} {ra} -> {rb}"
 
-    # Why the rootless engine answers differently from nspawn, or None. The
-    # fixed filters beyond the audit mask count only when WHOLE is set.
-    def explain(d, whole):
-        _, _, name, args, ns, rl = d
-        if name in ("socket", "socketcall") and args and ns == "ALLOW" and rl == "ERRNO(EAFNOSUPPORT)":
-            return "audit mask"
-        if name == "rseq_slice_yield" and not args and ns == "ERRNO(ENOSYS)" and rl == "ERRNO(EPERM)":
-            return "rseq_slice_yield in @known"
-        if whole and ns == "ALLOW":
-            if name == "ioctl" and args and rl == "ERRNO(EPERM)":
-                return "tty filter"
-            if name in ("clone", "unshare") and args and rl == "ERRNO(EPERM)":
-                return "namespace mask"
-            if name == "setns" and not args and rl == "ERRNO(EPERM)":
-                return "namespace mask"
-            if name == "clone3" and not args and rl == "ERRNO(ENOSYS)":
-                return "namespace mask"
-        return None
-
-    def judge(what, diffs, whole):
-        why = {}
-        for d in diffs:
-            why.setdefault(explain(d, whole), []).append(d)
-        report = [f"{what}: {len(diffs)} rows differ"]
-        for reason, ds in sorted(why.items(), key=lambda kv: str(kv[0])):
-            report.append(f"  {reason or 'UNEXPLAINED'}: {len(ds)}")
-            # The masks' sweeps run to hundreds of rows; the others are listed.
-            listed = ds if reason in (None, "audit mask", "rseq_slice_yield in @known") else ds[:4]
-            report += ["    " + show(d) for d in listed]
-            if len(listed) < len(ds):
-                report.append(f"    ... and {len(ds) - len(listed)} more")
-        print("\n".join(report))
-        assert None not in why, "\n".join(report)
-
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("user@1000.service")
     machine.succeed(f"mkdir -p {D}")
 
-    with subtest("each engine runs the container, warm"):
-        for launcher in ("nspawned", "parity", "strict"):
+    with subtest("each tier runs the container, warm"):
+        for launcher in ("parity", "strict"):
             assert machine.succeed(launch(launcher, "id -u")).strip() == "1000", launcher
 
-    with subtest("the live filters are dumped, and the rootless stacks are the build's"):
-        nspawn = dump("nspawned", "10011")
+    with subtest("the live filters are dumped, and are the build's"):
         parity = dump("parity", "10012")
         strict = dump("strict", "10013")
         built = {name: sha(f"{F}/{name}.bpf") for name in ("parity", "strict", "audit", "tty", "nsmask")}
         by_sha = {v: k for k, v in built.items()}
-        live = {}
         for tag, files, want in (("parity", parity, "parity"), ("strict", strict, "strict")):
             names = [by_sha.get(sha(f), "?") for f in files]
             print(f"{tag}: filters, most recently attached first: {names}")
             assert sorted(names) == sorted([want, "audit", "tty", "nsmask"]), (tag, names)
-            live[tag] = dict(zip(names, files))
-        assert not any(sha(f) in by_sha for f in nspawn), "nspawn's stack holds one of flong's filters"
 
     # Every stack is swept with every stack's constants, so that their lines
     # compare one for one.
-    k = " ".join(f"-k {f}" for f in nspawn + parity + strict)
+    k = " ".join(f"-k {f}" for f in parity + strict)
     def evaluate(tag, files):
         machine.succeed(f"bpfdump eval {k} {' '.join(files)} > {D}/{tag}.eval")
         machine.copy_from_machine(f"{D}/{tag}.eval", "")
@@ -255,16 +207,8 @@ in
         print(summary.strip())
         return rows(f"{D}/{tag}.eval")
 
-    with subtest("parity: the tier and the audit mask match nspawn, except where documented"):
-        e_nspawn = evaluate("nspawn", nspawn)
-        e_core = evaluate("parity-core", [live["parity"]["parity"], live["parity"]["audit"]])
-        judge("nspawn -> rootless parity tier + audit mask", differences(e_nspawn, e_core), False)
-
-    with subtest("parity: the whole stack only adds the tty filter and the namespace mask"):
+    with subtest("strict only refuses more than parity"):
         e_parity = evaluate("parity", parity)
-        judge("nspawn -> rootless parity stack", differences(e_nspawn, e_parity), True)
-
-    with subtest("strict against parity, for the record"):
         e_strict = evaluate("strict", strict)
         diffs = differences(e_parity, e_strict)
         print("parity -> strict:\n" + "\n".join(show(d) for d in diffs))
@@ -274,32 +218,24 @@ in
         loosened = [d for d in diffs if d[5] == "ALLOW" or d[4] != "ALLOW"]
         assert not loosened, "\n".join(show(d) for d in loosened)
 
-    with subtest("the syscall probe: nspawn and parity differ only where the filters say"):
-        out = {l: machine.succeed(launch(l, "syscall-probe 2>/dev/null")) for l in ("nspawned", "parity", "strict")}
+    with subtest("the syscall probe: strict differs from parity only by refusing"):
+        out = {l: machine.succeed(launch(l, "syscall-probe 2>/dev/null")) for l in ("parity", "strict")}
         table = {l: [line.rsplit(None, 1) for line in o.strip().splitlines()] for l, o in out.items()}
-        names = [n for n, _ in table["nspawned"]]
-        assert all([n for n, _ in table[l]] == names for l in table), out
+        names = [n for n, _ in table["parity"]]
+        assert [n for n, _ in table["strict"]] == names, out
         results = {l: dict(table[l]) for l in table}
-        # What the rootless engine answers where it differs, and why.
-        explained = {
-            "unshare(NEWUSER)": ("EPERM", "namespace mask"),
-            "unshare(NEWUSER|NEWNS)": ("EPERM", "namespace mask"),
-            "clone3(plain)": ("ENOSYS", "namespace mask"),
-            "setns(-1)": ("EPERM", "namespace mask"),
-            "rseq_slice_yield (471)": ("EPERM", "rseq_slice_yield in @known"),
-            "socket(NETLINK_AUDIT) hi": ("EAFNOSUPPORT", "audit mask"),
-        }
-        report, unexplained = [], []
+        # A filter refuses with the tier's errno, EPERM, or with ENOSYS for
+        # what it does not know; any other difference is not a refusal.
+        report, loosened = [], []
         for n in names:
-            a, b, c = (results[l][n] for l in ("nspawned", "parity", "strict"))
+            a, b = results["parity"][n], results["strict"][n]
             note = ""
             if a != b:
-                want = explained.get(n)
-                note = want[1] if want and want[0] == b else "UNEXPLAINED"
-                if note == "UNEXPLAINED":
-                    unexplained.append(n)
-            report.append(f"{n:28} nspawn {a:14} parity {b:14} strict {c:14} {note}")
+                note = "refused" if b in ("EPERM", "ENOSYS") else "LOOSER"
+                if note == "LOOSER":
+                    loosened.append(n)
+            report.append(f"{n:28} parity {a:14} strict {b:14} {note}")
         print("\n".join(report))
-        assert not unexplained, "\n".join(report)
+        assert not loosened, "\n".join(report)
   '';
 }

@@ -15,32 +15,28 @@
       checks = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system}; in
         {
+          # Every option that changes what a session sees, launched by a
+          # lingering user with no sudo.
           basic = pkgs.testers.runNixOSTest {
-            imports = [ (import ./tests/basic.nix { engine = "nspawn"; }) ];
+            imports = [ ./tests/basic.nix ];
           };
 
-          # The same declarations and subtests on the rootless engine,
-          # launched by a lingering user with no sudo. Temporary, with the
-          # engine switch: when nspawn goes, this is basic.
-          basic-rootless = pkgs.testers.runNixOSTest {
-            imports = [ (import ./tests/basic.nix { engine = "rootless"; }) ];
-          };
-
-          # The rootless engine, launched by a lingering user with no sudo.
+          # The engine itself: identity, the gate, mounts, the lifecycle,
+          # seccomp and the terminal, launched by a lingering user with no sudo.
           rootless = pkgs.testers.runNixOSTest {
             imports = [ ./tests/rootless.nix ];
           };
 
-          # The rootless engine's seccomp stack against nspawn's, both live
-          # in one VM: the filters dumped and evaluated, and a syscall probe.
+          # The seccomp stacks of two tiers, live in one VM: the filters
+          # dumped and matched with the build's, and a syscall probe.
           parity = pkgs.testers.runNixOSTest {
             imports = [ ./tests/parity.nix ];
           };
 
-          # The rootless engine's native launcher, built with -Werror.
+          # The native launcher, built with -Werror.
           launcher = import ./launcher { inherit pkgs; };
 
-          # The rootless engine's seccomp compiler, built with -Werror.
+          # The seccomp compiler, built with -Werror.
           seccomp = import ./seccomp { inherit pkgs; };
 
           # A refusal happens at evaluation, so it is checked by evaluating: each
@@ -58,12 +54,17 @@
                     {
                       boot.isContainer = true;
                       system.stateVersion = "24.05";
+                      # A user with declared ids, which a session needs.
                       containers.box = {
                         privateNetwork = true;
-                        config.system.stateVersion = "24.05";
+                        config = {
+                          system.stateVersion = "24.05";
+                          users.users.u = { isNormalUser = true; uid = 1000; group = "users"; };
+                          users.groups.users.gid = 100;
+                        };
                       };
                       flong.box = {
-                        user = "root";
+                        user = "u";
                         command = [ "true" ];
                       };
                     }
@@ -75,27 +76,9 @@
                 lib.filter (m: lib.hasPrefix "flong" m)
                   (map (a: lib.trim a.message)
                     (lib.filter (a: ! a.assertion) config.assertions));
-              refused = what: extra: needle:
-                let failures = flongFailures extra; in
-                lib.any (lib.hasInfix needle) failures
-                || throw "assertions: ${what} was not refused; flong said: ${builtins.toJSON failures}";
               accepted = what: extra:
                 flongFailures extra == [ ]
                 || throw "assertions: ${what} was refused: ${builtins.toJSON (flongFailures extra)}";
-
-              # The same declaration on the rootless engine, as a user with
-              # declared ids, which that engine needs.
-              rootless = extra: {
-                imports = [ extra ];
-                flong.box = {
-                  engine = "rootless";
-                  user = lib.mkOverride 90 "u";
-                };
-                containers.box.config = {
-                  users.users.u = { isNormalUser = true; uid = 1000; group = "users"; };
-                  users.groups.users.gid = 100;
-                };
-              };
               flongWarnings = extra:
                 lib.filter (lib.hasPrefix "flong") (map lib.trim (configWith extra).warnings);
 
@@ -104,11 +87,11 @@
               # happens to wrap.
               words = s: lib.concatStringsSep " "
                 (lib.filter (w: builtins.isString w && w != "") (builtins.split "[[:space:]]+" s));
-              refusedSaying = what: extra: needle:
+              refused = what: extra: needle:
                 let failures = flongFailures extra; in
                 lib.any (m: lib.hasInfix needle (words m)) failures
                 || throw "assertions: ${what} was not refused; flong said: ${builtins.toJSON failures}";
-              warnedSaying = what: extra: needle:
+              warned = what: extra: needle:
                 let warnings = flongWarnings extra; in
                 lib.any (m: lib.hasInfix needle (words m)) warnings
                 || throw "assertions: ${what} was not warned about; flong said: ${builtins.toJSON warnings}";
@@ -117,87 +100,51 @@
               untyped = extra: path:
                 ! (builtins.tryEval (builtins.deepSeq (lib.getAttrFromPath path (configWith extra)) true)).success;
             in
+            # The baseline, the strict tier with every fixed filter, trips
+            # nothing and warns about nothing.
             assert flongFailures { } == [ ]
               || throw "assertions: the baseline is refused: ${builtins.toJSON (flongFailures { })}";
-            assert refused "--capability in extraFlags"
-              { containers.box.extraFlags = [ "--capability=CAP_NET_ADMIN" ]; }
-              "whose extraFlags ask";
-            assert refused "--ambient-capability as two words"
-              { containers.box.extraFlags = [ "--ambient-capability CAP_NET_RAW" ]; }
-              "whose extraFlags ask";
-            assert refused "-U in extraFlags"
-              { containers.box.extraFlags = [ "-U" ]; }
-              "whose extraFlags ask";
-            assert refused "--private-users in extraFlags"
-              { containers.box.extraFlags = [ "--private-users=pick" ]; }
-              "whose extraFlags ask";
-            assert refused "network without privateNetwork"
-              {
-                containers.box.privateNetwork = nixpkgs.lib.mkForce false;
-                flong.box.network = { };
-              }
-              "gives a session a network of its own";
+            assert flongWarnings { } == [ ]
+              || throw "assertions: the baseline warns ${builtins.toJSON (flongWarnings { })}";
+            # engine is deprecated: the one engine it still names is accepted
+            # with a warning, and nspawn, which is gone, is not.
+            assert (untyped { flong.box.engine = "nspawn"; } [ "flong" "box" "engine" ]
+                || refused "engine = \"nspawn\"" { flong.box.engine = "nspawn"; } "nspawn")
+              || throw "assertions: engine = \"nspawn\" was accepted";
+            assert accepted "engine = \"rootless\" spelt out" { flong.box.engine = "rootless"; };
+            assert warned "engine spelt out" { flong.box.engine = "rootless"; } "engine";
             assert refused "the declaration's own forwardPorts"
               { containers.box.forwardPorts = [ { hostPort = 8080; } ]; }
               "static per container";
-            assert flongFailures { flong.box.network.hostPorts = [ 5432 ]; } == [ ]
-              || throw "assertions: a network on a private container is refused";
-            # limits are the rootless engine's; nspawn's are scopeConfig.
-            assert refused "limits under nspawn"
-              { flong.box.limits.MemoryMax = "1G"; }
-              "only the rootless engine writes";
-            assert refused "oomGroup under nspawn"
-              { flong.box.limits.oomGroup = true; }
-              "limits.oomGroup";
-            # seccomp is the rootless engine's; nspawn installs its own filter,
-            # so a declaration's seccomp must be the defaults there.
-            assert accepted "the default seccomp spelt out under nspawn"
-              { flong.box.seccomp = { tier = "strict"; errno = "EPERM"; }; };
-            assert refusedSaying "a seccomp tier under nspawn"
-              { flong.box.seccomp.tier = "parity"; }
-              "nspawn installs its own";
-            assert refusedSaying "a seccomp loosening under nspawn"
-              { flong.box.seccomp.debug = true; }
-              "nspawn installs its own";
-            assert refusedSaying "a seccomp allow under nspawn"
-              { flong.box.seccomp.allow = [ "ptrace" ]; }
-              "nspawn installs its own";
-            assert refusedSaying "a seccompPolicy under nspawn"
-              { flong.box.seccompPolicy = "echo allow ptrace"; }
-              "nspawn installs its own";
-            # THE ROOTLESS ENGINE. Its baseline, the strict tier with every
-            # fixed filter, trips nothing and warns about nothing.
-            assert accepted "the rootless baseline" (rootless { });
-            assert flongWarnings (rootless { }) == [ ]
-              || throw "assertions: the rootless baseline warns ${builtins.toJSON (flongWarnings (rootless { }))}";
+            assert accepted "a network on a private container" { flong.box.network.hostPorts = [ 5432 ]; };
             # With no tier there is no allow-list filter for a policy to act
             # on. debug and errno have nothing to act on either, but are
             # harmless, so they are accepted.
-            assert refusedSaying "seccomp.allow with no tier"
-              (rootless { flong.box.seccomp = { tier = null; allow = [ "ptrace" ]; }; })
+            assert refused "seccomp.allow with no tier"
+              { flong.box.seccomp = { tier = null; allow = [ "ptrace" ]; }; }
               "no filter";
-            assert refusedSaying "seccomp.deny with no tier"
-              (rootless { flong.box.seccomp = { tier = null; deny = [ "ptrace" ]; }; })
+            assert refused "seccomp.deny with no tier"
+              { flong.box.seccomp = { tier = null; deny = [ "ptrace" ]; }; }
               "no filter";
-            assert refusedSaying "seccomp.log with no tier"
-              (rootless { flong.box.seccomp = { tier = null; log = true; }; })
+            assert refused "seccomp.log with no tier"
+              { flong.box.seccomp = { tier = null; log = true; }; }
               "no filter";
-            assert refusedSaying "a seccompPolicy with no tier"
-              (rootless {
+            assert refused "a seccompPolicy with no tier"
+              {
                 flong.box.seccomp.tier = null;
                 flong.box.seccompPolicy = "echo allow ptrace";
-              })
+              }
               "no filter";
             assert accepted "debug and errno with no tier"
-              (rootless { flong.box.seccomp = { tier = null; debug = true; errno = "EACCES"; }; });
-            assert warnedSaying "no tier"
-              (rootless { flong.box.seccomp.tier = null; })
+              { flong.box.seccomp = { tier = null; debug = true; errno = "EACCES"; }; };
+            assert warned "no tier"
+              { flong.box.seccomp.tier = null; }
               "only the audit, tty and namespace masks";
-            assert warnedSaying "log = true"
-              (rootless { flong.box.seccomp.log = true; })
+            assert warned "log = true"
+              { flong.box.seccomp.log = true; }
               "for learning a policy, not for untrusted payloads";
             assert accepted "every tier setting and loosening together"
-              (rootless {
+              {
                 flong.box.seccomp = {
                   tier = "parity";
                   debug = true;
@@ -207,188 +154,180 @@
                   errno = "ENOSYS";
                 };
                 flong.box.seccompPolicy = "echo allow ptrace";
-              });
+              };
             # A name is a syscall or a group, in the form systemd lists them.
-            assert untyped (rootless { flong.box.seccomp.allow = [ "Ptrace" ]; }) [ "flong" "box" "seccomp" "allow" ]
+            assert untyped { flong.box.seccomp.allow = [ "Ptrace" ]; } [ "flong" "box" "seccomp" "allow" ]
               || throw "assertions: an upper-case seccomp name was accepted";
-            assert untyped (rootless { flong.box.seccomp.deny = [ "@ keyring" ]; }) [ "flong" "box" "seccomp" "deny" ]
+            assert untyped { flong.box.seccomp.deny = [ "@ keyring" ]; } [ "flong" "box" "seccomp" "deny" ]
               || throw "assertions: a seccomp name with a blank was accepted";
-            assert untyped (rootless { flong.box.seccomp.errno = "EINVAL"; }) [ "flong" "box" "seccomp" "errno" ]
+            assert untyped { flong.box.seccomp.errno = "EINVAL"; } [ "flong" "box" "seccomp" "errno" ]
               || throw "assertions: an errno outside EPERM, EACCES and ENOSYS was accepted";
             assert lib.any (lib.hasInfix "consistency check and not a gate")
-              (flongWarnings (rootless { flong.box.guard = "true"; }))
-              || throw "assertions: a rootless guard is not warned about";
-            assert refused "an nspawn-hostile container name"
-              (rootless {
+              (flongWarnings { flong.box.guard = "true"; })
+              || throw "assertions: a guard is not warned about";
+            assert refused "a container name beginning with a dot"
+              {
                 containers.".box" = { privateNetwork = true; config.system.stateVersion = "24.05"; };
                 flong.box.container = ".box";
-              })
+              }
               "not start with `.`";
-            assert refused "extraFlags under rootless"
-              (rootless { containers.box.extraFlags = [ "--private-network" ]; })
-              "whose extraFlags\nare nspawn flags";
-            assert refused "networkNamespace under rootless"
-              (rootless {
+            assert refused "extraFlags"
+              { containers.box.extraFlags = [ "--private-network" ]; }
+              "whose extraFlags are nspawn flags";
+            assert refused "a networkNamespace"
+              {
                 containers.box.networkNamespace = "/run/netns/other";
                 containers.box.privateNetwork = lib.mkForce false;
-              })
-              "names a\nnetworkNamespace";
-            assert refused "scopeConfig under rootless"
-              (rootless { flong.box.scopeConfig.MemoryMax = "1G"; })
+              }
+              "names a networkNamespace";
+            assert refused "scopeConfig"
+              { flong.box.scopeConfig.MemoryMax = "1G"; }
               "sets scopeConfig";
             assert refused "a tmpfs option there is no field for"
-              (rootless { containers.box.tmpfs = [ "/scratch:nosuid" ]; })
+              { containers.box.tmpfs = [ "/scratch:nosuid" ]; }
               "names options it cannot honour";
             assert refused "a tmpfs owned by a third user"
-              (rootless { containers.box.tmpfs = [ "/scratch:uid=5,gid=5" ]; })
+              { containers.box.tmpfs = [ "/scratch:uid=5,gid=5" ]; }
               "names options it cannot honour";
             assert refused "a tmpfs uid without its gid"
-              (rootless { containers.box.tmpfs = [ "/scratch:uid=0" ]; })
+              { containers.box.tmpfs = [ "/scratch:uid=0" ]; }
               "names options it cannot honour";
             assert refused "a forwarded port below 1024"
-              (rootless { flong.box.network.forwardPorts = [ { hostPort = 80; } ]; })
+              { flong.box.network.forwardPorts = [ { hostPort = 80; } ]; }
               "below net.ipv4.ip_unprivileged_port_start";
             assert refused "a bind of flong's state"
-              (rootless { containers.box.bindMounts."/state".hostPath = "/run/user/1000/flong"; })
-              "reaches\nflong's state";
+              { containers.box.bindMounts."/state".hostPath = "/run/user/1000/flong"; }
+              "reaches flong's state";
             assert refused "a bind of the user manager's socket, spelt through /var/run"
-              (rootless { containers.box.bindMounts."/bus".hostPath = "/var/run/user/1000//bus"; })
-              "reaches\nflong's state";
+              { containers.box.bindMounts."/bus".hostPath = "/var/run/user/1000//bus"; }
+              "reaches flong's state";
             assert refused "a bind containing /proc"
-              (rootless { containers.box.bindMounts."/host".hostPath = "/"; })
-              "reaches\nflong's state";
+              { containers.box.bindMounts."/host".hostPath = "/"; }
+              "reaches flong's state";
             assert refused "an overlay lower inside a protected path"
-              (rootless {
+              {
                 flong.box.protect = [ "/srv/gate" ];
                 flong.box.overlays."/data" = "/srv/gate/data";
-              })
-              "reaches\nflong's state";
+              }
+              "reaches flong's state";
             assert refused "a mask two levels below a writable bind"
-              (rootless {
+              {
                 containers.box.bindMounts."/srv/shared" = { hostPath = "/srv/shared"; isReadOnly = false; };
                 flong.box.masks = [ "/srv/shared/a/token" ];
-              })
-              "two or more\nlevels below";
+              }
+              "two or more levels below";
             assert refused "a mask whose host path is deep in another writable bind"
-              (rootless {
+              {
                 containers.box.bindMounts."/ro" = { hostPath = "/srv/shared/a"; isReadOnly = true; };
                 containers.box.bindMounts."/rw" = { hostPath = "/srv/shared"; isReadOnly = false; };
                 flong.box.masks = [ "/ro/token" ];
-              })
+              }
               "/ro/token (in the writable bind of /srv/shared)";
             assert refused "a device outside /dev"
-              (rootless { containers.box.allowedDevices = [ { node = "/srv/null"; modifier = "rw"; } ]; })
+              { containers.box.allowedDevices = [ { node = "/srv/null"; modifier = "rw"; } ]; }
               "allowedDevices has /srv/null rw";
             assert refused "a read-only device"
-              (rootless { containers.box.allowedDevices = [ { node = "/dev/null"; modifier = "r"; } ]; })
+              { containers.box.allowedDevices = [ { node = "/dev/null"; modifier = "r"; } ]; }
               "allowedDevices has /dev/null r";
             assert refused "a bind of a device"
-              (rootless { containers.box.bindMounts."/dev/snd".hostPath = "/dev/snd"; })
+              { containers.box.bindMounts."/dev/snd".hostPath = "/dev/snd"; }
               "A plain bind is nodev";
-            assert refused "a shared host network under rootless"
-              (rootless { containers.box.privateNetwork = lib.mkForce false; })
-              "does not\nset privateNetwork = true";
+            assert refused "a shared host network"
+              { containers.box.privateNetwork = lib.mkForce false; }
+              "does not set privateNetwork = true";
             assert refused "a user the container does not have"
-              (rootless { flong.box.user = lib.mkForce "nobody-here"; })
+              { flong.box.user = lib.mkForce "nobody-here"; }
               "nobody-here is not a user in containers.box";
             # A container declared by `path` alone is refused too, but is not
             # tested here: the container module's own assertions read every
             # container's `config`, so such a host does not evaluate at all.
             assert refused "a user without a declared uid"
-              (rootless {
+              {
                 containers.box.config.users.users.v = { isNormalUser = true; group = "users"; };
                 flong.box.user = lib.mkForce "v";
-              })
+              }
               "is not declared";
             assert refused "a user beyond the container's ids"
-              (rootless {
+              {
                 containers.box.config.users.users.w = { isNormalUser = true; uid = 70000; group = "users"; };
                 flong.box.user = lib.mkForce "w";
-              })
+              }
               "outside the container's ids";
             assert refused "an unclean mask"
-              (rootless { flong.box.masks = [ "/srv/../etc/shadow" ]; })
+              { flong.box.masks = [ "/srv/../etc/shadow" ]; }
               "is not a clean absolute path";
             assert refused "an unclean protect entry"
-              (rootless { flong.box.protect = [ "/srv/gate/" ]; })
+              { flong.box.protect = [ "/srv/gate/" ]; }
               "is not a clean absolute path";
             assert refused "a mask on a bind's own destination"
-              (rootless {
+              {
                 containers.box.bindMounts."/srv/b".hostPath = "/srv/b";
                 flong.box.masks = [ "/srv/b" ];
-              })
+              }
               "twice";
             assert refused "a device that is also bound"
-              (rootless {
+              {
                 containers.box.allowedDevices = [ { node = "/dev/snd"; modifier = "rw"; } ];
                 containers.box.bindMounts."/dev/snd".hostPath = "/dev/snd";
-              })
+              }
               "at /dev/snd twice";
-            assert refused "autoStart under rootless"
-              (rootless { containers.box.autoStart = true; })
-              "contrary to engine = \"rootless\"";
+            assert refused "autoStart"
+              { containers.box.autoStart = true; }
+              "has autoStart enabled";
             assert refused "a host without user namespaces"
-              (rootless { security.allowUserNamespaces = false; })
+              { security.allowUserNamespaces = false; }
               "security.allowUserNamespaces is false";
             assert refused "a host without newuidmap"
-              (rootless { security.wrappers.newuidmap.enable = lib.mkForce false; })
-              "does not\ninstall";
-            assert accepted "odd bind and tmpfs paths under rootless"
-              (rootless {
+              { security.wrappers.newuidmap.enable = lib.mkForce false; }
+              "does not install";
+            assert accepted "odd bind and tmpfs paths"
+              {
                 containers.box.bindMounts."/in side:colon\\slash".hostPath = "/out side:colon\\slash";
                 containers.box.tmpfs = [ "/tmp/with space" ];
-              });
+              };
             assert accepted "a mask one level below a writable bind"
-              (rootless {
+              {
                 containers.box.bindMounts."/srv/shared" = { hostPath = "/srv/shared"; isReadOnly = false; };
                 flong.box.masks = [ "/srv/shared/masked" ];
-              });
+              };
             # The depth rule is for masks below writable binds only: a tmpfs or
             # an overlay deep below one, and a mask deep below a read-only
             # one, are allowed.
             assert accepted "a tmpfs and an overlay deep below a writable bind"
-              (rootless {
+              {
                 containers.box.bindMounts."/srv/shared" = { hostPath = "/srv/shared"; isReadOnly = false; };
                 containers.box.tmpfs = [ "/srv/shared/a/cache" ];
                 flong.box.overlays."/srv/shared/b/state" = "/var/empty";
-              });
+              };
             assert accepted "a mask deep below a read-only bind"
-              (rootless {
+              {
                 containers.box.bindMounts."/srv/ref" = { hostPath = "/srv/ref"; isReadOnly = true; };
                 flong.box.masks = [ "/srv/ref/a/token" ];
-              });
+              };
             assert accepted "a forwarded port at 1024"
-              (rootless { flong.box.network.forwardPorts = [ { hostPort = 1024; } ]; });
+              { flong.box.network.forwardPorts = [ { hostPort = 1024; } ]; };
             assert accepted "a bind of a directory in the runtime directory"
-              (rootless { containers.box.bindMounts."/run/cc-socks".hostPath = "/run/user/1000/cc-socks"; });
+              { containers.box.bindMounts."/run/cc-socks".hostPath = "/run/user/1000/cc-socks"; };
             assert accepted "a tmpfs with a mode and a size"
-              (rootless { containers.box.tmpfs = [ "/scratch:mode=1777,size=10M" "/rootish:uid=0,gid=0" "/mine:uid=1000,gid=100" ]; });
+              { containers.box.tmpfs = [ "/scratch:mode=1777,size=10M" "/rootish:uid=0,gid=0" "/mine:uid=1000,gid=100" ]; };
             assert accepted "a device with rwm"
-              (rootless { containers.box.allowedDevices = [ { node = "/dev/null"; modifier = "rwm"; } ]; });
+              { containers.box.allowedDevices = [ { node = "/dev/null"; modifier = "rwm"; } ]; };
             assert accepted "a directory device without a bind"
-              (rootless { containers.box.allowedDevices = [ { node = "/dev/snd"; modifier = "rw"; } ]; });
+              { containers.box.allowedDevices = [ { node = "/dev/snd"; modifier = "rw"; } ]; };
             assert accepted "the container's root as the user"
-              (rootless { flong.box.user = lib.mkForce "root"; });
-            # The holder unit exists once a declaration runs rootless, and is
+              { flong.box.user = lib.mkForce "root"; };
+            # The holder unit exists once there is a declaration, and is
             # delegated, in app.slice, with the sweeper as its process.
             assert (let
-                units = (configWith (rootless { })).systemd.user.units;
+                units = (configWith { }).systemd.user.units;
                 text = units."flong-sessions.service".text or "";
               in
               lib.all (l: lib.hasInfix l text) [
                 "Type=exec" "Slice=app.slice" "Delegate=yes" "DelegateSubgroup=supervisor"
                 "OOMPolicy=continue" "/bin/flong-sweeper %t/flong"
               ]) || throw "assertions: the holder unit is missing or wrong";
-            assert ! (configWith { }).systemd.user.units ? "flong-sessions.service"
-              || throw "assertions: the holder unit exists with no rootless declaration";
-            # nspawn expresses any path once it is escaped, and flong passes
-            # the declaration's binds as data, so none is refused.
-            assert flongFailures
-              {
-                containers.box.bindMounts."/in side:colon\\slash".hostPath = "/out side:colon\\slash";
-                containers.box.tmpfs = [ "/tmp/with space" ];
-              } == [ ]
-              || throw "assertions: a bind or tmpfs path holding whitespace, ':' or '\\' is refused";
+            assert ! (configWith { flong = lib.mkForce { }; }).systemd.user.units ? "flong-sessions.service"
+              || throw "assertions: the holder unit exists with no declaration";
             # `command` is an argument list: neither a shell string nor an
             # empty list evaluates.
             assert ! (builtins.tryEval (builtins.deepSeq
@@ -411,7 +350,7 @@
             '';
         });
 
-      # Launch times of both engines, like for like, in one VM: built on
+      # Launch times, in one VM: built on
       # demand (`nix build .#bench`), never by `nix flake check`, because a
       # time is a number to report and not a test. The result holds
       # numbers.md.

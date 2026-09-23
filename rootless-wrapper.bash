@@ -1,4 +1,4 @@
-# The rootless launcher's body. rootless.nix puts a header of assignments in
+# The launcher's body. module.nix puts a header of assignments in
 # front of it (name, container, user, closure, cuid, cgid, closure8, steps8,
 # static, declared_dests, declared_binds, masks, mask_hosts, launcher,
 # cache_tool, flock, mkdir, payload, post_start, network, dns_forward4,
@@ -52,7 +52,7 @@ run_as_caller() {
 # ---- the caller
 
 if ((UID == 0)); then
-	die "refusing to run as root: engine = \"rootless\" runs as the calling user, and root has no subordinate range"
+	die "refusing to run as root: flong runs as the calling user, and root has no subordinate range"
 fi
 # The name newuidmap matches /etc/subuid against, from passwd by uid, since
 # USER is the caller's to set. A user passwd does not list is matched by uid.

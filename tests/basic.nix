@@ -1,50 +1,33 @@
 # Exercises every option that changes what the container sees: the workspace
 # override, a read-write bind, a tmpfs mask over part of that bind, an overlay,
 # the caller's binds in both modes, the declaration's file and socket binds,
-# the command as an argument list, the privilege drop, the NOPASSWD grant, the
-# root hooks and their teardown, the network, its DNS and the ports it does and
-# does not reach, the session cleanup and the sweep that reclaims what a killed
-# session left.
+# the command as an argument list, the identity, the caller's hooks and their
+# teardown, the network, its DNS and the ports it does and does not reach, the
+# session cleanup and the sweep that reclaims what a killed session left.
 #
-# Run once per engine while both exist. checks.basic is the nspawn engine,
-# launched by the test's root shell and, for the grant, through sudo.
-# checks.basic-rootless is the same declarations on the rootless engine,
-# launched by a lingering alice through her own user manager on a host with no
-# sudo at all. Where the rootless engine refuses a declaration, it gets the
-# nearest one it accepts. A subtest about what only nspawn has is skipped under
-# rootless, and one whose property holds with a different assertion is
-# asserted the rootless way; each says why.
-{ engine }:
+# Every launch is made by a lingering alice through her own user manager, on a
+# host with no sudo at all.
 { lib, ... }:
 
 let
-  rootless = engine == "rootless";
+  # How a hook reaches the session's network namespace. The hook is the
+  # caller, and the namespace belongs to the session's user namespace, which
+  # it must enter first to hold any capability there.
+  enter = ''nsenter --user="$userns" --net="$netns"'';
 
-  # How a hook reaches the session's network namespace. Under rootless the
-  # hook is the caller, and the namespace belongs to the session's user
-  # namespace, which it must enter first to hold any capability there.
-  enter = if rootless then ''nsenter --user="$userns" --net="$netns"'' else ''nsenter --net="$netns"'';
+  # Where a hook leaves what postStop releases: somewhere the caller can
+  # write, which /run is not.
+  hookDir = "/tmp";
 
-  # Where a hook leaves what postStop releases: somewhere the hook's user can
-  # write, which under rootless is not /run.
-  hookDir = if rootless then "/tmp" else "/run";
-
-  # The holder unit's cgroup, under which every rootless session of alice's
+  # The holder unit's cgroup, under which every session of alice's
   # lives: <container>/<machine>/{sandbox,hooks,pasta}.
   holderCgroup = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/flong-sessions.service";
 in
 {
-  name = if rootless then "flong-basic-rootless" else "flong-basic";
+  name = "flong-basic";
 
-  nodes.machine = { config, pkgs, ... }: {
-    imports = [ ../module.nix ]
-      # Every declaration below on the engine under test, without spelling
-      # it out in each: the submodule is merged into flong's own.
-      ++ lib.optional rootless {
-        options.flong = lib.mkOption {
-          type = lib.types.attrsOf (lib.types.submodule { engine = "rootless"; });
-        };
-      };
+  nodes.machine = { pkgs, ... }: {
+    imports = [ ../module.nix ];
 
     virtualisation.memorySize = 3072;
     virtualisation.diskSize = 8192;
@@ -81,8 +64,7 @@ in
       nft list ruleset >/dev/null 2>&1 && echo listed
       nft flush ruleset >/dev/null 2>&1 && echo flushed
       grep -E '^(CapBnd|NoNewPrivs)' /proc/self/status
-      # Under nspawn a workload may make a user namespace of its own, and
-      # under rootless it may not.
+      # A workload may not make a user namespace of its own.
       unshare -U true 2>/dev/null || echo unshare-refused
       # -r, so that it holds every capability the new namespace can give.
       unshare -Ur bash -c '
@@ -100,7 +82,6 @@ in
       uid = 1000;
       group = "users";
       home = "/home/alice";
-    } // lib.optionalAttrs rootless {
       # A user manager from boot, which every launch goes through.
       linger = true;
       # Stated rather than allocated, so the cache's name is known.
@@ -110,7 +91,7 @@ in
     };
 
     # No sudo rule can exist when there is no sudo.
-    security.sudo.enable = lib.mkIf rootless false;
+    security.sudo.enable = false;
 
     systemd.tmpfiles.rules = [
       "d /srv/work 0755 root root -"
@@ -140,11 +121,11 @@ in
 
       # Where containers.demo's symlink in alice's home points, on the host.
       # A launcher that followed it would make a directory in here. alice's,
-      # so that under rootless, where the launcher is alice, nothing but the
-      # refusal stops the directory being made.
+      # as the launcher is, so nothing but the refusal stops the directory
+      # being made.
       "d /srv/escape-target 0755 alice users -"
 
-      # Exists, and names a character nspawn's --bind cannot express.
+      # Exists, and names the character a bind list separates modes with.
       "d /srv/odd:name 0755 root root -"
 
       # Travels with the workspace, read-write: the pairing case. Owned by
@@ -185,9 +166,9 @@ in
 
     containers.demo = {
       autoStart = false;
-      # A rootless session always has a network namespace of its own, and the
-      # engine refuses a declaration that says otherwise.
-      privateNetwork = rootless;
+      # A session always has a network namespace of its own, and flong
+      # refuses a declaration that says otherwise.
+      privateNetwork = true;
 
       # Masks part of the read-write bind below, and -- at /srv/nested --
       # hides a host directory that a nested bind then reaches through. The
@@ -203,24 +184,19 @@ in
       ];
 
       # A bind whose paths hold a space, a colon and a backslash on both
-      # sides. Read as data, each reaches nspawn as one escaped argument; the
+      # sides. Read as data, each reaches the launcher as one path; the
       # container module's own unit would split it into mounts nobody
       # declared. Read-only, the declaration's default.
       bindMounts."/srv/odd: in\\side".hostPath = "/srv/odd: out\\side";
-
-      # extraFlags as the container module uses them: one entry, split on
-      # whitespace into two flags. nspawn flags, which the rootless engine
-      # refuses at evaluation.
-      extraFlags = lib.optionals (!rootless) [ "--setenv=FLONG_DECLARED_A=one --setenv=FLONG_DECLARED_B=two" ];
 
       bindMounts."/srv/shared" = {
         hostPath = "/srv/shared";
         isReadOnly = false;
       };
 
-      # Nested inside the tmpfs declared below. nspawn sorts custom mounts by
-      # destination rather than honouring argument order, so the tmpfs lands
-      # first and this reaches through it -- which is how a single socket is
+      # Nested inside the tmpfs declared below. flong sorts mounts by
+      # destination rather than by declaration, so the tmpfs lands first and
+      # this reaches through it -- which is how a single socket is
       # carved out of a runtime directory that must otherwise stay hidden.
       bindMounts."/srv/nested/keep" = {
         hostPath = "/srv/keep";
@@ -244,7 +220,7 @@ in
           extraGroups = [ "audio" ];
           home = "/home/alice";
           # On the PATH /etc/set-environment gives the payload, and nowhere
-          # else: not in the system profile nspawn's own PATH names.
+          # else: not in the system profile.
           packages = [ pkgs.hello ];
         };
         users.groups.users.gid = 100;
@@ -261,17 +237,16 @@ in
           "f /srv/by-tmpfiles/marker 0644 root root - made-by-tmpfiles"
           "L+ /srv/by-tmpfiles/link - - - - /srv/by-tmpfiles/marker"
           # A symlink in the root's home to an absolute path, which from the
-          # launcher's side of nspawn is the host's.
+          # launcher's side is the host's.
           "d /home/alice 0700 alice users -"
           "L+ /home/alice/escape - - - - /srv/escape-target"
         ];
       };
     };
 
-    # The one network isolation a session can have: a namespace with loopback
-    # in it and nothing else. Separate from demo because every other subtest
-    # wants the host's network, and because what is under test is that the
-    # declaration reaches nspawn at all.
+    # A session with no network: a namespace with loopback in it and nothing
+    # else. Separate from demo, so that the networked declarations and hooks
+    # over it share its closure and not demo's mounts.
     containers.netless = {
       autoStart = false;
       privateNetwork = true;
@@ -312,8 +287,7 @@ in
     };
 
     # The same container with a hook on it, which is the only way to reach a
-    # session's namespace from outside: as root under nspawn, as the caller
-    # under rootless.
+    # session's namespace from outside, and runs as the caller.
     flong.hooked = {
       container = "netless";
       user = "alice";
@@ -407,37 +381,17 @@ in
       '';
 
       # Records that it ran, and whether the session was still running when
-      # it did -- which it must not be, whichever way the launcher ended.
-      # Under rootless a session is its cgroup's sandbox leaf, which has a
-      # process in it for as long as the session runs.
-      postStop = if rootless then ''
+      # it did -- which it must not be, whichever way the launcher ended. A
+      # session is its cgroup's sandbox leaf, which has a process in it for as
+      # long as the session runs.
+      postStop = ''
         if read -r _ 2>/dev/null <"${holderCgroup}/netless/$machine/sandbox/cgroup.procs"; then
-          echo "live-at-poststop" >> /tmp/stopped
-        fi
-        echo "$machine" >> /tmp/stopped
-      '' else ''
-        if /run/current-system/sw/bin/systemctl is-active --quiet "$machine.scope"; then
           echo "live-at-poststop" >> /tmp/stopped
         fi
         echo "$machine" >> /tmp/stopped
       '';
 
       command = [ "bash" "-c" ];
-    };
-
-    # A hook that plants what a workload would, if it could ever write the
-    # session's /run: an absolute symlink where the ready marker goes. Walked
-    # beneath /proc/<pid>/root, that resolves against the HOST's root -- so
-    # the launcher must refuse it, not follow it to /tmp/escaped. nspawn's
-    # alone: the rootless engine has no marker, and its gate is a pipe.
-    flong.plantedmarker = lib.mkIf (!rootless) {
-      container = "netless";
-      user = "alice";
-      workspace = ''realpath /srv/work'';
-      postStart = ''
-        ln -s /tmp/escaped "/proc/$leader/root/run/flong-ready"
-      '';
-      command = [ "sleep" "300" ];
     };
 
     # A hook that refuses. The payload would outlive the launcher if nothing
@@ -457,26 +411,15 @@ in
     flong.demo = {
       user = "alice";
 
-      # Applied to the session's scope. A limit rather than a nicety: the
-      # session root, TMPDIR and every overlay upper are in /run, which is RAM.
-      # The rest are there for their types, which are the ones `serviceConfig`
-      # takes: an integer, a bool and a list.
-      scopeConfig = lib.mkIf (!rootless) {
-        MemoryMax = "1G";
-        TasksMax = 512;
-        MemoryZSwapWriteback = false;
-        IPAddressDeny = [ "192.0.2.1" "192.0.2.2" ];
-      };
-      # Under rootless there is no scope, and the same two limits are written
-      # into the session's cgroup. The other two have no rootless equivalent,
-      # and scopeConfig is refused there.
-      limits = lib.mkIf rootless {
+      # Written into the session's cgroup. A limit rather than a nicety: the
+      # session's writable layers and TMPDIR are tmpfs, which is RAM.
+      limits = {
         MemoryMax = "1G";
         TasksMax = 512;
       };
 
       # The uid is recorded so the test can assert WHO evaluated this: the
-      # invoking user when there is one, root only when there is not.
+      # caller, as everything outside the session runs.
       workspace = ''
         id -u > /tmp/workspace-uid
         printf '%s\n' "$*" > /tmp/workspace-args
@@ -535,8 +478,8 @@ in
     };
 
     # A program that only the container's /etc/set-environment puts on PATH:
-    # hello is in alice's per-user profile, and absent from the system profile
-    # the launcher hands nspawn.
+    # hello is in alice's per-user profile, and absent from the system
+    # profile.
     flong.userpath = {
       container = "demo";
       user = "alice";
@@ -633,20 +576,6 @@ in
       command = [ "bash" "-c" ];
     };
 
-    # Names a user the container does not have. Since the uid, gid and home are
-    # read out of the container's passwd rather than declared, this is the whole
-    # of what can now go wrong with an identity -- and it has to be caught out
-    # here, because nspawn's own failure for an unknown --user arrives after a
-    # root has been prepared and copied. The rootless engine reads the uid at
-    # evaluation and refuses the declaration there, which checks.assertions
-    # covers, so this exists only under nspawn.
-    flong.badusername = lib.mkIf (!rootless) {
-      container = "demo";
-      user = "absent";
-      workspace = ''realpath /srv/work'';
-      command = [ "true" ];
-    };
-
     # A third over the same container, taking the DEFAULT workspace. It exists
     # so that the default snippet is built -- and therefore shellchecked --
     # rather than only the overrides the other two declare, which is how a
@@ -665,24 +594,11 @@ in
       workspace = "false";
       command = [ "true" ];
     };
-
-    # Reaching the launcher is the consumer's business, not the module's.
-    # This is the pattern the README documents, so the test covers that rather
-    # than a module feature. Under rootless the launcher is run directly.
-    security.sudo.extraRules = lib.mkIf (!rootless) [{
-      users = [ "alice" ];
-      commands = [{
-        command = lib.getExe config.flong.demo.launcher;
-        options = [ "NOPASSWD" ];
-      }];
-    }];
   };
 
   testScript = { nodes, ... }:
     let
-      # A declaration's launcher, or nothing for one this engine does not
-      # declare: the subtests that use it do not run then.
-      exe = n: if nodes.machine.flong ? ${n} then lib.getExe nodes.machine.flong.${n}.launcher else "";
+      exe = n: lib.getExe nodes.machine.flong.${n}.launcher;
       launcher = exe "demo";
       badWorkspace = exe "badworkspace";
       defaultWorkspace = exe "defaultworkspace";
@@ -690,7 +606,6 @@ in
       badBinds = exe "badbinds";
       failingBinds = exe "failingbinds";
       roWorkspace = exe "roworkspace";
-      badUsername = exe "badusername";
       guardExit = exe "guardexit";
       guardReassign = exe "guardreassign";
       netless = exe "netless";
@@ -698,25 +613,23 @@ in
       badHook = exe "badhook";
       argv = exe "argv";
       userPath = exe "userpath";
-      plantedMarker = exe "plantedmarker";
       networked = exe "networked";
       badMask = exe "badmask";
       symlinkOverlay = exe "symlinkoverlay";
       autoPorts = exe "autoPorts";
-      # The container's own closure, for the one nspawn this file runs itself:
-      # the prepared root has no PATH of its own until nspawn is given one.
+      # The container's own closure, whose system profile hello is not in.
       closure = nodes.machine.containers.demo.path;
     in
     ''
       import re
       import shlex
 
-      ROOTLESS = ${if rootless then "True" else "False"}
       HOOK_DIR = "${hookDir}"
+      STATE = "/run/user/1000/flong"
+      CG = "${holderCgroup}"
 
       machine.wait_for_unit("multi-user.target")
-      if ROOTLESS:
-          machine.wait_for_unit("user@1000.service")
+      machine.wait_for_unit("user@1000.service")
       # Every netless session binds this socket, so it has to be there first.
       machine.wait_for_unit("bound-sock.service")
       machine.wait_until_succeeds("test -S /srv/bound/sock")
@@ -732,72 +645,46 @@ in
       def launcher_pid(name):
           return name.split("-")[1]
 
-      if ROOTLESS:
-          STATE = "/run/user/1000/flong"
-          CG = "${holderCgroup}"
+      # A command as alice, through her own user manager, with an explicit
+      # PATH and /srv/work as the current directory. `sudo` is nowhere in
+      # it, and nowhere on the host.
+      def by_caller(command):
+          inner = "export PATH=/run/wrappers/bin:/run/current-system/sw/bin; cd /srv/work; " + command
+          return ("systemd-run -M alice@ --user --wait --pipe --quiet --collect "
+                  "--expand-environment=no -- /run/current-system/sw/bin/bash -c "
+                  + shlex.quote(inner) + " </dev/null")
 
-          # A command as alice, through her own user manager, with an explicit
-          # PATH and /srv/work as the current directory. `sudo` is nowhere in
-          # it, and nowhere on the host.
-          def by_caller(command):
-              inner = "export PATH=/run/wrappers/bin:/run/current-system/sw/bin; cd /srv/work; " + command
-              return ("systemd-run -M alice@ --user --wait --pipe --quiet --collect "
-                      "--expand-environment=no -- /run/current-system/sw/bin/bash -c "
-                      + shlex.quote(inner) + " </dev/null")
+      # CONTAINER's session, once bwrap has reported its leader. Its record
+      # is named for it, and nothing outside the launcher knows the name
+      # before.
+      def session_of(container):
+          return machine.wait_until_succeeds(
+              f"for r in {STATE}/sessions/{container}-*; do "
+              "grep -qs '^leader=' \"$r\" && basename \"$r\"; done | grep .").strip()
 
-          # CONTAINER's session, once bwrap has reported its leader. Its record
-          # is named for it, and nothing outside the launcher knows the name
-          # before.
-          def session_of(container):
-              return machine.wait_until_succeeds(
-                  f"for r in {STATE}/sessions/{container}-*; do "
-                  "grep -qs '^leader=' \"$r\" && basename \"$r\"; done | grep .").strip()
+      # The session's pid 1, as the host sees it.
+      def leader_of(name):
+          return machine.succeed(
+              f"sed -n 's/^leader=\\([0-9]*\\):.*/\\1/p' {STATE}/sessions/{name}").strip()
 
-          # The session's pid 1, as the host sees it.
-          def leader_of(name):
-              return machine.succeed(
-                  f"sed -n 's/^leader=\\([0-9]*\\):.*/\\1/p' {STATE}/sessions/{name}").strip()
+      def start_session(command):
+          machine.succeed(by_caller(f"${launcher} '{command}'") + " >/dev/null 2>&1 &")
+          return session_of("demo")
 
-          def start_session(command):
-              machine.succeed(by_caller(f"${launcher} '{command}'") + " >/dev/null 2>&1 &")
-              return session_of("demo")
+      # The holder's sweeper, which releases a dead session within
+      # milliseconds of its launcher's death. Stopped, the next launch's
+      # own sweep is the one left.
+      def sweeper():
+          return machine.succeed(f"cat {CG}/supervisor/cgroup.procs").split()[0]
 
-          # The holder's sweeper, which releases a dead session within
-          # milliseconds of its launcher's death. Stopped, the next launch's
-          # own sweep is the one left, as it is the only one under nspawn.
-          def sweeper():
-              return machine.succeed(f"cat {CG}/supervisor/cgroup.procs").split()[0]
+      # By command line: pasta's pid file is a descriptor of its launcher's.
+      def pasta_for(name=""):
+          pid = launcher_pid(name) if name else "[0-9]*"
+          return f"pgrep -f '[-]-pid /proc/{pid}/fd/'"
 
-          # By command line: pasta's pid file is a descriptor of its launcher's.
-          def pasta_for(name=""):
-              pid = launcher_pid(name) if name else "[0-9]*"
-              return f"pgrep -f '[-]-pid /proc/{pid}/fd/'"
-
-          NO_SESSIONS = f"test -z \"$(ls -A {STATE}/sessions)\""
-          NO_SESSION_CGROUPS = f"test -z \"$(find {CG} -mindepth 2 -maxdepth 2 -type d)\""
-          PREPARED = f"{STATE}/demo-*/prepared"
-      else:
-          # The test's root shell launches, as it always has under nspawn.
-          def by_caller(command):
-              return command
-
-          # A session in the background, identified by the directory it makes:
-          # the machine name carries the launcher's pid and a random number, so
-          # nothing outside the launcher can know it in advance.
-          def start_session(command):
-              machine.succeed(f"${launcher} '{command}' >/dev/null 2>&1 &")
-              return machine.wait_until_succeeds(
-                  "ls -d /run/flong/demo-*/s-demo-*").strip().split("/s-")[-1]
-
-          # By command line, not by name: nixpkgs' pasta execs passt.avx2 where
-          # the CPU has it, and `pgrep pasta` then matches nothing whether pasta
-          # is there or not. The bracket keeps the pattern from matching the
-          # shell that runs pgrep, whose own command line holds it too.
-          def pasta_for(name=""):
-              return f"pgrep -f '[/]run/flong/netns/{name}'"
-
-          NO_SESSIONS = "test -z \"$(ls -A /run/flong/netns)\""
-          PREPARED = "/run/flong/demo-*/prepared"
+      NO_SESSIONS = f"test -z \"$(ls -A {STATE}/sessions)\""
+      NO_SESSION_CGROUPS = f"test -z \"$(find {CG} -mindepth 2 -maxdepth 2 -type d)\""
+      PREPARED = f"{STATE}/demo-*/prepared"
 
       with subtest("runs as the declared user, in the declared workspace"):
           out = machine.succeed(by_caller("${launcher} 'id -un; pwd; cat marker'"))
@@ -830,30 +717,24 @@ in
           machine.fail("test -e /srv/shared/argv-ran")
 
       with subtest("command runs with the container's PATH, from its set-environment"):
-          # hello is in alice's per-user profile and not in the system profile
-          # nspawn is handed as PATH, so a bare `hello` is found only if
+          # hello is in alice's per-user profile and not in the system
+          # profile, so a bare `hello` is found only if
           # /etc/set-environment was sourced before the exec -- and the
           # argument after it arrives unread, as the others do.
           machine.succeed("test ! -e ${closure}/sw/bin/hello")
           out = machine.succeed(by_caller("${userPath} 'from the profile; $(false) *'"))
           assert out.strip() == "from the profile; $(false) *", out
 
-      with subtest("a clean launch writes nothing to stderr" if ROOTLESS
-                   else "a launch is not accompanied by a deprecation warning"):
-          # systemd 261 deprecates --user= in favour of --uid= and prints a
-          # warning for it on every single launch, so a tool that advertises
-          # 117 ms and a clean exit spent one line of every session apologising
-          # for its own command line. There is no nspawn under rootless, and
-          # nothing else is to be said on success either.
+      with subtest("a clean launch writes nothing to stderr"):
+          # Nothing is to be said on success: a line on every launch is a line
+          # in every consumer's output.
           out = machine.succeed(by_caller("${launcher} 'true' 2>&1"))
-          assert "deprecat" not in out.lower(), out
-          if ROOTLESS:
-              assert out == "", out
+          assert out == "", out
 
       with subtest("nothing in the session runs as root"):
           # pid 1 is tini, and the engine drops before starting it, so there is
           # no process in here for a root phase to have belonged to. That no
-          # process of a rootless session has host uid 0 is checks.rootless's.
+          # process of a session has host uid 0 is checks.rootless's.
           out = machine.succeed(by_caller("${launcher} 'id -u; grep ^Uid /proc/1/status'"))
           assert out.split()[0] == "1000", out
           assert "Uid:\t1000" in out, out
@@ -878,30 +759,28 @@ in
           assert "alice:700" in out, out
 
       with subtest("stdin reaches the payload when the launcher is not on a tty"):
-          # nspawn's console default is read-only off a terminal: output
-          # propagates and input is never read, so this arrived empty and
-          # nothing said so.
+          # Off a terminal the launcher relays no pty, and the pipe itself must
+          # reach the payload rather than arrive empty with nothing said.
           out = machine.succeed(by_caller("echo from-the-pipe | ${launcher} 'cat'"))
           assert "from-the-pipe" in out, out
 
       with subtest("the hostname is the container's, not the session's"):
-          # The machine name carries a pid and a random number to keep
-          # concurrent sessions apart, and nspawn would use it as the hostname.
+          # The session's name carries a pid and a random number to keep
+          # concurrent sessions apart, and is not what the payload should see.
           out = machine.succeed(by_caller("${launcher} 'cat /proc/sys/kernel/hostname'"))
           assert out.strip() == "demo", out
 
       with subtest("XDG_RUNTIME_DIR exists and belongs to the payload"):
-          # /run is nspawn's own tmpfs, made fresh at every start, and nothing
-          # inside a session can create a directory in it -- so the variable
-          # named a directory that was not there.
+          # /run is a tmpfs made fresh at every start, and nothing inside a
+          # session can create a directory in it -- so the launcher must, or
+          # the variable names a directory that is not there.
           out = machine.succeed(by_caller("${launcher} 'echo $XDG_RUNTIME_DIR; stat -c %U:%a \"$XDG_RUNTIME_DIR\"'"))
           assert "/run/user/1000" in out, out
           assert "alice:700" in out, out
 
       with subtest("the root carries a machine id"):
-          # Written by a container's init from the uuid nspawn hands it, and a
-          # session has no init -- so this was absent and every reader got
-          # ENOENT.
+          # Written by a booted container's init, and a session has no init --
+          # so without the prepare step every reader gets ENOENT.
           out = machine.succeed(by_caller("${launcher} 'cat /etc/machine-id'"))
           assert len(out.strip()) == 32, out
 
@@ -924,23 +803,12 @@ in
               "${launcher} 'stat -c %U \"/srv/tmp masked\"; touch \"/srv/tmp masked/mine\" && echo wrote'"))
           assert out.split() == ["alice", "wrote"], out
 
-      # There is no nspawn under rootless, and extraFlags are refused there at
-      # evaluation, which checks.assertions covers.
-      if not ROOTLESS:
-          with subtest("extraFlags reach nspawn split on whitespace, as the container module splits them"):
-              out = machine.succeed("${launcher} 'echo $FLONG_DECLARED_A $FLONG_DECLARED_B'")
-              assert out.split() == ["one", "two"], out
-
       with subtest("privateNetwork gives the session loopback and nothing else"):
           # sysfs is per-namespace, so this needs no tools in the container.
-          # A rootless session never shares the host's network, so the
-          # interface beside loopback is pasta's, in a networked session.
-          if ROOTLESS:
-              out = machine.succeed(by_caller("${networked} 'ls /sys/class/net'"))
-              assert "lo" in out.split() and len(out.split()) > 1, out
-          else:
-              out = machine.succeed("${launcher} 'ls /sys/class/net'")
-              assert "eth0" in out, out
+          # A session never shares the host's network, so the interface beside
+          # loopback is pasta's, in a networked session.
+          out = machine.succeed(by_caller("${networked} 'ls /sys/class/net'"))
+          assert "lo" in out.split() and len(out.split()) > 1, out
           out = machine.succeed(by_caller("${netless} 'ls /sys/class/net'"))
           assert out.split() == ["lo"], out
           # And no route out of it, in either family: this, not the missing
@@ -954,8 +822,7 @@ in
           out = machine.succeed(by_caller("${netless} 'test -e /etc/resolv.conf && echo present || echo absent'"))
           assert out.strip() == "absent", out
 
-      with subtest("the hook runs as the caller, in the session's namespace, before any egress" if ROOTLESS
-                   else "the root hook runs as root, in the session's namespace, before any egress"):
+      with subtest("the hook runs as the caller, in the session's namespace, before any egress"):
           # The hook is the only moment a session's namespace can be steered
           # from outside, and what makes it safe is that it happens before the
           # namespace has anywhere to go: an empty route table at hook time is
@@ -964,28 +831,10 @@ in
           machine.succeed(by_caller("${hooked} 'true'"))
           uid, host_ns, session_ns, routes, name = \
               machine.succeed("cat /tmp/poststart-facts").split()
-          assert uid == ("1000" if ROOTLESS else "0"), uid
+          assert uid == "1000", uid
           assert session_ns != host_ns, f"{session_ns} == {host_ns}"
           assert routes == "0", f"the namespace had {routes} routes at hook time"
           assert name.startswith("netless-"), name
-
-      # The ready marker is nspawn's gate. The rootless engine's gate is a pipe
-      # flong-init blocks on, with nothing on any path for a session to plant.
-      if not ROOTLESS:
-          with subtest("the ready marker is a directory the launcher made"):
-              out = machine.succeed("${hooked} 'stat -c \"%F %U\" /run/flong-ready'")
-              assert out.strip() == "directory root", out
-
-          with subtest("an entry already at the marker's path fails the launch, and is not followed"):
-              # mkdir, not touch: an absolute symlink under /proc/<pid>/root
-              # resolves against the host's root, so following it would have root
-              # create a host path of the session's choosing.
-              machine.succeed("rm -f /tmp/escaped")
-              err = machine.fail("${plantedMarker} 2>&1")
-              machine.fail("test -e /tmp/escaped")
-              assert "could not mark" in err, err
-              machine.fail("machinectl list --no-legend | grep -q netless-")
-              machine.succeed("test -z \"$(find /run/flong -maxdepth 2 -name 's-netless-*')\"")
 
       with subtest("the declaration binds single files and a socket, at paths of its choosing"):
           # tmpfiles writes the file's content without a newline, hence echo.
@@ -1038,29 +887,16 @@ in
           # had through exec ...
           assert not int(caps["CapBnd"], 16) & (1 << 12), caps
           assert caps["NoNewPrivs"] == "1", caps
-          if ROOTLESS:
-              # ... and a second lock: the payload may not make a user
-              # namespace, so no capability comes back in one.
-              assert "unshare-refused" in lines, out
-              assert "UserNsCapEff" not in caps, caps
-              name = session_of("netless")
-              leader = leader_of(name)
-          else:
-              # ... and ONLY defence in depth: inside a user namespace of its own the
-              # workload holds CAP_NET_ADMIN again, which is what makes the failed
-              # flush above a statement about who owns the namespace rather than
-              # about which capabilities were dropped.
-              assert "unshare-refused" not in lines, out
-              assert int(caps["UserNsCapEff"], 16) & (1 << 12), caps
-              name = machine.succeed("ls -d /run/flong/netless-*/s-netless-*").strip().split("/s-")[-1]
-              leader = machine.succeed(f"machinectl show {name} --property=Leader --value").strip()
+          # ... and a second lock: the payload may not make a user
+          # namespace, so no capability comes back in one.
+          assert "unshare-refused" in lines, out
+          assert "UserNsCapEff" not in caps, caps
+          name = session_of("netless")
+          leader = leader_of(name)
           # And from outside, the rule the hook installed is still there.
           rules = machine.succeed(f"nsenter --net=/proc/{leader}/ns/net nft list table inet flong")
           assert "dport 19999 drop" in rules, rules
-          if ROOTLESS:
-              machine.wait_until_fails(f"test -e {STATE}/sessions/{name}")
-          else:
-              machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
+          machine.wait_until_fails(f"test -e {STATE}/sessions/{name}")
 
       with subtest("postStop runs when a session ends"):
           machine.succeed("rm -f /tmp/stopped")
@@ -1076,52 +912,32 @@ in
           # the dead session's postStop rather than its own: the launch that
           # sweeps here is `netless`, over the same container, and has none.
           machine.succeed("rm -f /tmp/stopped")
-          if ROOTLESS:
-              # The holder's sweeper would release the session first, which
-              # checks.rootless covers; stopped, the next launch's sweep is
-              # the one under test. The payload goes with its launcher, and
-              # the hook's listener and file stay until a sweep.
-              paused = sweeper()
-              machine.succeed(f"kill -STOP {paused}")
-              try:
-                  machine.succeed(by_caller("${hooked} 'sleep 300'") + " >/dev/null 2>&1 &")
-                  name = session_of("netless")
-                  leader = leader_of(name)
-                  machine.wait_until_succeeds(f"test -S /tmp/hook-sock-{name}")
-                  machine.succeed(f"kill -9 {launcher_pid(name)}")
-                  machine.wait_until_fails(f"test -d /proc/{leader}")
-                  # Nothing has run it yet, and what it releases is still there.
-                  machine.fail("test -e /tmp/stopped")
-                  machine.succeed(f"test -e /tmp/hook-file-{name}")
-                  machine.succeed(f"pgrep -f hook-sock-{name}")
-
-                  machine.succeed(by_caller("${netless} 'true'"))
-                  assert machine.succeed("cat /tmp/stopped").split() == [name]
-                  machine.fail(f"test -e /tmp/hook-file-{name}")
-                  machine.fail(f"pgrep -f hook-sock-{name}")
-                  machine.fail(f"test -e {STATE}/sessions/{name}")
-                  machine.fail(f"test -e {CG}/netless/{name}")
-              finally:
-                  machine.succeed(f"kill -CONT {paused}")
-          else:
-              machine.succeed("${hooked} 'sleep 300' >/dev/null 2>&1 &")
-              name = machine.wait_until_succeeds(
-                  "ls -d /run/flong/netless-*/s-netless-*").strip().split("/s-")[-1]
-              machine.wait_until_succeeds(f"machinectl show {name} >/dev/null 2>&1")
-              machine.wait_until_succeeds(f"test -S /run/hook-sock-{name}")
+          # The holder's sweeper would release the session first, which
+          # checks.rootless covers; stopped, the next launch's sweep is
+          # the one under test. The payload goes with its launcher, and
+          # the hook's listener and file stay until a sweep.
+          paused = sweeper()
+          machine.succeed(f"kill -STOP {paused}")
+          try:
+              machine.succeed(by_caller("${hooked} 'sleep 300'") + " >/dev/null 2>&1 &")
+              name = session_of("netless")
+              leader = leader_of(name)
+              machine.wait_until_succeeds(f"test -S /tmp/hook-sock-{name}")
               machine.succeed(f"kill -9 {launcher_pid(name)}")
-              machine.succeed(f"systemctl kill -s KILL {name}.scope")
-              machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
+              machine.wait_until_fails(f"test -d /proc/{leader}")
               # Nothing has run it yet, and what it releases is still there.
               machine.fail("test -e /tmp/stopped")
-              machine.succeed(f"test -e /run/hook-file-{name}")
+              machine.succeed(f"test -e /tmp/hook-file-{name}")
               machine.succeed(f"pgrep -f hook-sock-{name}")
 
-              machine.succeed("${netless} 'true'")
+              machine.succeed(by_caller("${netless} 'true'"))
               assert machine.succeed("cat /tmp/stopped").split() == [name]
-              machine.fail(f"test -e /run/hook-file-{name}")
+              machine.fail(f"test -e /tmp/hook-file-{name}")
               machine.fail(f"pgrep -f hook-sock-{name}")
-              machine.fail(f"ls -d /run/flong/netless-*/s-{name}")
+              machine.fail(f"test -e {STATE}/sessions/{name}")
+              machine.fail(f"test -e {CG}/netless/{name}")
+          finally:
+              machine.succeed(f"kill -CONT {paused}")
 
       # Listeners on the host's loopback, each answering with its own port so a
       # reply cannot be mistaken for another's. A banner and not a bare connect:
@@ -1216,20 +1032,13 @@ in
                       "cat /etc/resolv.conf; echo ---; "
                       "getent ahostsv4 dns.flong.test; echo ---; "
                       + probes + "; echo probed; sleep 300'") + " > /tmp/dns-single 2>&1 &")
-                  if ROOTLESS:
-                      # pasta is the one process in the session's pasta leaf,
-                      # and it goes with the session's cgroup.
-                      name = session_of("netless")
-                      machine.wait_until_succeeds("grep -qx probed /tmp/dns-single", timeout=60)
-                      pasta = machine.succeed(
-                          f"tr '\\0' ' ' < /proc/$(head -n 1 {CG}/netless/{name}/pasta/cgroup.procs)/cmdline")
-                      machine.succeed(f"kill -KILL {launcher_pid(name)}")
-                  else:
-                      name = machine.wait_until_succeeds("ls /run/flong/netns | grep -v pid").strip()
-                      machine.wait_until_succeeds("grep -qx probed /tmp/dns-single", timeout=60)
-                      pasta = machine.succeed(
-                          f"tr '\\0' ' ' < /proc/$(cat /run/flong/netns/{name}.pid)/cmdline")
-                      machine.succeed(f"systemctl kill -s KILL {name}.scope")
+                  # pasta is the one process in the session's pasta leaf,
+                  # and it goes with the session's cgroup.
+                  name = session_of("netless")
+                  machine.wait_until_succeeds("grep -qx probed /tmp/dns-single", timeout=60)
+                  pasta = machine.succeed(
+                      f"tr '\\0' ' ' < /proc/$(head -n 1 {CG}/netless/{name}/pasta/cgroup.procs)/cmdline")
+                  machine.succeed(f"kill -KILL {launcher_pid(name)}")
                   machine.wait_until_succeeds(NO_SESSIONS)
 
                   out = machine.succeed("cat /tmp/dns-single")
@@ -1271,118 +1080,65 @@ in
           # One host port, one session: a second session asking for the same
           # one cannot bind it, and is ended rather than run without it.
           machine.succeed(by_caller("${networked} 'sleep 300'") + " >/dev/null 2>&1 &")
-          if ROOTLESS:
-              first = session_of("netless").split()
-          else:
-              first = machine.wait_until_succeeds(
-                  "ls /run/flong/netns | grep -v pid").split()
+          first = session_of("netless").split()
           assert len(first) == 1, first
           machine.fail(by_caller("${networked} 'echo ran'"))
-          if ROOTLESS:
-              machine.succeed(f"kill -KILL {launcher_pid(first[0])}")
-              machine.wait_until_fails(f"test -e {CG}/netless/{first[0]}")
-          else:
-              machine.succeed(f"systemctl kill -s KILL {first[0]}.scope")
-              machine.wait_until_fails(f"machinectl show {first[0]} >/dev/null 2>&1")
+          machine.succeed(f"kill -KILL {launcher_pid(first[0])}")
+          machine.wait_until_fails(f"test -e {CG}/netless/{first[0]}")
           machine.wait_until_succeeds(NO_SESSIONS)
 
-      # Under rootless there is no pin: pasta attaches to the session's
-      # namespace through the launcher's descriptors, and lives in the
-      # session's cgroup.
-      with subtest("a clean exit releases pasta" if ROOTLESS
-                   else "a clean exit releases the pin and pasta"):
+      # pasta attaches to the session's namespace through the launcher's
+      # descriptors, and lives in the session's cgroup.
+      with subtest("a clean exit releases pasta"):
           machine.succeed(by_caller("${networked} 'sleep 1'") + " >/dev/null 2>&1 &")
-          if ROOTLESS:
-              name = session_of("netless")
-              machine.wait_until_succeeds(pasta_for(name))
-              machine.wait_until_fails(f"test -e {STATE}/sessions/{name}")
-              machine.fail(f"test -e {CG}/netless/{name}")
-          else:
-              name = machine.wait_until_succeeds(
-                  "ls /run/flong/netns | grep -v pid").strip()
-              machine.wait_until_succeeds(pasta_for(name + " "))
-              machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
-              machine.wait_until_succeeds("test -z \"$(ls -A /run/flong/netns)\"")
+          name = session_of("netless")
+          machine.wait_until_succeeds(pasta_for(name))
+          machine.wait_until_fails(f"test -e {STATE}/sessions/{name}")
+          machine.fail(f"test -e {CG}/netless/{name}")
           machine.wait_until_fails(pasta_for())
 
-      with subtest("a killed session's pasta is reaped by the next launch" if ROOTLESS
-                   else "a killed session's pin and pasta are reaped by the next launch"):
-          # The leak this has to catch: the pin keeps a dead session's
-          # namespace alive, and pasta alive with it, for as long as the host
-          # runs -- and neither is inside the scope that was killed. Under
-          # rootless pasta is in the session's cgroup, which outlives a
-          # SIGKILLed launcher until a sweep kills it; the sweeper is stopped,
-          # so the sweep is the next launch's. pasta may also quit by itself
+      with subtest("a killed session's pasta is reaped by the next launch"):
+          # The leak this has to catch: pasta alive for as long as the host
+          # runs after its session is gone. It is in the session's cgroup,
+          # which outlives a SIGKILLed launcher until a sweep kills it; the
+          # sweeper is stopped, so the sweep is the next launch's. pasta may also quit by itself
           # once the namespace's last process is gone, so what is asserted
           # before the sweep is the cgroup, not pasta.
-          if ROOTLESS:
-              paused = sweeper()
-              machine.succeed(f"kill -STOP {paused}")
-              try:
-                  machine.succeed(by_caller("${networked} 'sleep 300'") + " >/dev/null 2>&1 &")
-                  name = session_of("netless")
-                  leader = leader_of(name)
-                  machine.wait_until_succeeds(pasta_for(name))
-                  machine.succeed(f"kill -9 {launcher_pid(name)}")
-                  machine.wait_until_fails(f"test -d /proc/{leader}")
-                  machine.succeed(f"test -d {CG}/netless/{name}/pasta")
-                  machine.succeed(f"test -e {STATE}/sessions/{name}")
-
-                  # An unrelated launch over the same container, with no network
-                  # of its own, is where the sweep runs.
-                  machine.succeed(by_caller("${netless} 'true'"))
-                  machine.fail(f"test -e {CG}/netless/{name}")
-                  machine.fail(f"test -e {STATE}/sessions/{name}")
-                  machine.wait_until_fails(pasta_for())
-              finally:
-                  machine.succeed(f"kill -CONT {paused}")
-          else:
-              machine.succeed("${networked} 'sleep 300' >/dev/null 2>&1 &")
-              name = machine.wait_until_succeeds(
-                  "ls /run/flong/netns | grep -v pid").strip()
-              machine.wait_until_succeeds(f"test -s /run/flong/netns/{name}.pid")
-              machine.succeed(f"kill -9 {launcher_pid(name)}")
-              machine.succeed(f"systemctl kill -s KILL {name}.scope")
-              machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
-              machine.succeed(f"mountpoint -q /run/flong/netns/{name}")
-              machine.succeed(pasta_for(name + " "))
-
-              # An unrelated launch over the same container, with no network of
-              # its own, is where the sweep runs.
-              machine.succeed("${netless} 'true'")
-              machine.fail(f"test -e /run/flong/netns/{name}")
-              machine.fail(f"test -e /run/flong/netns/{name}.pid")
-              machine.wait_until_fails(pasta_for())
-
-      with subtest("SIGTERM to the launcher ends the session before releasing it"):
-          # The launcher owns its session: asked to stop, it stops the scope
-          # and waits, and only then runs postStop, pulls the pin and removes
-          # the root. Releasing first did all three under a session still
-          # running. Under rootless it kills the session's cgroup and waits
-          # for it to empty, and only then runs postStop and removes it.
-          machine.succeed("rm -f /tmp/stopped")
-          machine.succeed(by_caller("${networked} 'sleep 300'") + " >/dev/null 2>&1 &")
-          if ROOTLESS:
+          paused = sweeper()
+          machine.succeed(f"kill -STOP {paused}")
+          try:
+              machine.succeed(by_caller("${networked} 'sleep 300'") + " >/dev/null 2>&1 &")
               name = session_of("netless")
+              leader = leader_of(name)
               machine.wait_until_succeeds(pasta_for(name))
-              machine.succeed(f"kill -TERM {launcher_pid(name)}")
-              machine.wait_until_fails(f"test -d /proc/{launcher_pid(name)}")
+              machine.succeed(f"kill -9 {launcher_pid(name)}")
+              machine.wait_until_fails(f"test -d /proc/{leader}")
+              machine.succeed(f"test -d {CG}/netless/{name}/pasta")
+              machine.succeed(f"test -e {STATE}/sessions/{name}")
+
+              # An unrelated launch over the same container, with no network
+              # of its own, is where the sweep runs.
+              machine.succeed(by_caller("${netless} 'true'"))
               machine.fail(f"test -e {CG}/netless/{name}")
               machine.fail(f"test -e {STATE}/sessions/{name}")
-              machine.wait_until_fails(pasta_for(name))
-          else:
-              name = machine.wait_until_succeeds(
-                  "ls /run/flong/netns | grep -v pid").strip()
-              machine.wait_until_succeeds(f"test -s /run/flong/netns/{name}.pid")
-              machine.wait_until_succeeds(pasta_for(name + " "))
-              machine.succeed(f"kill -TERM {launcher_pid(name)}")
-              machine.wait_until_fails(f"test -d /proc/{launcher_pid(name)}")
-              machine.fail(f"systemctl is-active --quiet {name}.scope")
-              machine.fail(f"machinectl show {name} >/dev/null 2>&1")
-              machine.fail(f"test -e /run/flong/netns/{name}")
-              machine.fail(f"test -e /run/flong/netns/{name}.pid")
-              machine.wait_until_fails(pasta_for(name + " "))
-              machine.fail(f"ls -d /run/flong/netless-*/s-{name}")
+              machine.wait_until_fails(pasta_for())
+          finally:
+              machine.succeed(f"kill -CONT {paused}")
+
+      with subtest("SIGTERM to the launcher ends the session before releasing it"):
+          # The launcher owns its session: asked to stop, it kills the
+          # session's cgroup and waits for it to empty, and only then runs
+          # postStop and removes it. Releasing first would do both under a
+          # session still running.
+          machine.succeed("rm -f /tmp/stopped")
+          machine.succeed(by_caller("${networked} 'sleep 300'") + " >/dev/null 2>&1 &")
+          name = session_of("netless")
+          machine.wait_until_succeeds(pasta_for(name))
+          machine.succeed(f"kill -TERM {launcher_pid(name)}")
+          machine.wait_until_fails(f"test -d /proc/{launcher_pid(name)}")
+          machine.fail(f"test -e {CG}/netless/{name}")
+          machine.fail(f"test -e {STATE}/sessions/{name}")
+          machine.wait_until_fails(pasta_for(name))
           assert machine.succeed("cat /tmp/stopped").split() == [name], \
               machine.succeed("cat /tmp/stopped")
 
@@ -1390,189 +1146,91 @@ in
           machine.succeed(f"systemctl stop listen-{port}")
 
       with subtest("a session whose hook refuses does not run"):
-          # The payload is `sleep 300`: if the launcher merely gave up, the
-          # session would outlive it -- systemd-run makes the workload a child
-          # of the scope, not of the launcher -- and would be running with
-          # nothing installed in its namespace and nobody left to install it.
+          # The payload is `sleep 300`: if the launcher merely gave up and the
+          # session outlived it, it would be running with nothing installed
+          # in its namespace and nobody left to install it.
           err = machine.fail(by_caller("${badHook} 2>&1"))
           assert "the hook refuses this session" in err, err
-          if ROOTLESS:
-              machine.succeed(NO_SESSIONS)
-              machine.succeed(NO_SESSION_CGROUPS)
-          else:
-              machine.fail("machinectl list --no-legend | grep -q netless-")
-              machine.succeed("test -z \"$(find /run/flong -maxdepth 2 -name 's-netless-*')\"")
+          machine.succeed(NO_SESSIONS)
+          machine.succeed(NO_SESSION_CGROUPS)
 
-      with subtest("the session's cgroup carries its limits" if ROOTLESS
-                   else "the scope is in machine.slice and carries its scopeConfig"):
+      with subtest("the session's cgroup carries its limits"):
           # Both facts in one read, and from the host deliberately: the session
           # has a cgroup namespace of its own, so from inside it the limit is on
           # an ancestor it cannot see and /sys/fs/cgroup/memory.max says "max".
           machine.succeed(by_caller("${launcher} 'sleep 5'") + " >/dev/null 2>&1 &")
-          if ROOTLESS:
-              # Written into the sandbox leaf before bwrap is started in it,
-              # so by the time the leader is known.
-              name = session_of("demo")
-              leaf = f"{CG}/demo/{name}/sandbox"
-              limit = machine.succeed(f"cat {leaf}/memory.max").strip()
-              assert limit == str(1024 * 1024 * 1024), limit
-              tasks = machine.succeed(f"cat {leaf}/pids.max").strip()
-              assert tasks == "512", tasks
-              # And nothing of that session survives it, which the subtests
-              # after this one assume.
-              machine.wait_until_succeeds(NO_SESSIONS)
-              machine.succeed(NO_SESSION_CGROUPS)
-          else:
-              limit = machine.wait_until_succeeds(
-                  "cat /sys/fs/cgroup/machine.slice/demo-*.scope/memory.max").strip()
-              assert limit == str(1024 * 1024 * 1024), limit
-              scope = machine.succeed(
-                  "basename /sys/fs/cgroup/machine.slice/demo-*.scope").strip()
-              props = machine.succeed(
-                  f"systemctl show {scope} -p TasksMax -p MemoryZSwapWriteback -p IPAddressDeny")
-              assert "TasksMax=512" in props, props
-              assert "MemoryZSwapWriteback=no" in props, props
-              # A set to systemd, so shown in whatever order it keeps.
-              deny = next(l for l in props.splitlines() if l.startswith("IPAddressDeny="))
-              assert sorted(deny.split("=", 1)[1].split()) == ["192.0.2.1/32", "192.0.2.2/32"], props
-              # And nothing of that session survives it, which the subtests after
-              # this one assume.
-              machine.wait_until_succeeds("test -z \"$(find /run/flong -maxdepth 2 -name 's-*')\"")
+          # Written into the sandbox leaf before bwrap is started in it,
+          # so by the time the leader is known.
+          name = session_of("demo")
+          leaf = f"{CG}/demo/{name}/sandbox"
+          limit = machine.succeed(f"cat {leaf}/memory.max").strip()
+          assert limit == str(1024 * 1024 * 1024), limit
+          tasks = machine.succeed(f"cat {leaf}/pids.max").strip()
+          assert tasks == "512", tasks
+          # And nothing of that session survives it, which the subtests
+          # after this one assume.
+          machine.wait_until_succeeds(NO_SESSIONS)
+          machine.succeed(NO_SESSION_CGROUPS)
 
-      # unix-export is nspawn's, and a rootless session's name is held only by
-      # its record, which every sweep releases.
-      if not ROOTLESS:
-          with subtest("a SIGKILLed session's machine name can be used again"):
-              # nspawn mounts a tmpfs at /run/systemd/nspawn/<machine>/unix-export
-              # and removes it on the way out. A SIGKILL leaves it, and nspawn
-              # refuses to start a machine of that name over it -- so what the
-              # sweep unmounts has to be the path nspawn actually used, which is
-              # not the one it used before systemd 257.
-              name = start_session("sleep 300")
-              machine.wait_until_succeeds(f"mountpoint -q /run/systemd/nspawn/{name}/unix-export")
-              # The launcher first and with SIGKILL, so no trap runs, and then the
-              # scope, which is what actually holds nspawn: the order matters,
-              # because a launcher that outlives its scope cleans up after it.
-              machine.succeed(f"kill -9 {launcher_pid(name)}")
-              machine.succeed(f"systemctl kill -s KILL {name}.scope")
-              machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
-              machine.succeed(f"mountpoint -q /run/systemd/nspawn/{name}/unix-export")
+      # A session does not outlive its launcher, and a lock still held means
+      # the session is not the sweep's, whatever else the sweep sees.
+      with subtest("a SIGKILLed launcher takes its payload with it"):
+          name = start_session("sleep 300")
+          leader = leader_of(name)
+          machine.succeed(f"kill -9 {launcher_pid(name)}")
+          machine.wait_until_fails(f"test -d /proc/{leader}")
+          # And the holder's sweeper releases what it left.
+          machine.wait_until_fails(f"test -e {CG}/demo/{name}")
+          machine.wait_until_fails(f"test -e {STATE}/sessions/{name}")
 
-              # A root of its own to start over, because the prepared one is shared
-              # with every later subtest and nspawn writes to the tree it is given.
-              machine.succeed("cp -a $(echo /run/flong/demo-*/prepared) /tmp/reuse-root")
-              reuse = (f"systemd-nspawn -q --machine={name} --directory=/tmp/reuse-root"
-                       " --bind-ro=/nix/store --bind-ro=/nix/var/nix/db"
-                       " ${closure}/sw/bin/true")
-              # The failure this is really about, so the sweep below is not proving
-              # something that would have worked anyway.
-              err = machine.fail(f"{reuse} 2>&1")
-              assert "exists already" in err, err
-
-              # An unrelated launch is where the sweep runs.
-              machine.succeed("${launcher} 'true'")
-              machine.fail(f"test -e /run/systemd/nspawn/{name}")
-              machine.succeed(reuse)
-              machine.succeed("rm -rf /tmp/reuse-root")
-
-      if ROOTLESS:
-          # nspawn's session outlives a killed launcher in its scope, and the
-          # sweep had to leave it. A rootless session does not outlive its
-          # launcher, so what is left to hold is the other half: a lock still
-          # held means the session is not the sweep's, whatever else it sees.
-          with subtest("a SIGKILLed launcher takes its payload with it"):
-              name = start_session("sleep 300")
-              leader = leader_of(name)
-              machine.succeed(f"kill -9 {launcher_pid(name)}")
+      with subtest("the sweep never releases a session whose lock is held"):
+          # The launcher is stopped, so it holds its record's lock and
+          # reacts to nothing, and the session's pid 1 is killed: half of
+          # what makes a session dead, and not the half that is the lock.
+          # A launch sweeps and the sweeper is running, and neither may
+          # touch it. The launcher, let go, releases its session itself.
+          machine.succeed("rm -f /tmp/stopped")
+          machine.succeed(by_caller("${hooked} 'sleep 300'") + " >/dev/null 2>&1 &")
+          name = session_of("netless")
+          leader = leader_of(name)
+          machine.wait_until_succeeds(f"test -S /tmp/hook-sock-{name}")
+          machine.succeed(f"kill -STOP {launcher_pid(name)}")
+          try:
+              machine.succeed(f"kill -9 {leader}")
               machine.wait_until_fails(f"test -d /proc/{leader}")
-              # And the holder's sweeper releases what it left.
-              machine.wait_until_fails(f"test -e {CG}/demo/{name}")
-              machine.wait_until_fails(f"test -e {STATE}/sessions/{name}")
-
-          with subtest("the sweep never releases a session whose lock is held"):
-              # The launcher is stopped, so it holds its record's lock and
-              # reacts to nothing, and the session's pid 1 is killed: half of
-              # what makes a session dead, and not the half that is the lock.
-              # A launch sweeps and the sweeper is running, and neither may
-              # touch it. The launcher, let go, releases its session itself.
-              machine.succeed("rm -f /tmp/stopped")
-              machine.succeed(by_caller("${hooked} 'sleep 300'") + " >/dev/null 2>&1 &")
-              name = session_of("netless")
-              leader = leader_of(name)
-              machine.wait_until_succeeds(f"test -S /tmp/hook-sock-{name}")
-              machine.succeed(f"kill -STOP {launcher_pid(name)}")
-              try:
-                  machine.succeed(f"kill -9 {leader}")
-                  machine.wait_until_fails(f"test -d /proc/{leader}")
-                  machine.succeed(by_caller("${netless} 'true'"))
-                  machine.succeed(f"test -e {STATE}/sessions/{name}")
-                  machine.succeed(f"test -d {CG}/netless/{name}")
-                  machine.succeed(f"pgrep -f hook-sock-{name}")
-                  machine.fail("test -e /tmp/stopped")
-              finally:
-                  machine.succeed(f"kill -CONT {launcher_pid(name)}")
-              machine.wait_until_fails(f"test -d /proc/{launcher_pid(name)}")
-              assert machine.succeed("cat /tmp/stopped").split() == [name], \
-                  machine.succeed("cat /tmp/stopped")
-              machine.fail(f"test -e {STATE}/sessions/{name}")
-              machine.fail(f"test -e {CG}/netless/{name}")
-      else:
-          with subtest("the sweep leaves a session whose launcher was killed but whose container is alive"):
-              # `systemd-run --scope` makes the workload a child of the SCOPE, so
-              # SIGKILLing the launcher leaves the scope active, nspawn alive and
-              # the payload running. The sweep read /proc for the launcher pid in
-              # the session's name, called that dead, and deleted the root of a
-              # session that was still using it.
-              name = start_session("sleep 300")
-              machine.succeed(f"kill -9 {launcher_pid(name)}")
-              machine.wait_until_fails(f"test -d /proc/{launcher_pid(name)}")
-              machine.succeed("${launcher} 'true'")
-              machine.succeed(f"ls -d /run/flong/demo-*/s-{name}")
-              machine.succeed(f"systemctl is-active --quiet {name}.scope")
-              machine.succeed(f"machinectl show {name} >/dev/null")
-
-              # And once nothing owns it either, the next launch does take it --
-              # or a killed launcher would leave a root nothing ever reclaims.
-              machine.succeed(f"systemctl kill -s KILL {name}.scope")
-              machine.wait_until_fails(f"machinectl show {name} >/dev/null 2>&1")
-              machine.succeed("${launcher} 'true'")
-              machine.fail(f"ls -d /run/flong/demo-*/s-{name}")
+              machine.succeed(by_caller("${netless} 'true'"))
+              machine.succeed(f"test -e {STATE}/sessions/{name}")
+              machine.succeed(f"test -d {CG}/netless/{name}")
+              machine.succeed(f"pgrep -f hook-sock-{name}")
+              machine.fail("test -e /tmp/stopped")
+          finally:
+              machine.succeed(f"kill -CONT {launcher_pid(name)}")
+          machine.wait_until_fails(f"test -d /proc/{launcher_pid(name)}")
+          assert machine.succeed("cat /tmp/stopped").split() == [name], \
+              machine.succeed("cat /tmp/stopped")
+          machine.fail(f"test -e {STATE}/sessions/{name}")
+          machine.fail(f"test -e {CG}/netless/{name}")
 
       with subtest("a leftover from a superseded closure is swept"):
           # The cache is keyed on the closure hash, so a nixos-rebuild strands
-          # the previous generation's cache in a directory the old sweep --
-          # this launch's own s-* and nothing else -- never looked at again.
-          if ROOTLESS:
-              # A cache is swept by the next cold launch of the same container
-              # with the same maps, so this one's is removed first. The stale
-              # root is owned by container root, a subordinate id, as a real
-              # one is, which the caller can remove only through the user
-              # namespace that maps it. Its cache directory is the caller's.
-              key = "1000.100.100000.100000.100"
-              machine.succeed(f"rm -rf {STATE}/demo-*-*-{key}")
-              stale = f"{STATE}/demo-00000000-00000000-{key}"
-              machine.succeed(f"mkdir -p {stale}/prepared/var/empty && touch {stale}/prepared/var/empty/file")
-              machine.succeed(f"chown -R 100000:100000 {stale}/prepared && chown 1000:100 {stale}")
-              machine.fail(by_caller(f"rm -rf {stale}/prepared 2>/dev/null"))
+          # the previous generation's cache in a directory nothing of the new
+          # generation would look at again unless the sweep does. A cache is
+          # swept by the next cold launch of the same container
+          # with the same maps, so this one's is removed first. The stale
+          # root is owned by container root, a subordinate id, as a real
+          # one is, which the caller can remove only through the user
+          # namespace that maps it. Its cache directory is the caller's.
+          key = "1000.100.100000.100000.100"
+          machine.succeed(f"rm -rf {STATE}/demo-*-*-{key}")
+          stale = f"{STATE}/demo-00000000-00000000-{key}"
+          machine.succeed(f"mkdir -p {stale}/prepared/var/empty && touch {stale}/prepared/var/empty/file")
+          machine.succeed(f"chown -R 100000:100000 {stale}/prepared && chown 1000:100 {stale}")
+          machine.fail(by_caller(f"rm -rf {stale}/prepared 2>/dev/null"))
 
-              # A container whose name begins with this one's, which the sweep must
-              # not touch: both hashes are spelt out so the glob cannot reach it.
-              neighbour = f"{STATE}/demo-two-00000000-00000000-{key}"
-              machine.succeed(f"mkdir -p {neighbour}/prepared && chown -R 1000:100 {neighbour}")
-          else:
-              # The fixture is spelt like a real cache: a prepared root carrying
-              # the immutable directory tmpfiles leaves behind, and a session whose
-              # owner pid is one greater than the greatest the kernel will hand
-              # out, so /proc can never hold it and it is unambiguously dead.
-              dead = machine.succeed("cat /proc/sys/kernel/pid_max").strip()
-              stale = "/run/flong/demo-00000000-00000000"
-              machine.succeed(f"mkdir -p {stale}/prepared/var/empty {stale}/s-demo-{dead}-1")
-              machine.succeed(f"chattr +i {stale}/prepared/var/empty")
-
-              # A container whose name begins with this one's, which the sweep must
-              # not touch: both hashes are spelt out so the glob cannot reach it.
-              neighbour = "/run/flong/demo-two-00000000-00000000"
-              machine.succeed(f"mkdir -p {neighbour}/prepared")
+          # A container whose name begins with this one's, which the sweep must
+          # not touch: both hashes are spelt out so the glob cannot reach it.
+          neighbour = f"{STATE}/demo-two-00000000-00000000-{key}"
+          machine.succeed(f"mkdir -p {neighbour}/prepared && chown -R 1000:100 {neighbour}")
 
           machine.succeed(by_caller("${launcher} 'true'"))
           machine.fail(f"test -e {stale}")
@@ -1580,13 +1238,6 @@ in
           machine.succeed(f"rm -rf {neighbour}")
           # The cache this launch actually uses is not swept with it.
           machine.succeed(f"test -e {PREPARED}/etc/passwd")
-
-      # The rootless engine refuses a user the container does not have at
-      # evaluation, which checks.assertions covers.
-      if not ROOTLESS:
-          with subtest("a user the container does not have is refused"):
-              err = machine.fail("${badUsername} 2>&1")
-              assert "absent is not a user in containers.demo" in err, err
 
       with subtest("the identity comes from the container, not from the module"):
           # Nothing declares 1000, 100 or /home/alice to flong: they are read
@@ -1643,9 +1294,8 @@ in
           assert out.splitlines() == ["/srv/companion:rw", "/srv/reference:ro"], out
 
       with subtest("a bind naming ':' is refused, like a workspace"):
-          # Each engine words it its own way, and names the bind.
           err = machine.fail(by_caller("${badBinds} 2>&1"))
-          assert ("bind contains ':'" if ROOTLESS else "bind names") in err, err
+          assert "bind contains ':'" in err, err
 
       with subtest("a bind snippet that fails aborts the launch"):
           machine.fail(by_caller("${failingBinds}"))
@@ -1661,40 +1311,26 @@ in
           machine.succeed(by_caller("${launcher} 'exit 0'"))
           machine.fail(by_caller("${launcher} 'exit 3'"))
 
-      if ROOTLESS:
-          # The sudo grant is nspawn's. Under rootless the launcher is the
-          # caller's own program, and the host has no sudo to grant it with.
-          with subtest("an unprivileged user runs the launcher with no sudo rule"):
-              machine.fail("test -e /run/wrappers/bin/sudo")
-              out = machine.succeed(by_caller("${launcher} 'id -un'"))
-              assert "alice" in out, out
-      else:
-          with subtest("an unprivileged user can be granted the launcher"):
-              out = machine.succeed("sudo -u alice sudo -n ${launcher} 'id -un'")
-              assert "alice" in out, out
+      # The launcher is the caller's own program, and the host has no sudo
+      # to grant it with.
+      with subtest("an unprivileged user runs the launcher with no sudo rule"):
+          machine.fail("test -e /run/wrappers/bin/sudo")
+          out = machine.succeed(by_caller("${launcher} 'id -un'"))
+          assert "alice" in out, out
 
       with subtest("workspace is evaluated as the invoking user, not as root"):
-          # The line above was alice's, through sudo or her own manager.
+          # The line above was alice's, through her own manager.
           uid = machine.succeed("cat /tmp/workspace-uid").strip()
           assert uid == "1000", f"workspace ran as uid {uid}, expected alice"
 
-      if ROOTLESS:
-          # nspawn falls back to root when there is no caller. The rootless
-          # engine has no root phase to fall back to, and root no subordinate
-          # range.
-          with subtest("the launcher refuses to run as root"):
-              machine.succeed("echo untouched > /tmp/workspace-args")
-              err = machine.fail("${launcher} 'true' 2>&1")
-              assert "refusing to run as root" in err, err
-              # Refused before the workspace snippet ran.
-              assert machine.succeed("cat /tmp/workspace-args").strip() == "untouched"
-      else:
-          with subtest("workspace falls back to root when there is no caller"):
-              # Invoked straight from the test's root shell: no SUDO_UID to drop
-              # to, so root is the only identity available and the launch stands.
-              machine.succeed("${launcher} 'true'")
-              uid = machine.succeed("cat /tmp/workspace-uid").strip()
-              assert uid == "0", f"workspace ran as uid {uid}, expected root"
+      # There is no root phase to fall back to, and root has no subordinate
+      # range.
+      with subtest("the launcher refuses to run as root"):
+          machine.succeed("echo untouched > /tmp/workspace-args")
+          err = machine.fail("${launcher} 'true' 2>&1")
+          assert "refusing to run as root" in err, err
+          # Refused before the workspace snippet ran.
+          assert machine.succeed("cat /tmp/workspace-args").strip() == "untouched"
 
       with subtest("guard runs after workspace and sees the resolved path"):
           # The guard above refuses unless $workspace is already resolved, so
@@ -1713,20 +1349,11 @@ in
           out = machine.succeed(by_caller("${guardReassign} 'pwd; test -e /srv/reference && echo reference-bound || true'"))
           assert out.split() == ["/srv/work"], out
 
-      with subtest("workspace sees the launcher's arguments" if ROOTLESS
-                   else "workspace sees the launcher's arguments, caller or not"):
-          if ROOTLESS:
-              machine.succeed(by_caller("${launcher} 'true'"))
-              assert machine.succeed("cat /tmp/workspace-args").strip() == "true"
-              machine.succeed(by_caller("${launcher} 'false || true'"))
-              assert machine.succeed("cat /tmp/workspace-args").strip() == "false || true"
-          else:
-              machine.succeed("sudo -u alice sudo -n ${launcher} 'true'")
-              assert machine.succeed("cat /tmp/workspace-args").strip() == "true"
-              # The root fallback takes a different code path to reach the same
-              # snippet, and used to disagree with it about "$@".
-              machine.succeed("${launcher} 'false || true'")
-              assert machine.succeed("cat /tmp/workspace-args").strip() == "false || true"
+      with subtest("workspace sees the launcher's arguments"):
+          machine.succeed(by_caller("${launcher} 'true'"))
+          assert machine.succeed("cat /tmp/workspace-args").strip() == "true"
+          machine.succeed(by_caller("${launcher} 'false || true'"))
+          assert machine.succeed("cat /tmp/workspace-args").strip() == "false || true"
 
       with subtest("a workspace naming a colon is refused, not mounted"):
           machine.succeed("test -d '/srv/odd:name'")
@@ -1779,32 +1406,17 @@ in
           assert out.split()[:2] == ["alice", "alice"], out
           assert "wrote" in out, out
           assert "through-the-tmpfs" in out, out
-          # Outside home, as ever: the tmpfs mask's parents, /srv, root's --
-          # under rootless container root's, which the session sees as root.
+          # Outside home, as ever: the tmpfs mask's parents, /srv, container
+          # root's, which the session sees as root.
           assert machine.succeed(by_caller("${launcher} 'stat -c %U /srv'")).strip() == "root"
 
       with subtest("nothing is left behind"):
-          if ROOTLESS:
-              # No record, no session's cgroup, and no pasta. Nothing of a
-              # rootless session is anywhere else: its root was an overlay
-              # in its own mount namespace.
-              machine.succeed(NO_SESSIONS)
-              machine.succeed(NO_SESSION_CGROUPS)
-              machine.fail(pasta_for())
-          else:
-              # Session roots, and the record beside each of which postStop is
-              # the session's.
-              machine.succeed("test -z \"$(find /run/flong -maxdepth 2 \\( -name 's-*' -o -name 'poststop-*' \\) 2>/dev/null)\"")
-              # nspawn's own leftovers, at the paths it actually uses: a directory
-              # per machine holding the unix-export tmpfs, and the mount tunnel
-              # under propagate/<machine>.
-              # A killed session leaves a directory named for its machine here,
-              # holding the unix-export tmpfs, and a mount tunnel under
-              # propagate/. A machine name is <container>-<pid>-<random>, which is
-              # what tells one from `locks` and `propagate` -- nspawn's own two,
-              # which outlive every session.
-              machine.succeed("test -z \"$(ls -d /run/systemd/nspawn/*-*-* 2>/dev/null)\"")
-              machine.succeed("test -z \"$(ls -A /run/systemd/nspawn/propagate)\"")
+          # No record, no session's cgroup, and no pasta. Nothing of a
+          # session is anywhere else: its root was an overlay
+          # in its own mount namespace.
+          machine.succeed(NO_SESSIONS)
+          machine.succeed(NO_SESSION_CGROUPS)
+          machine.fail(pasta_for())
 
       with subtest("the prepared root is reused rather than rebuilt"):
           before = machine.succeed(f"stat -c %Y {PREPARED}").strip()
@@ -1817,12 +1429,9 @@ in
           # build, so the directory has to stop matching when prepare changes.
           # Nothing in one VM run can change prepare and look again, so what is
           # checked is that the name carries a second hash at all -- which is
-          # what a revert to keying on the closure alone would lose. Under
-          # rootless it carries the maps too, which decide the root's owners.
+          # what a revert to keying on the closure alone would lose. It
+          # carries the maps too, which decide the root's owners.
           name = machine.succeed(f"basename $(dirname {PREPARED})").strip()
-          if ROOTLESS:
-              assert re.fullmatch(r"demo-[a-z0-9]{8}-[a-z0-9]{8}-1000\.100\.100000\.100000\.100", name), name
-          else:
-              assert re.fullmatch(r"demo-[a-z0-9]{8}-[a-z0-9]{8}", name), name
+          assert re.fullmatch(r"demo-[a-z0-9]{8}-[a-z0-9]{8}-1000\.100\.100000\.100000\.100", name), name
     '';
 }
