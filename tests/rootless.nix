@@ -480,6 +480,13 @@ in
             plain '[ -t 0 ] && echo stdin-tty; ioctl-probe 0x5412; ioctl-probe 0x100005412; ioctl-probe 0x100005401' | cat
           ''} /dev/null | tr -d '\r'
         '')
+
+        # ptydrive SCENARIO [--stderr FILE] -- COMMAND: COMMAND on a pty of
+        # its own, the driver playing the caller's terminal and shell
+        # (tests/ptydrive.py says what each scenario does and prints). One
+        # file, so that checks.native's pty tests can run the same driver.
+        (pkgs.writers.writePython3Bin "ptydrive" { flakeIgnore = [ "E501" ]; }
+          (builtins.readFile ./ptydrive.py))
       ];
   };
 
@@ -976,6 +983,86 @@ in
             out = machine.succeed(as_user(f"interrupt {mode}"))
             # The terminal echoes the ^C in front of the status.
             assert any(l.endswith("launcher=130") for l in out.splitlines()), (mode, out)
+
+    with subtest("the terminal, relayed: the escape, a resize, the watchdog, SIGCONT, a hang-up, stderr"):
+        # ZIG.md's L0 tty characterization of the C (launcher/flong-tty.c),
+        # through ptydrive (tests/ptydrive.py): plain as the foreground job
+        # of a pty of its own, the terminal on stdin and stdout, so the
+        # launcher relays; the driver is the caller's terminal and shell.
+        # Each run's lines are compared whole, after its pid= line.
+        def drive(scenario, payload, stderr=None):
+            opt = f"--stderr {stderr} " if stderr else ""
+            out = machine.succeed(as_user(f"ptydrive {scenario} {opt}-- plain {shlex.quote(payload)}"))
+            lines = out.splitlines()
+            assert lines[0].startswith("pid="), (scenario, out)
+            return lines[0].removeprefix("pid="), lines[1:]
+
+        # A payload that waits for a line, and says 7 when it has one.
+        READ = "echo ready; read -r l; exit 7"
+
+        # ^]^]^] kills the session, and the launcher reports it as the
+        # kill's 137 (:33-36, 479-486). The control: a ^] run that another
+        # key breaks reaches the payload as input, every byte of it (:478),
+        # which the payload's 7 says.
+        _, lines = drive("keys", "echo ready; read -r l; [ \"$l\" = \"$(printf '\\035\\035x\\035')\" ] && exit 7; exit 8")
+        assert lines == ["status=7"], lines
+        _, lines = drive("escape", READ)
+        assert lines == ["status=137"], lines
+
+        # The window size is copied at the start, 30x100 (:192-195), and a
+        # resize of the caller's terminal reaches the payload's (:276-282,
+        # 427-428).
+        _, lines = drive("resize", "echo ready; stty size; read -r l; stty size; exit 7")
+        assert lines == ["size=30 100", "size=40 120", "status=7"], lines
+
+        # A SIGKILLed launcher leaves the terminal raw, and the watchdog puts
+        # the caller's modes back (:243-259, 293-321): `stty -g` is what it
+        # was before the launch. raw=yes is the control that the relay had
+        # changed them. The session is the sweeper's then.
+        # The watchdog holds the caller's terminal as 0-2, its pipe's read
+        # end and the leader's pidfd, and nothing else (:299-303; ZIG.md
+        # checkpoint 8).
+        pid, lines = drive("watchdog", "echo ready; sleep infinity")
+        assert lines == ["guard=0:tty 1:tty 2:tty pidfd pipe", "raw=yes", "status=137", "restored=yes"], lines
+        machine.wait_until_succeeds(f"! ls -d {CG}/box/box-{pid}-* {STATE}/sessions/box-{pid}-*")
+
+        # With no terminal on stdin there is no watchdog (:286-288); the
+        # guard= line above is the control that one would be found by its
+        # name.
+        start("plain", "echo ready; sleep infinity", "noguard")
+        name = machine.wait_until_succeeds("session-of box").strip()
+        machine.wait_until_succeeds("grep -qx ready /tmp/out-noguard")
+        machine.fail(f"pgrep -P {launcher_pid(name)} -x flong-ttyguard")
+        stop(name, "noguard")
+
+        # The caller's shell restores its own modes while the launcher is
+        # stopped; SIGCONT makes the terminal raw again (:429-433). The relay
+        # still carries input after it, and a clean end restores the modes
+        # itself (:515-521).
+        _, lines = drive("sigcont", READ)
+        assert lines == ["raw=yes", "stopped=yes", "raw=no", "raw=yes", "status=7", "restored=yes"], lines
+
+        # The caller's terminal hangs up: stdin reads EOF, the launcher
+        # closes the master (:487-491), and the payload's sleep ends on the
+        # hang-up's SIGHUP, 129, rather than running on. The driver's
+        # stand-in shell sends the launcher no SIGHUP, which would end the
+        # session on its own (:425-426).
+        _, lines = drive("hangup", "echo ready; sleep infinity")
+        assert lines == ["status=129"], lines
+
+        # A redirected stderr stays where the caller sent it, in relay too
+        # (:206-207, ZIG.md quirk 43): the payload's goes to the file, not
+        # to the terminal, and nothing else does. The control: with stderr
+        # on the terminal, it is relayed with stdout.
+        OUT = "echo ready; read -r l; echo out; echo err >&2; [ -t 2 ] && echo err-tty || echo err-file"
+        _, lines = drive("output", OUT)
+        assert lines == ["line=out", "line=err", "line=err-tty", "status=0"], lines
+        machine.succeed("rm -f /tmp/ptydrive-err")
+        _, lines = drive("output", OUT, "/tmp/ptydrive-err")
+        assert lines == ["line=out", "line=err-file", "status=0"], lines
+        err = machine.succeed("cat /tmp/ptydrive-err")
+        assert err == "err\n", err
+        machine.succeed("rm /tmp/ptydrive-err")
 
     with subtest("log = true allows and logs, and what it logs is a policy"):
         since = machine.succeed("date +%s").strip()

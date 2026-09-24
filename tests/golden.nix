@@ -55,7 +55,8 @@
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:11-20
 # does; seccomp is the program the seccomp sets run against, launcher the
-# output whose bin/flong-init the init set does.
+# output whose flong-init, flong-sweeper and flong-launch the init, sweeper
+# and spec sets do.
 {
   pkgs ?
     let
@@ -159,6 +160,40 @@ let
     # sweeper.zig, phase 5).
     sweeper = sweeperSet "${launcher}/bin/flong-sweeper";
 
+    # Recorded from the C of 2026-09-24 (launcher/flong-spec.c:417-708,
+    # through flong-launch's main, flong-launch.c:880-881): every refusal of
+    # the spec but root's (:423, which needs uid 0; rootless.nix:629-642 has
+    # it) and the two ENOMEMs no input reaches (:465-468, 697-700), all made
+    # before anything needs a privilege. Pass 1's shape (:425-444), each
+    # keyword in turn (unknown, too few fields or a mount's kind, given
+    # twice), then no "--", an empty command and each required keyword
+    # missing; pass1-first, fields-before-separator and separator-as-field
+    # show the passes' order and a field's "--" as its value, pass1-in-order
+    # that pass 1 goes left to right. Pass 2's field checks (:469-674), one
+    # field of the valid spec below changed or a keyword added, with each
+    # field's edges (signs, spaces, hex, ID_MAX and INT_MAX and past them,
+    # NAME_MAX, PATH_MAX); pass2-* show it goes left to right and before the
+    # cross checks, and order-* that a keyword's own checks keep their order
+    # (two faults in one keyword, the first checked named). The cross
+    # checks and bwrap_allowed (:359-415, 676-708): cross-order-N breaks
+    # the Nth of them and every one after it, so they keep their order,
+    # and accepted-all passes every check but the last, every keyword
+    # given, each at an edge that passes. A keep-fd is the
+    # case's own descriptor (NAME.redirect), open or not by F_GETFD
+    # (:656-667). An unknown keyword's message at 1023 bytes whole, one byte
+    # over and cut, and over 1 KiB (ZIG.md quirk 22). The valid spec: machine
+    # m, container c, state /state, cache /cache, closure CLOSURE, uidmap and
+    # gidmap 0 100000 65536, user 1000 100 /home/u, holder flong.slice/s, --
+    # /bin/true. CLOSURE is a store directory, LEADSOUT a store path that is a
+    # symlink to /, which realpath resolves out of the store (:245-256).
+    spec = {
+      program = "${launcher}/bin/flong-launch";
+      vars = {
+        CLOSURE = "${launcher}";
+        LEADSOUT = "${leadsOut}";
+      };
+    };
+
     # The subcommands' usage errors, the one text phase 2 (a) changed
     # (quirk 38): rewritten from the bash's then, and expand's added.
     tooling-usage = {
@@ -168,6 +203,9 @@ let
       };
     };
   };
+
+  # The spec set's closure that leads out of the store.
+  leadsOut = pkgs.runCommand "golden-spec-leads-out" { } "ln -s / $out";
 
   sweeperSet = program: {
     inherit program;

@@ -1,0 +1,1 @@
+flong-launch: spec: bwrap-arg: 'A=B' is not a variable name

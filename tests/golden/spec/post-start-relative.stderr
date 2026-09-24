@@ -1,0 +1,1 @@
+flong-launch: spec: post-start's program is not an absolute path: './hook'

@@ -416,6 +416,30 @@ in
       command = [ "bash" "-c" ];
     };
 
+    # Hooks that list what they hold. The launcher spawns postStart
+    # (flong-launch.c:586-609) and postStop (flong-record.c:436-466) through
+    # fl_spawn, whose child marks everything above 2 close-on-exec
+    # (flong-util.c:435-438) and keeps nothing (.nkeep = 0), so the hook's
+    # ls sees 0-2 and its own directory, 3. The control lists again with a
+    # descriptor the hook opened itself, as one the launcher leaked would
+    # be: held by the hook's bash across the exec of ls.
+    flong.hookfds = {
+      container = "netless";
+      user = "alice";
+      workspace = ''realpath /srv/work'';
+      postStart = ''
+        ls /proc/self/fd > /tmp/hookfds-poststart
+        exec 7</dev/null
+        ls /proc/self/fd > /tmp/hookfds-poststart-control
+      '';
+      postStop = ''
+        ls /proc/self/fd > /tmp/hookfds-poststop
+        exec 7</dev/null
+        ls /proc/self/fd > /tmp/hookfds-poststop-control
+      '';
+      command = [ "bash" "-c" ];
+    };
+
     # A hook that refuses. The payload would outlive the launcher if nothing
     # killed it, which is exactly what must not happen to a session whose hook
     # never finished.
@@ -634,6 +658,7 @@ in
       hooked = exe "hooked";
       recorded = exe "recorded";
       badHook = exe "badhook";
+      hookFds = exe "hookfds";
       argv = exe "argv";
       userPath = exe "userpath";
       networked = exe "networked";
@@ -1032,6 +1057,18 @@ in
               machine.fail(f"test -e {CG}/netless/{name}")
           finally:
               machine.succeed(f"kill -CONT {paused}")
+
+      with subtest("postStart and postStop inherit descriptors 0-2 and nothing else"):
+          # Each hook's ls lists 0-2 and the directory it reads, 3; its
+          # control, with 7 opened by the hook, shows that a descriptor the
+          # hook was handed would be listed too.
+          machine.succeed("rm -f /tmp/hookfds-*")
+          machine.succeed(by_caller("${hookFds} 'true'"))
+          for hook in ("poststart", "poststop"):
+              out = machine.succeed(f"cat /tmp/hookfds-{hook}")
+              assert out.split() == ["0", "1", "2", "3"], (hook, out)
+              out = machine.succeed(f"cat /tmp/hookfds-{hook}-control")
+              assert out.split() == ["0", "1", "2", "3", "7"], (hook, out)
 
       # Listeners on the host's loopback, each answering with its own port so a
       # reply cannot be mistaken for another's. A banner and not a bare connect:

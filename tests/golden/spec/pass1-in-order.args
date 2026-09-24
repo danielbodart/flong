@@ -1,0 +1,7 @@
+machine
+a
+machine
+b
+frob
+--
+/bin/true

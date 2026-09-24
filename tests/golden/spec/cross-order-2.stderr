@@ -1,0 +1,1 @@
+flong-launch: spec: gidmap extents 0 100000 65536 and 1000 300000 1 overlap
