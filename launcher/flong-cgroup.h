@@ -58,7 +58,9 @@ int cg_holder_find(struct fl_holder *h, const char *rel,
 		   const struct fl_argv *start_argv, int have_limits);
 
 /* The sweeper's holder: the parent of its own cgroup, since the holder unit
- * runs it in its DelegateSubgroup=supervisor leaf. Returns 0 or -1. */
+ * runs it in its DelegateSubgroup=supervisor leaf. Returns 0 or -1.
+ * Nothing calls it since the C sweeper was deleted (ZIG.md, phase 5 (b)):
+ * src/cgroup.zig's `holderSelf` is the one the sweeper runs. */
 int cg_holder_self(struct fl_holder *h);
 
 enum fl_leaf { FL_LEAF_SANDBOX, FL_LEAF_HOOKS, FL_LEAF_PASTA, FL_NLEAVES };

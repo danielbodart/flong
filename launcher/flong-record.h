@@ -124,7 +124,9 @@ int rec_sweep(int sessions_fd, const struct fl_holder *h);
  * tries it once. A close under a record's name is a sweep's own writable
  * open and is never waited on. After IN_Q_OVERFLOW, when such a close may
  * have been dropped, the sweep waits for the lock of every record whose
- * pid 1 has exited. Returns only on error (-1). */
+ * pid 1 has exited. Returns only on error (-1). Nothing calls it since the
+ * C sweeper was deleted (ZIG.md, phase 5 (b)): src/record.zig's `watch` is
+ * the one the sweeper runs. */
 int rec_watch(int sessions_fd, const struct fl_holder *h);
 
 #endif

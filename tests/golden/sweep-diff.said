@@ -1,0 +1,41 @@
+flong-sweeper: the record of bad-leader is removed: its leader= is not <pid>:<starttime>
+flong-sweeper: read the record of bad-big: File too large
+flong-sweeper: the record s-machine does not name a session's cgroup: CG/h/c/someone-else
+flong-sweeper: the record of s-machine is removed: its cgroup is refused
+flong-sweeper: postStop failed for s-absent (status 143)
+flong-sweeper: the record of bad-nul is removed: it is not lines of text
+flong-sweeper: postStop failed for ps-dotdot: /nix/store/../tmp/ps-outside is not a program in /nix/store
+flong-sweeper: the record of bad-nonl is removed: it is not lines of text
+flong-sweeper: postStop failed for s-noleader (status 3)
+flong-sweeper: postStop failed for ps-deep (status 3)
+flong-sweeper: the record of bad-novalue is removed: a path in it is empty or too long
+flong-sweeper: the record of bad-twice is removed: it has an unknown, repeated or misplaced line
+flong-sweeper: the record s-dotdot does not name a session's cgroup: CG/h/../h/c/s-dotdot
+flong-sweeper: the record of s-dotdot is removed: its cgroup is refused
+flong-sweeper: postStop failed for ps-missing: /nix/store/nothing-here is not a program in /nix/store
+flong-sweeper: the record of bad-unknown is removed: it has an unknown, repeated or misplaced line
+flong-sweeper: open the record of unreadable: Permission denied
+flong-sweeper: the record of bad-order is removed: it has an unknown, repeated or misplaced line
+flong-sweeper: the record of bad-empty is removed: it has no cgroup=
+flong-sweeper: the record s-longcg does not name a session's cgroup: /sys/fs/cgroup/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+flong-sweeper: the record of s-longcg is removed: its cgroup is refused
+flong-sweeper: the record s-outside does not name a session's cgroup: /tmp/h/c/s-outside
+flong-sweeper: the record of s-outside is removed: its cgroup is refused
+flong-sweeper: postStop failed for ps-noexec: @PSNOEXEC@ is not a program in /nix/store
+flong-sweeper: the record of bad-leader2 is removed: its leader= is not <pid>:<starttime>
+flong-sweeper: the record s-container does not name a session's cgroup: CG/h/.c/s-container
+flong-sweeper: the record of s-container is removed: its cgroup is refused
+flong-sweeper: postStop failed for ps-symout: @PSOUT@ is not a program in /nix/store
+flong-sweeper: the record of bad-longpath is removed: a path in it is empty or too long
+flong-sweeper: exec @PSDIR@: Permission denied
+flong-sweeper: postStop failed for ps-dir (status 127)
+flong-sweeper: the record s-short does not name a session's cgroup: /sys/fs/cgroup/c/s-short
+flong-sweeper: the record of s-short is removed: its cgroup is refused
+flong-sweeper: postStop failed for ps-notstore: /tmp/ps-outside is not a program in /nix/store
+flong-sweeper: postStop failed for ps-long: /tmp/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+flong-sweeper: released 14 dead sessions
+flong-sweeper: read the record of bad-big: File too large
+flong-sweeper: open the record of unreadable: Permission denied
+flong-sweeper: read the record of bad-big: File too large
+flong-sweeper: open the record of unreadable: Permission denied
+flong-sweeper: released 1 dead session

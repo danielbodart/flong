@@ -67,8 +67,6 @@
     }) { },
   seccomp ? import ../seccomp { inherit pkgs; },
   launcher ? import ../launcher { inherit pkgs; },
-  # The C flong-sweeper, built for phase 5 (a)'s transition only.
-  sweeperC ? (import ../native.nix { inherit pkgs; }).sweeperC,
 }:
 let
   inherit (pkgs) lib;
@@ -144,8 +142,8 @@ let
       vars = { };
     };
 
-    # Recorded from the C of 2026-09-24 (launcher/flong-sweeper.c and
-    # flong-record.c:46-89's state_open, deleted in phase 5 b): the usage
+    # Recorded from the C of 2026-09-24 (launcher/flong-sweeper.c, deleted
+    # in phase 5 (b), and flong-record.c:46-89's state_open): the usage
     # line, then every refusal of the state directory and its sessions/
     # (the open, the owner and the mode, sessions/ made under the umask or
     # found as it is), in the order it makes them, and a message over 1 KiB
@@ -158,12 +156,8 @@ let
     # caller owns, and the holder's other refusals, which need a cgroup the
     # sandbox does not give. CALLER is the builder's uid, OWNER that of the
     # store directory GOLDEN. Run against the Zig flong-sweeper (src/
-    # sweeper.zig, phase 5), and, until phase 5 (b), against the C as
-    # `sweeper-c` (the transition).
+    # sweeper.zig, phase 5).
     sweeper = sweeperSet "${launcher}/bin/flong-sweeper";
-    sweeper-c = sweeperSet "${sweeperC}/bin/flong-sweeper" // {
-      dir = "sweeper";
-    };
 
     # The subcommands' usage errors, the one text phase 2 (a) changed
     # (quirk 38): rewritten from the bash's then, and expand's added.
@@ -318,20 +312,6 @@ let
             exit 1
           fi
         done
-
-        # The transition's two sides (ZIG.md, phase 5 (a)): the launcher's
-        # flong-sweeper is the Zig, static, which names no glibc symbol;
-        # the C's does. So each set ran what it says: the programs the two
-        # sets run are the ones tested, so a set pointed at the other's
-        # program fails here.
-        if grep -q GLIBC_ ${sets.sweeper.program}; then
-          echo "golden: the sweeper set's program is not the Zig one" >&2
-          exit 1
-        fi
-        if ! grep -q GLIBC_ ${sets.sweeper-c.program}; then
-          echo "golden: the sweeper-c set's program is not the C one" >&2
-          exit 1
-        fi
 
         failed=0
         mkdir -p $out

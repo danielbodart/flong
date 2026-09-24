@@ -1381,11 +1381,10 @@ does, when it is called and how it fails.
 | `flong-spec` | the input contract: argv into `struct fl_spec`, and every check that needs nothing but the spec |
 | `flong-ns` | U1 (newuidmap and newgidmap in parallel) and U2 (the split maps, `max_user_namespaces`) |
 | `flong-cgroup` | the nsdelegate check, finding or starting the holder, the session cgroup and its leaves, limits, kill, wait, remove |
-| `flong-record` | the state directory, the cache lock, records, liveness, the sweep, `postStop`, the sweeper's loop |
+| `flong-record` | the state directory, the cache lock, records, liveness, the sweep, `postStop`; the sweeper's loop, `rec_watch`, which nothing calls since `src/sweeper.zig` replaced the C sweeper |
 | `flong-mount.h` | the mount helper's job and its one call, `flong_mount_main`, which `flong-launch` makes in the forked child |
 | `flong-tty` | the foreground wait, the pty relay or passthrough, raw mode, the watchdog, `^]^]^]`, the wait for bwrap |
 | `flong-launch.c` | `main`: the order of a launch, bwrap's argv, the hook, pasta, the gate, the one teardown path, exit codes |
-| `flong-sweeper.c` | `main` of the holder unit's process, until `src/sweeper.zig` replaced it (built for `golden`'s transition only) |
 | `src/sweeper.zig` | `flong-sweeper`, the holder unit's process: the state directory, its holder, then `record.watch`; static, no libc, no allocator |
 | `src/record.zig`, `src/cgroup.zig`, `src/names.zig` | the sweep's half of `flong-record` and `flong-cgroup`, and names: the state directory, reading and releasing records, `postStop`, the watch; a record's session opened, killed, waited for and removed |
 | `src/proc.zig`, `src/sig.zig` | the process layer: `fork` (a `noreturn` body, the keep list), `Spawn`, `Child`, `lockWait`, starttime; the signal mask, the signalfd, `awaitFd` |

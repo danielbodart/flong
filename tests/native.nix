@@ -98,9 +98,8 @@ let
   # launcher writes and hostile ones, and the sessions they name under a
   # holder h of the calling unit's, runs PROGRAM as the holder's sweeper in
   # h/supervisor until it blocks in its inotify read, adds a record, lets it
-  # sweep that, stops it, and prints what it said and left. The C
-  # (native.nix's sweeperC) and the Zig print the same.
-  sweeperC = (import ../native.nix { pkgs = hostPkgs; }).sweeperC;
+  # sweep that, stops it, and prints what it said and left. Until phase 5
+  # (b) deleted the C sweeper, the C and the Zig printed the same.
   # postStop programs (flong-record.c:436-484): one that logs its argv,
   # environment, stdin and directory, one exiting 3, one killed by SIGTERM,
   # a store symlink out of the store and one into it, a file that is not
@@ -576,18 +575,26 @@ in
                        "killed", "empty", "removed: gone", "rc=0", "status=137", "status=137", "status=137",
                        "container remains", "opened: absent", "rc=0"], out
 
-    with subtest("sweeper: the C and the Zig sweep the same records alike"):
-        # sweep-diff (above) as alice, once with each sweeper; every line
-        # the same, and the fixture reached what it is for: sessions
-        # released, postStop run, each refusal said (controls against a
-        # vacuous equality, such as both stopping at the holder).
+    with subtest("sweeper: the records swept as the C swept them"):
+        # sweep-diff (above) as alice. Until phase 5 (b) it ran the C
+        # sweeper too, and every line was the same; what the C said is kept
+        # in tests/golden/sweep-diff.said (c9571be, store paths as @VAR@).
+        # The first sweep's lines come in sessions/'s readdir order, and
+        # the later sweeps' count in how inotify batches their events, so
+        # the first sweep is compared as a multiset and the rest as a set,
+        # each ending as the C's did. The controls below are against a
+        # vacuous run, such as one stopping at the holder.
         machine.succeed("${mkDeep}")
-        runs = {}
-        for name, prog in (("c", "${sweeperC}/bin/flong-sweeper"), ("zig", "${launcher}/bin/flong-sweeper")):
-            runs[name] = machine.succeed(as_alice(f"${sweepDiff} {prog} 2>&1"))
-            print(f"--- {name}\n" + runs[name])
-        assert runs["c"] == runs["zig"], "the sweepers differ"
-        out = runs["zig"]
+        out = machine.succeed(as_alice("${sweepDiff} ${launcher}/bin/flong-sweeper 2>&1"))
+        print(out)
+        golden = ${builtins.toJSON (builtins.readFile ./golden/sweep-diff.said)}
+        for var, path in (("@PSNOEXEC@", "${psNoexec}"), ("@PSOUT@", "${psOut}"), ("@PSDIR@", "${psDir}")):
+            golden = golden.replace(var, path)
+        def sweeps(said):
+            first, rest = said.split("flong-sweeper: released 14 dead sessions\n")
+            return sorted(first.splitlines()), set(rest.splitlines()), rest.splitlines()[-1]
+        said = out.split("== said\n")[1].split("== left\n")[0]
+        assert sweeps(said) == sweeps(golden), said
         assert "never blocked" not in out, out
         for want in ("== sweeper status 143", "== sleep status 137",
                      "flong-sweeper: released 1 dead session\n",
@@ -612,24 +619,23 @@ in
         assert "outside" not in out.split("== poststop")[1], out
 
     with subtest("sweeper: postStop once across a failed removal, and the watch before the first sweep"):
-        # sweep-order (above) as alice, with the C sweeper as the control
-        # the fixture is right, then the Zig. A sweep that skips the blank
-        # runs once's postStop twice; a watch added after the first sweep
-        # leaves late (checkpoint 11).
-        for name, prog in (("c", "${sweeperC}/bin/flong-sweeper"), ("zig", "${launcher}/bin/flong-sweeper")):
-            out = machine.succeed(as_alice(f"${sweepOrder} {prog} 2>&1"))
-            print(f"--- {name}\n" + out)
-            assert out.splitlines() == [
-                "gate entered: yes",
-                "late in the first sweep: left",
-                "late: released",
-                "once: blanked",
-                "ran: gated=1 once=1 late=0",
-                "once: released, cgroup gone",
-                "ran: gated=1 once=1 late=0",
-                "said:",
-                "flong-sweeper: released 1 dead session",
-                "flong-sweeper: rmdir H/c/once/sandbox/inner: Permission denied",
-            ], (name, out)
+        # sweep-order (above) as alice; the C sweeper, until phase 5 (b),
+        # said the same. A sweep that skips the blank runs once's postStop
+        # twice; a watch added after the first sweep leaves late
+        # (checkpoint 11).
+        out = machine.succeed(as_alice("${sweepOrder} ${launcher}/bin/flong-sweeper 2>&1"))
+        print(out)
+        assert out.splitlines() == [
+            "gate entered: yes",
+            "late in the first sweep: left",
+            "late: released",
+            "once: blanked",
+            "ran: gated=1 once=1 late=0",
+            "once: released, cgroup gone",
+            "ran: gated=1 once=1 late=0",
+            "said:",
+            "flong-sweeper: released 1 dead session",
+            "flong-sweeper: rmdir H/c/once/sandbox/inner: Permission denied",
+        ], out
   '' + lib.concatMapStrings (p: "\n# ${p.name}\n" + p.script) integration.vm.vmScripts;
 }

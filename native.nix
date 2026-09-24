@@ -236,29 +236,6 @@ let
     grep -Eq ' U __stack_chk_fail(@|$)' $TMPDIR/launch.dynamic
   '';
 
-  # The C flong-sweeper (ZIG.md, phase 5 (a) only): launcher/flong-sweeper.c
-  # with the C it links, built by $CC with launcherCflags as the launcher
-  # set built it until then, for golden's transition, which runs the
-  # sweeper's cases against it and against the Zig one; never an output.
-  sweeperC = pkgs.stdenv.mkDerivation {
-    pname = "flong-sweeper-c";
-    version = "0";
-    src = lib.fileset.toSource {
-      root = ./launcher;
-      fileset = lib.fileset.fileFilter (f: f.hasExt "c" || f.hasExt "h") ./launcher;
-    };
-    dontConfigure = true;
-    buildPhase = ''
-      runHook preBuild
-      mkdir -p $out/bin
-      cflags=(${launcherCflags})
-      $CC "''${cflags[@]}" -o $out/bin/flong-sweeper \
-        flong-sweeper.c flong-cgroup.c flong-record.c flong-util.c
-      runHook postBuild
-    '';
-    dontInstall = true;
-  };
-
   # The shim run where no namespace is needed, linked as the launcher links
   # it: a destination twice is said in the launcher's words, one line, 1;
   # a mount kind the shim does not know is its panic, one line, 125.
@@ -426,7 +403,6 @@ in
     deps
     seccomp
     launcher
-    sweeperC
     checks
     ;
 }

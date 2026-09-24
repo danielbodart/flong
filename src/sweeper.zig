@@ -1,5 +1,6 @@
 //! flong-sweeper's root (ZIG.md, "Per binary"): launcher/flong-sweeper.c,
-//! line by line (:18-42).
+//! line by line (:18-42). The C was deleted in phase 5 (b), and its line
+//! numbers here are those of c9571be.
 //!
 //!   flong-sweeper STATE-DIR
 //!
