@@ -7,7 +7,8 @@
 //!                 (flong, whose subcommands are launch, init, sweeper, check and schema;
 //!                 needs -Dself, its own installed path, -Dtini, the tini
 //!                 flong init execs, and flong launch's -Dbwrap, -Dpasta,
-//!                 -Dnewuidmap and -Dnewgidmap) or
+//!                 -Dnewuidmap, -Dnewgidmap, -Dcache, the cache tool, and
+//!                 -Dseccomp, flong-seccomp) or
 //!                 fixtures (the tests' programs, src/fixtures/: bpfdump,
 //!                 linked with libc and libseccomp; syscall-probe, swapper
 //!                 and ioctl-probe, static and without libc)
@@ -59,7 +60,8 @@ pub fn build(b: *std.Build) void {
     // that needs it, as flong-init.c:52-54's #error does.
     const self = b.option([]const u8, "self", "The set's own installed path: flong-seccomp's store path (seccomp), or flong's (launcher)");
     // flong's compiled-in programs (FLONG_BWRAP and the rest in the C
-    // launcher): all six, or the launcher set's install fails.
+    // launcher, and S3's cache tool and flong-seccomp): all eight, or the
+    // launcher set's install fails.
     const launch_paths = LaunchPaths.read(b, self);
     const abi_plant = b.option(AbiPlant, "abi-plant", "Plant a mismatch in tests/zig/abi.zig: arch, offset") orelse .none;
 
@@ -74,7 +76,7 @@ pub fn build(b: *std.Build) void {
         .launcher => if (launch_paths) |lp| {
             b.installArtifact(flong(b, target, optimize, lp));
         } else {
-            install.dependOn(&b.addFail("-Dset=launcher needs -Dself, -Dtini, -Dbwrap, -Dpasta, -Dnewuidmap and -Dnewgidmap, flong's programs").step);
+            install.dependOn(&b.addFail("-Dset=launcher needs -Dself, -Dtini, -Dbwrap, -Dpasta, -Dnewuidmap, -Dnewgidmap, -Dcache and -Dseccomp, flong's programs").step);
         },
         .fixtures => for (fixtures(b, target, optimize, .linked)) |exe| b.installArtifact(exe),
     } else {
@@ -625,7 +627,14 @@ pub fn build(b: *std.Build) void {
     //                  (the hook's and pasta's Spawns against golden tables
     //                  read from flong-launch.c:586-675); S3's pure pieces'
     //                  own tests, src/launch/depth.zig, hometmp.zig,
-    //                  resolv.zig, refuse.zig, subid.zig and groups.zig
+    //                  resolv.zig, refuse.zig, subid.zig and groups.zig;
+    //                  and its pieces that touch the system, caller.zig,
+    //                  workspace.zig, cmd.zig, binds.zig, identity.zig and
+    //                  prepare.zig, each module's own tests and
+    //                  tests/zig/wrapper_test.zig over all of them (each
+    //                  refusal's text and status, against flong-fake-cmd,
+    //                  tests/zig/fakecmd.zig, as a command and as the cache
+    //                  tool; prologue.relaunchSelf's exec)
     //   analyze        (-Ddev=true) B27 and B28 in tests/zig/analyze/
     //                  bugs.zig, bwrap.spawn's planted bugs
     //   test-launch    tests/zig/launch_test.zig: the record writer against
@@ -717,6 +726,45 @@ pub fn build(b: *std.Build) void {
                         .root_source_file = b.path(b.fmt("src/launch/{s}.zig", .{name})),
                         .target = target,
                         .optimize = optimize,
+                    }),
+                });
+                test_step.dependOn(&b.addRunArtifact(t).step);
+            }
+            // S3's pieces that touch the system, each module's own tests,
+            // then tests/zig/wrapper_test.zig over all of them, against
+            // flong-fake-cmd (tests/zig/fakecmd.zig), in forked children.
+            for ([_][]const u8{ "caller", "workspace", "cmd", "binds", "identity", "prepare" }) |name| {
+                const w = Launcher.wrapperModules(b, Launcher.launchModules(b, target, optimize), target, optimize);
+                const t = b.addTest(.{ .name = b.fmt("launch_{s}", .{name}), .root_module = w.get(name) });
+                test_step.dependOn(&b.addRunArtifact(t).step);
+            }
+            {
+                const l = Launcher.launchModules(b, target, optimize);
+                const w = Launcher.wrapperModules(b, l, target, optimize);
+                const opts = b.addOptions();
+                opts.addOptionPath("fake_cmd", Launcher.fakeCmd(b, target, optimize).getEmittedBin());
+                const t = b.addTest(.{
+                    .name = "wrapper_test",
+                    .root_module = b.createModule(.{
+                        .root_source_file = b.path("tests/zig/wrapper_test.zig"),
+                        .target = target,
+                        .optimize = optimize,
+                        .imports = &.{
+                            .{ .name = "sys", .module = l.m.sys },
+                            .{ .name = "fd", .module = l.m.fd },
+                            .{ .name = "msg", .module = l.m.msg },
+                            .{ .name = "sig", .module = l.m.sig },
+                            .{ .name = "proc", .module = l.m.proc },
+                            .{ .name = "prologue", .module = w.prologue },
+                            .{ .name = "subid", .module = w.subid },
+                            .{ .name = "caller", .module = w.caller },
+                            .{ .name = "workspace", .module = w.workspace },
+                            .{ .name = "cmd", .module = w.cmd },
+                            .{ .name = "binds", .module = w.binds },
+                            .{ .name = "identity", .module = w.identity },
+                            .{ .name = "prepare", .module = w.prepare },
+                            .{ .name = "options", .module = opts.createModule() },
+                        },
                     }),
                 });
                 test_step.dependOn(&b.addRunArtifact(t).step);
@@ -1240,6 +1288,127 @@ const Launcher = struct {
         });
     }
 
+    /// S3's pieces of `flong launch DECL.zon`'s prologue, the wrapper's
+    /// work (STANDALONE.md, S3), over the launch's modules `l`: the pure
+    /// ones (refuse, subid, groups), which import std alone, and those that
+    /// touch the system (caller, workspace, cmd, binds, identity,
+    /// prepare), with prologue.zig, whose relaunch and kernelName two of
+    /// them share.
+    const Wrapper = struct {
+        prologue: *std.Build.Module,
+        refuse: *std.Build.Module,
+        subid: *std.Build.Module,
+        groups: *std.Build.Module,
+        caller: *std.Build.Module,
+        workspace: *std.Build.Module,
+        cmd: *std.Build.Module,
+        binds: *std.Build.Module,
+        identity: *std.Build.Module,
+        prepare: *std.Build.Module,
+
+        fn get(w: Wrapper, name: []const u8) *std.Build.Module {
+            inline for (@typeInfo(Wrapper).@"struct".fields) |f| {
+                if (std.mem.eql(u8, f.name, name)) return @field(w, f.name);
+            }
+            @panic(name);
+        }
+    };
+
+    fn wrapperModules(bb: *std.Build, l: Launch, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) Wrapper {
+        const m = l.m;
+        const pure = struct {
+            fn module(b2: *std.Build, name: []const u8, t2: std.Build.ResolvedTarget, o2: std.builtin.OptimizeMode) *std.Build.Module {
+                return b2.createModule(.{ .root_source_file = b2.path(b2.fmt("src/launch/{s}.zig", .{name})), .target = t2, .optimize = o2 });
+            }
+        };
+        const prologue = prologueModule(bb, l, t, o);
+        const refuse = pure.module(bb, "refuse", t, o);
+        const subid = pure.module(bb, "subid", t, o);
+        const groups = pure.module(bb, "groups", t, o);
+        const piece = struct {
+            fn module(b2: *std.Build, name: []const u8, t2: std.Build.ResolvedTarget, o2: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Module {
+                return b2.createModule(.{
+                    .root_source_file = b2.path(b2.fmt("src/launch/{s}.zig", .{name})),
+                    .target = t2,
+                    .optimize = o2,
+                    .imports = imports,
+                });
+            }
+        };
+        const caller = piece.module(bb, "caller", t, o, &.{
+            .{ .name = "sys", .module = m.sys },
+            .{ .name = "msg", .module = m.msg },
+            .{ .name = "passwd", .module = l.passwd },
+        });
+        const workspace = piece.module(bb, "workspace", t, o, &.{
+            .{ .name = "sys", .module = m.sys },
+            .{ .name = "fd", .module = m.fd },
+            .{ .name = "msg", .module = m.msg },
+            .{ .name = "prologue", .module = prologue },
+            .{ .name = "refuse", .module = refuse },
+        });
+        const cmd = piece.module(bb, "cmd", t, o, &.{
+            .{ .name = "sys", .module = m.sys },
+            .{ .name = "fd", .module = m.fd },
+            .{ .name = "msg", .module = m.msg },
+            .{ .name = "sig", .module = m.sig },
+            .{ .name = "proc", .module = m.proc },
+        });
+        const binds = piece.module(bb, "binds", t, o, &.{
+            .{ .name = "msg", .module = m.msg },
+            .{ .name = "refuse", .module = refuse },
+            .{ .name = "workspace", .module = workspace },
+            .{ .name = "cmd", .module = cmd },
+        });
+        const identity = piece.module(bb, "identity", t, o, &.{
+            .{ .name = "sys", .module = m.sys },
+            .{ .name = "fd", .module = m.fd },
+            .{ .name = "msg", .module = m.msg },
+            .{ .name = "groups", .module = groups },
+        });
+        const prepare = piece.module(bb, "prepare", t, o, &.{
+            .{ .name = "sys", .module = m.sys },
+            .{ .name = "fd", .module = m.fd },
+            .{ .name = "msg", .module = m.msg },
+            .{ .name = "sig", .module = m.sig },
+            .{ .name = "proc", .module = m.proc },
+            .{ .name = "cmd", .module = cmd },
+            .{ .name = "subid", .module = subid },
+        });
+        return .{
+            .prologue = prologue,
+            .refuse = refuse,
+            .subid = subid,
+            .groups = groups,
+            .caller = caller,
+            .workspace = workspace,
+            .cmd = cmd,
+            .binds = binds,
+            .identity = identity,
+            .prepare = prepare,
+        };
+    }
+
+    /// flong-fake-cmd (tests/zig/fakecmd.zig): a declaration's command
+    /// and the cache tool's stand-in for wrapper_test, over the launch's
+    /// modules for prologue.relaunchSelf. Static, no libc, stripped.
+    fn fakeCmd(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+        const l = launchModules(bb, t, o);
+        const exe = bb.addExecutable(.{
+            .name = "flong-fake-cmd",
+            .root_module = bb.createModule(.{
+                .root_source_file = bb.path("tests/zig/fakecmd.zig"),
+                .target = t,
+                .optimize = o,
+                .strip = true,
+                .single_threaded = true,
+                .imports = &.{.{ .name = "prologue", .module = prologueModule(bb, l, t, o) }},
+            }),
+        });
+        exe.stack_size = 0;
+        return exe;
+    }
+
     /// src/launch/bwrap.zig over `m`'s modules and `spec`.
     fn bwrapModule(bb: *std.Build, m: Modules, spec: *std.Build.Module, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
         return bb.createModule(.{
@@ -1320,8 +1489,11 @@ const Terminal = struct {
 
 /// flong's compiled-in programs (flong-launch.c's FLONG_BWRAP,
 /// FLONG_INIT, FLONG_PASTA, FLONG_NEWUIDMAP and FLONG_NEWGIDMAP, and
-/// flong-init.c's FLONG_TINI): options with no default. `self` is flong's
-/// own installed path, which bwrap runs as `flong init`.
+/// flong-init.c's FLONG_TINI; and the two `flong launch DECL.zon` runs in
+/// place of the wrapper's header, the cache tool, module.nix's cacheTool
+/// (cache.nix), and flong-seccomp, the project policy's compiler):
+/// options with no default. `self` is flong's own installed path, which
+/// bwrap runs as `flong init`.
 const LaunchPaths = struct {
     bwrap: []const u8,
     self: []const u8,
@@ -1329,8 +1501,10 @@ const LaunchPaths = struct {
     newuidmap: []const u8,
     newgidmap: []const u8,
     tini: []const u8,
+    cache: []const u8,
+    seccomp: []const u8,
 
-    /// All six, or null when one is missing. -Dself is build()'s, which
+    /// All eight, or null when one is missing. -Dself is build()'s, which
     /// the seccomp set reads too.
     fn read(b: *std.Build, self: ?[]const u8) ?LaunchPaths {
         const bwrap = b.option([]const u8, "bwrap", "bwrap's store path, which flong launch runs");
@@ -1338,6 +1512,8 @@ const LaunchPaths = struct {
         const newuidmap = b.option([]const u8, "newuidmap", "newuidmap, NixOS's setuid wrapper");
         const newgidmap = b.option([]const u8, "newgidmap", "newgidmap, NixOS's setuid wrapper");
         const tini = b.option([]const u8, "tini", "tini's store path, which flong init execs");
+        const cache = b.option([]const u8, "cache", "the cache tool's store path (flong-cache), which flong launch runs to prepare a root");
+        const seccomp_path = b.option([]const u8, "seccomp", "flong-seccomp's store path, which flong launch runs on a project's policy");
         return .{
             .bwrap = bwrap orelse return null,
             .self = self orelse return null,
@@ -1345,6 +1521,8 @@ const LaunchPaths = struct {
             .newuidmap = newuidmap orelse return null,
             .newgidmap = newgidmap orelse return null,
             .tini = tini orelse return null,
+            .cache = cache orelse return null,
+            .seccomp = seccomp_path orelse return null,
         };
     }
 
@@ -1358,6 +1536,8 @@ const LaunchPaths = struct {
             .newuidmap = dir ++ "/bin/newuidmap",
             .newgidmap = dir ++ "/bin/newgidmap",
             .tini = dir ++ "/bin/tini",
+            .cache = dir ++ "/bin/flong-cache",
+            .seccomp = dir ++ "/bin/flong-seccomp",
         };
     }
 };

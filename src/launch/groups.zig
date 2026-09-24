@@ -78,7 +78,7 @@ fn names(m: []const u8, user: []const u8) bool {
 /// that ':' (so "g:x:1:alice:" gives m "alice", but "g:x:1:alice::" gives
 /// "alice::" and "g:x:1:alice:bob:" gives "alice:bob:"). subid.zig reads
 /// its files the same way.
-fn fields(comptime n: usize, line: []const u8) [n][]const u8 {
+pub fn fields(comptime n: usize, line: []const u8) [n][]const u8 {
     var out: [n][]const u8 = @splat("");
     var rest = line;
     for (out[0 .. n - 1]) |*f| {
@@ -96,7 +96,7 @@ fn fields(comptime n: usize, line: []const u8) [n][]const u8 {
 
 /// `line` without its NULs, which bash's read drops: `line` itself when it
 /// has none, else a copy in `gpa`.
-fn dropNul(gpa: Allocator, line: []const u8) Allocator.Error![]const u8 {
+pub fn dropNul(gpa: Allocator, line: []const u8) Allocator.Error![]const u8 {
     if (std.mem.indexOfScalar(u8, line, 0) == null) return line;
     const copy = try gpa.alloc(u8, line.len - std.mem.count(u8, line, "\x00"));
     var i: usize = 0;

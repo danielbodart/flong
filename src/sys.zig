@@ -828,6 +828,13 @@ pub fn geteuid() uid_t {
     return linux.geteuid();
 }
 
+/// getgid(2): the caller's real gid, which bash puts first in $GROUPS
+/// (rootless-wrapper.bash:66-67) and flong launch maps the container's
+/// group onto.
+pub fn getgid() linux.gid_t {
+    return linux.getgid();
+}
+
 /// getpid(2): the launcher names a descriptor it holds to the postStart
 /// hook and to pasta as /proc/<its pid>/fd/N, a path that works in another
 /// process (flong-launch.c:590-591, 622-624).

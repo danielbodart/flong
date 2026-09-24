@@ -1389,7 +1389,10 @@ three. The programs `flong launch` runs (bwrap, pasta, its own binary as
 `flong init` execs are compiled in, as build options with no default
 (`-Dbwrap`, `-Dpasta`, `-Dself`, `-Dnewuidmap`, `-Dnewgidmap`, `-Dtini`;
 `build.zig`'s `LaunchPaths`), so the wrapper cannot point the launcher at
-another bwrap, and a build that forgets one fails.
+another bwrap, and a build that forgets one fails. So are the two that
+`flong launch DECL.zon` will run in the wrapper's place (STANDALONE.md,
+S3): `-Dcache`, the cache tool (`cache.nix`), and `-Dseccomp`,
+`flong-seccomp`.
 
 Line numbers that cite the deleted C (`launcher/flong-*.c` and `*.h`,
 `seccomp/flong-seccomp.c`, `tests/parity/*.c`) are those of the C as it last

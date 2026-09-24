@@ -4,6 +4,11 @@
 //! cache's shared lock, the close of what the wrapper left open, and the
 //! protected paths made canonical (quirk 21). launch.zig's main calls them
 //! in the C's order, one linear function; none of them decides that order.
+//! `flong launch DECL.zon`'s own prologue, which stands in for the wrapper
+//! ahead of checkpoint 1 (STANDALONE.md, S3), shares three things here:
+//! exit_refused, relaunchSelf (the wrapper's `exec "$self"`) and
+//! kernelName (quirk 21's readlink, which launch/workspace.zig's canon
+//! uses).
 //!
 //! A small deviation from the port's plan, which had flong-launch's
 //! own code in one launch.zig: its helpers are split by concern into
@@ -36,6 +41,15 @@ pub const exit_not_run = 125;
 /// A launch whose cache was swept, with no relaunch to run
 /// (flong-launch.c:43-45; DESIGN.md, "Exit codes").
 pub const exit_swept = 75;
+/// A refusal of `flong launch DECL.zon`'s own prologue, the part that
+/// stands in for rootless-wrapper.bash (STANDALONE.md, S3): the wrapper's
+/// die (:41-44) printed "$name: <text>" and exited 1, and its callers
+/// assert both. Its modules (caller, workspace, cmd, binds, identity,
+/// prepare) say a refusal through msg with msg.prog set to the
+/// declaration's name, and pass error.Reported up; the prologue exits
+/// with this. The launcher's own refusals, after it, keep "flong launch:"
+/// and 125.
+pub const exit_refused = 1;
 
 // ---- step 3: the state directory (flong-launch.c:891-893) ----
 
@@ -128,15 +142,60 @@ pub fn relaunch(
         return exit_swept;
     }
     msg.say("the cache {s} was swept before this launch locked it; relaunching", .{cache});
-    const v = gpa.allocSentinel(?[*:0]const u8, argv.len, null) catch {
-        msg.sayErrno(.NOMEM, "exec {s}", .{argv[0]});
-        return exit_not_run;
-    };
-    for (argv, v) |a, *slot| slot.* = a.ptr;
-    sig.defaultPipe();
-    sig.setMask(old_mask);
-    msg.sayErrno(sys.execve(argv[0], v.ptr, envp), "exec {s}", .{argv[0]});
+    execArgv(gpa, argv[0], argv, old_mask, envp);
     return exit_not_run;
+}
+
+/// The wrapper's own relaunch (rootless-wrapper.bash:299, 307, 337:
+/// `exec "$self" "${launcher_args[@]}"`), for the three points where
+/// `flong launch DECL.zon`'s prologue finds its cache swept before it
+/// holds it (launch/prepare.zig, launch/identity.zig). Silent, as the
+/// wrapper's was: it execs this very binary, readlink(/proc/self/exe), with
+/// `argv`, the process's whole argv as the kernel gave it, argv[0]
+/// untouched, so a declaration's symlink name is looked up again
+/// (STANDALONE.md, "The declaration's command"), and with `envp`, the
+/// environment it started with. SIGPIPE's default is put back, and the
+/// mask `old_mask` when there is one, as relaunch does (quirk 2). It
+/// returns only when it could not exec, having said why: error.Reported,
+/// which the prologue exits 1 with, as the wrapper's failed exec ended it.
+pub fn relaunchSelf(
+    gpa: Allocator,
+    argv: []const [*:0]const u8,
+    old_mask: ?u64,
+    envp: [*:null]const ?[*:0]const u8,
+) msg.Error {
+    var buf: [path_max]u8 = undefined;
+    const n = switch (sys.readlinkat(sys.AT.FDCWD, "/proc/self/exe", &buf)) {
+        .ok => |n| n,
+        .err => |e| return msg.fail(e, "readlink /proc/self/exe", .{}),
+    };
+    if (n >= buf.len) return msg.fail(.NAMETOOLONG, "readlink /proc/self/exe", .{});
+    buf[n] = 0;
+    execArgv(gpa, buf[0..n :0], argv, old_mask, envp);
+    return error.Reported;
+}
+
+/// execve(path, argv, envp) with SIGPIPE's default and `old_mask` back,
+/// saying why when it returns. The argv vector is built in `gpa`; if that
+/// fails the exec is said to fail with ENOMEM.
+fn execArgv(
+    gpa: Allocator,
+    path: [*:0]const u8,
+    argv: anytype,
+    old_mask: ?u64,
+    envp: [*:null]const ?[*:0]const u8,
+) void {
+    const v = gpa.allocSentinel(?[*:0]const u8, argv.len, null) catch {
+        msg.sayErrno(.NOMEM, "exec {s}", .{path});
+        return;
+    };
+    for (argv, v) |a, *slot| slot.* = switch (@typeInfo(@TypeOf(a)).pointer.size) {
+        .slice => a.ptr,
+        else => a,
+    };
+    sig.defaultPipe();
+    if (old_mask) |m| sig.setMask(m);
+    msg.sayErrno(sys.execve(path, v.ptr, envp), "exec {s}", .{path});
 }
 
 // ---- step 5: what the wrapper held (flong-launch.c:909-925) ----
@@ -166,6 +225,14 @@ fn realPath(path: []const u8, at: [:0]const u8, buf: *[path_max]u8) msg.Error!sy
         .err => |e| return .{ .err = e },
     };
     defer h.close();
+    return kernelName(h, buf);
+}
+
+/// The kernel's name for what `h`, an O_PATH handle, names: the readlink
+/// of its selfPath, quirk 21's mechanism, which realPath and the
+/// workspace's resolution (launch/workspace.zig) share. A name that does
+/// not fit PATH_MAX with its NUL is ENAMETOOLONG.
+pub fn kernelName(h: fdt.Fd(.path), buf: *[path_max]u8) sys.Result([:0]const u8) {
     const link = fdt.selfPath(h);
     const n = switch (sys.readlinkat(sys.AT.FDCWD, link.path(), buf)) {
         .ok => |n| n,

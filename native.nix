@@ -182,19 +182,28 @@ let
   pasta = "${pkgs.passt}/bin/pasta";
   newuidmap = "/run/wrappers/bin/newuidmap";
   newgidmap = "/run/wrappers/bin/newgidmap";
+  # The prepared root's cache tool (cache.nix, module.nix's cacheTool: the
+  # same store path, which steps8 hashes) and the project policy's
+  # compiler, this file's seccomp set, which `flong launch DECL.zon` runs in
+  # place of the wrapper's header (STANDALONE.md, S3).
+  cacheTool = "${(import ./cache.nix { inherit pkgs; }).cacheTool}/bin/flong-cache";
+  seccompTool = "${seccomp}/bin/flong-seccomp";
 
   # flong, one binary whose subcommands are launch, init, sweeper, check and schema
   # (src/main.zig), static and without libc: -Dtini is
   # flong init's compiled-in tini, and flong launch's programs are -Dbwrap,
-  # -Dpasta, -Dnewuidmap, -Dnewgidmap and -Dself, the flong in this $out,
-  # which bwrap runs as `flong init`. The fileset holds src/ but for the
-  # seccomp set's and the fixtures' own sources (DESIGN.md, "The build"), so
-  # neither set's edits move it. Its size is printed, never gated (DESIGN.md,
-  # "What the port measured": binaries).
+  # -Dpasta, -Dnewuidmap, -Dnewgidmap, -Dcache, -Dseccomp and -Dself, the
+  # flong in this $out, which bwrap runs as `flong init`. The cache tool and
+  # flong-seccomp join its closure once the code that runs them is in the
+  # binary (S3's prologue); until then Zig emits neither path. The fileset
+  # holds src/ but for the seccomp set's and the
+  # fixtures' own sources (DESIGN.md, "The build"): the fixtures' edits never
+  # move it, and the seccomp set's only through -Dseccomp's path. Its size is
+  # printed, never gated (DESIGN.md, "What the port measured": binaries).
   launcher = zigSet {
     pname = "flong-launcher";
     set = "launcher";
-    flags = "-Dtini=${pkgs.tini}/bin/tini -Dbwrap=${bwrap} -Dpasta=${pasta} -Dnewuidmap=${newuidmap} -Dnewgidmap=${newgidmap} -Dself=$out/bin/flong";
+    flags = "-Dtini=${pkgs.tini}/bin/tini -Dbwrap=${bwrap} -Dpasta=${pasta} -Dnewuidmap=${newuidmap} -Dnewgidmap=${newgidmap} -Dcache=${cacheTool} -Dseccomp=${seccompTool} -Dself=$out/bin/flong";
     files = [
       (lib.fileset.difference ./src (
         lib.fileset.unions [
