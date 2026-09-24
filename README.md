@@ -381,6 +381,20 @@ helper, the seccomp compiler and the tests' probes and filter dumper in Zig with
 tests, lint and analysis; evaluates each refusal; and shellchecks the version script.
 `nix build .#bench` times launches in a VM.
 
+```console
+$ nix run .#gate
+$ nix run .#gate-aarch64
+```
+
+`gate` runs the same x86_64 checks through
+[nix-fast-build](https://github.com/Mic92/nix-fast-build): parallel evaluators,
+each check built as soon as it evaluates, and those a binary cache already has
+skipped. It exits non-zero if any check fails to evaluate or build; its
+arguments go to nix-fast-build, and `GATE_EVAL_WORKERS` sets the evaluators
+(6, at up to about 4.6 GB each). `gate-aarch64` evaluates aarch64's checks
+without building them. CI builds each check in its own job, `nix build
+.#checks.x86_64-linux.<name>`, against the `danielbodart` Cachix cache.
+
 ## Licence
 
 MIT.

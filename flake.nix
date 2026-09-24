@@ -93,10 +93,61 @@
       # after a libseccomp bump, and refuses anything else: run it from the
       # repository's root (tests/golden.nix says when it may be used). The
       # .bpf files are x86_64's filters, so it is x86_64's alone.
-      apps.x86_64-linux.golden-update = {
-        type = "app";
-        program = "${self.checks.x86_64-linux.golden.update}/bin/golden-update";
-        meta.description = "Rewrite tests/golden's filters after a libseccomp bump";
+      apps.x86_64-linux = let
+        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+      in {
+        golden-update = {
+          type = "app";
+          program = "${self.checks.x86_64-linux.golden.update}/bin/golden-update";
+          meta.description = "Rewrite tests/golden's filters after a libseccomp bump";
+        };
+
+        # The local gate, `nix run .#gate` from the repository's root: every
+        # x86_64 check, evaluated by nix-fast-build's parallel workers and
+        # each built as its evaluation finishes, where `nix flake check`
+        # evaluates them one after another before it builds any. Checks
+        # already in a binary cache are skipped (--skip-cached); a check
+        # that fails to evaluate or build makes the exit status non-zero.
+        # A worker takes up to about 4.6 GB (rootless; each assertion shard
+        # about 2 GB, tests/assertions.nix), so 6 workers, each
+        # restarted past 6 GiB, stay within a 62 GB host with room to
+        # build. GATE_EVAL_WORKERS overrides the count; the arguments are
+        # nix-fast-build's (--select to run some checks, say).
+        gate = {
+          type = "app";
+          program = pkgs.lib.getExe (pkgs.writeShellApplication {
+            name = "flong-gate";
+            runtimeInputs = [ pkgs.nix-fast-build ];
+            text = ''
+              exec nix-fast-build --flake ".#checks.x86_64-linux" --skip-cached --no-nom \
+                --eval-workers "''${GATE_EVAL_WORKERS:-6}" --eval-max-memory-size 6144 "$@"
+            '';
+          });
+          meta.description = "Build every x86_64 check in parallel, skipping what a cache has";
+        };
+
+        # aarch64's checks evaluated, not built (this host cannot run them):
+        # each must instantiate, which is what catches an aarch64-only
+        # evaluation error. `nix run .#gate-aarch64`; a check that fails to
+        # evaluate is printed and makes the exit status non-zero.
+        gate-aarch64 = {
+          type = "app";
+          program = pkgs.lib.getExe (pkgs.writeShellApplication {
+            name = "flong-gate-aarch64";
+            runtimeInputs = [ pkgs.nix-eval-jobs pkgs.jq ];
+            text = ''
+              out=$(mktemp)
+              trap 'rm -f "$out"' EXIT
+              nix-eval-jobs --flake ".#checks.aarch64-linux" \
+                --workers "''${GATE_EVAL_WORKERS:-6}" --max-memory-size 6144 > "$out"
+              jq -r 'if .error then "error: \(.attr): \(.error)" else "ok: \(.attr) \(.drvPath)" end' "$out"
+              # The control: the checks were listed at all.
+              [[ -s $out ]] || { echo "gate-aarch64: no checks evaluated"; exit 1; }
+              if jq -e 'select(.error)' "$out" > /dev/null; then exit 1; fi
+            '';
+          });
+          meta.description = "Evaluate every aarch64 check without building it";
+        };
       };
 
       # zig 0.15, libseccomp (found through NIX_LDFLAGS, as in the build)
