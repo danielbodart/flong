@@ -229,6 +229,25 @@ let
     '';
   };
 
+  # decl-options.json as `zig build schema` writes it from src/decl.zig and
+  # its doc comments (build/schema.zig, for the host), in $out: what the
+  # flake's decl-options-fresh check compares the checked-in file with, and
+  # what `nix run .#update-options` copies over it. The checked-in file is
+  # not in the fileset, so the step writes a fresh one rather than
+  # overwriting it. Until `flong schema` prints the same bytes from the
+  # launcher set, when this can run that instead.
+  declOptions = zigSet {
+    pname = "decl-options";
+    files = [
+      ./build
+      ./src
+    ];
+    steps = "schema";
+    extra = ''
+      cp decl-options.json $out/decl-options.json
+    '';
+  };
+
   # The unit and property tests, and test-libc against this nixpkgs' glibc,
   # in Debug and in ReleaseSafe. build/ holds the doc harvest decl_docs.zig's
   # tests are compiled with.
@@ -346,6 +365,7 @@ in
     seccomp
     launcher
     fixtures
+    declOptions
     checks
     ;
 }

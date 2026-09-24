@@ -536,6 +536,18 @@ let
       closure = "${declared.path}";
       s = c.seccomp;
 
+      # TEMPORARY (S2 chunk C; chunk D replaces it, with the wrapper running
+      # the commands itself): the hooks are command lists now, and the
+      # wrapper still takes shell. Each command becomes one line of it, run
+      # with the arguments the snippet was (the launcher's, in "$@"; none
+      # for postStop, whose `$1` is the machine) and under the snippet's
+      # `set -euo pipefail`, so a failing one ends the rest, as a guard's or
+      # a policy's must. The last is exec'd, so a one-command hook is the
+      # process it was when it was the snippet. An empty list is an empty
+      # snippet, which runs nothing, as "" did.
+      hookScript = withArgs: cmds: lib.concatImapStrings
+        (i: cmd: "${lib.optionalString (i == lib.length cmds) "exec "}${qs cmd}${lib.optionalString withArgs " \"$@\""}\n") cmds;
+
       # The hook programs, rather than snippets spliced into the wrapper,
       # because the launcher runs them with the environment it gives them:
       # shellcheck cannot see where postStart's $leader, $netns or
@@ -548,7 +560,7 @@ let
         name = "flong-poststart-${name}";
         runtimeInputs = [ pkgs.coreutils pkgs.util-linux ] ++ c.path;
         excludeShellChecks = [ "SC2154" ];
-        text = c.postStart;
+        text = hookScript true c.postStart;
       };
       postStopScript = pkgs.writeShellApplication {
         name = "flong-poststop-${name}";
@@ -556,7 +568,7 @@ let
         text = ''
           # Exported, so a helper the snippet calls sees it as well.
           export machine=$1
-          ${c.postStop}
+          ${hookScript false c.postStop}
         '';
       };
 
@@ -603,7 +615,7 @@ let
         ++ [ "holder" "app.slice/flong-sessions.service" ]
         ++ lib.concatMap (a: [ "holder-start" a ])
           [ "/run/current-system/sw/bin/systemctl" "--user" "start" "flong-sessions.service" ]
-        ++ lib.optionals (c.postStop != "")
+        ++ lib.optionals (c.postStop != [ ])
           [ "post-stop" "${postStopScript}/bin/flong-poststop-${name}" ]
         ++ lib.optionals (c.network != null) ([ "network" ]
           ++ lib.concatMap (a: [ "pasta-arg" a ]) (pastaPortArgs c.network ++ [ "--no-map-gw" ])
@@ -648,18 +660,18 @@ let
         flock=${q "${pkgs.util-linux}/bin/flock"}
         mkdir=${q "${pkgs.coreutils}/bin/mkdir"}
         payload=${q (lib.getExe (mkPayload name c))}
-        post_start=${q (if c.postStart == "" then "" else "${postStartScript}/bin/flong-poststart-${name}")}
+        post_start=${q (if c.postStart == [ ] then "" else "${postStartScript}/bin/flong-poststart-${name}")}
         network=${if c.network == null then "0" else "1"}
         dns_forward4=${q dnsForward4}
         dns_forward6=${q dnsForward6}
-        workspace_snippet=${q (if lib.trim c.workspace == "pwd" then "" else c.workspace)}
-        binds_snippet=${q c.binds}
-        guard_snippet=${q c.guard}
+        workspace_snippet=${q (if c.workspace == null then "" else hookScript true [ c.workspace ])}
+        binds_snippet=${q (hookScript true c.binds)}
+        guard_snippet=${q (hookScript true c.guard)}
         seccomp_tier=${q (if s.tier == null then "" else "${seccomp.filterFor s}")}
         seccomp_fixed=(${qs ([ seccomp.fixed.audit seccomp.fixed.tty ] ++ lib.optional (! s.nestedSandbox) seccomp.fixed.nsmask)})
-        seccomp_project=(${qs (lib.optionals (c.seccompPolicy != "")
+        seccomp_project=(${qs (lib.optionals (c.seccompPolicy != [ ])
           [ "${seccompCompiler}/bin/flong-seccomp" "project" "${seccomp.dump}" "${seccomp.namesFor s}" (seccomp.deny s) ])})
-        seccomp_policy_snippet=${q c.seccompPolicy}
+        seccomp_policy_snippet=${q (hookScript true c.seccompPolicy)}
         export -n ${lib.concatStringsSep " " names}
         }
       '';
@@ -727,7 +739,7 @@ let
       noTier = lib.optional (c.seccomp.allow != [ ]) "seccomp.allow"
         ++ lib.optional (c.seccomp.deny != [ ]) "seccomp.deny"
         ++ lib.optional c.seccomp.log "seccomp.log"
-        ++ lib.optional (c.seccompPolicy != "") "seccompPolicy";
+        ++ lib.optional (c.seccompPolicy != [ ]) "seccompPolicy";
     in
     [
       {
@@ -955,7 +967,7 @@ let
       flong.${n} has seccomp.log = true, so it logs rather than refuses calls
       outside its tier: for learning a policy, not for untrusted payloads.
     ''
-    ++ lib.optional (c.guard != "") ''
+    ++ lib.optional (c.guard != [ ]) ''
       flong.${n} has a guard, which is a consistency check and not a gate:
       the caller can run flong launch directly, with any spec.
     '';
@@ -1059,6 +1071,39 @@ let
       '';
     }
   ];
+
+  # A declaration's options: decl-options.json, `flong schema`'s walk of
+  # src/decl.zig, read as options by nix/decl-options.nix. The file is
+  # checked in, so this is no import from a derivation, and the flake's
+  # decl-options-fresh check fails when it is stale (`nix run
+  # .#update-options` rewrites it). The examples are Nix, so they are here.
+  declOptions = import ./nix/decl-options.nix
+    {
+      inherit lib;
+      examples = {
+        command = lib.literalExpression ''[ (lib.getExe pkgs.hello) "--greeting=hello from a session" ]'';
+        workspace = lib.literalExpression ''[ "''${pkgs.writeShellScript "repo-root" "git -C \"$PWD\" rev-parse --show-toplevel"}" ]'';
+        binds = lib.literalExpression ''[ [ "''${pkgs.writeShellScript "shared-crates" "printf '%s:rw\\n' \"$workspace/../shared-crates\""}" ] ]'';
+        postStart = lib.literalExpression ''[ [ "''${pkgs.writeShellScript "fence" "nsenter --user=\"$userns\" --net=\"$netns\" nft -f /etc/my-ruleset.nft"}" ] ]'';
+        postStop = lib.literalExpression ''[ [ "''${pkgs.writeShellScript "release" "rm -f \"$XDG_RUNTIME_DIR/my-gate/$machine.sock\""}" ] ]'';
+        seccompPolicy = lib.literalExpression ''[ [ "''${pkgs.writeShellScript "policy" "chase-envelope approve \"$workspace\" \"$machine\""}" ] ]'';
+        network = lib.literalExpression ''
+          {
+            hostPorts = [ 5432 ];
+            forwardPorts = [ { hostPort = 8080; containerPort = 80; } ];
+          }
+        '';
+        "network.hostPorts" = [ 5432 ];
+        overlays = lib.literalExpression ''{ "/home/alice/.state" = "/var/lib/state"; }'';
+        masks = [ "/home/alice/.cache/tool/token" ];
+        protect = [ "/run/frisket" ];
+        limits = { MemoryMax = "8G"; TasksMax = 4096; CPUQuota = "400%"; };
+        seccomp = { tier = "strict"; debug = true; };
+        "seccomp.allow" = [ "@keyring" "userfaultfd" ];
+        "seccomp.deny" = [ "@swap" ];
+      };
+    }
+    (builtins.fromJSON (builtins.readFile ./decl-options.json));
 in
 {
   options.flong = lib.mkOption {
@@ -1074,7 +1119,10 @@ in
       started.
     '';
     type = lib.types.attrsOf (lib.types.submodule ({ name, config, ... }: {
-      options = {
+      # Every option the declaration has, from decl-options.json, which
+      # `flong schema` writes from src/decl.zig; then the four that are
+      # Nix's alone, written here.
+      options = declOptions // {
         container = lib.mkOption {
           type = lib.types.str;
           default = name;
@@ -1085,554 +1133,11 @@ in
           '';
         };
 
-        user = lib.mkOption {
-          type = lib.types.str;
-          description = ''
-            User inside the container, which everything in the session runs
-            as.
-
-            Its uid and the gid of its primary group must be declared in the
-            container's `config`, and the container cannot be declared by
-            `path`: they name the prepared root's cache and the caller's id
-            maps, which are needed before anything is prepared. The home is
-            read at launch from the prepared root's `/etc/passwd`, and a
-            launch refuses one whose ids disagree. The uid need not be the
-            caller's: the session's user is mapped onto the caller whatever
-            its uid.
-          '';
-        };
-
-        workspace = lib.mkOption {
-          type = lib.types.lines;
-          default = "pwd";
-          example = ''git -C "$PWD" rev-parse --show-toplevel'';
-          description = ''
-            Shell printing the directory to bind into the container at its own
-            path and start in: `PATH`, bound read-write, or `PATH:ro`, bound
-            read-only. The default is the directory the launcher was started
-            in; a consumer that wants a repository's root asks git for it. Runs on the host before launch, with the launcher's
-            arguments in "$@"; a non-zero exit aborts.
-
-            Runs *before* `guard`, so that the gate can judge the directory
-            this resolves to rather than re-deriving one of its own.
-
-            Runs as the caller, as every hook does.
-
-            What it prints is resolved with `realpath`, must be a directory,
-            and is refused if it names a `:` or a newline: a caller's path
-            travels as `PATH:MODE` lines, which either would make ambiguous.
-            Later hooks see the path as `$workspace` and the mode as
-            `$workspace_mode` (`ro` or `rw`). Deciding *which* directory is
-            allowed is `guard`'s job, not this one's.
-          '';
-        };
-
-        binds = lib.mkOption {
-          type = lib.types.lines;
-          default = "";
-          example = ''
-            printf '%s:rw\n' "$workspace/../shared-crates"
-            printf '%s\n' /srv/reference
-          '';
-          description = ''
-            Shell printing more of the caller's directories to bind, one per
-            line, each at its own path inside the container: `PATH`, bound
-            read-only, or `PATH:rw`, bound read-write. Empty output binds
-            nothing, which is the default.
-
-            Runs after `workspace`, with `$workspace` and `$workspace_mode`
-            exported, so it can answer "what travels with THIS directory"
-            rather than having to name a fixed set. Runs as the caller and
-            sees the launcher's arguments in "$@", exactly as `workspace`
-            does; a non-zero exit aborts.
-
-            Every path is resolved with `realpath`, must be a directory, and is
-            refused if it names a `:` or a newline, as the workspace is.
-            Deciding *which* directories are allowed is `guard`'s job: it sees
-            them as `$binds`, one `PATH:ro` or `PATH:rw` per line, with the
-            mode always spelt out. The payload sees the same list as
-            `$FLONG_BINDS`, to pass on to an agent's `--add-dir`.
-
-            Read-only is not a boundary on its own -- it stops writes, not
-            execution -- so it is for directories a session should read rather
-            than edit, not for making an untrusted one safe.
-          '';
-        };
-
-        guard = lib.mkOption {
-          type = lib.types.lines;
-          default = "";
-          description = ''
-            Shell run as the caller before launch, to check that the launch
-            is one this declaration means to make. A consistency check, not
-            a gate: the session grants nothing the caller did not already
-            have, and the caller can run flong launch directly with any spec.
-            Setting it warns, to say so.
-
-            Runs *after* `workspace` and `binds`, with their answers in scope:
-            `$workspace`, absolute and symlink-resolved, `$workspace_mode`,
-            and `$binds`, one `PATH:ro` or `PATH:rw` per line. Judge those
-            rather than re-deriving a directory from `$PWD` -- they are
-            exactly what will be bound, where anything a guard works out for
-            itself agrees with the mounts only by coincidence.
-
-            Runs in a shell of its own, so a non-zero exit refuses the launch,
-            `exit 0` allows it, and nothing the guard assigns reaches the
-            launcher: it judges `$workspace` and cannot change it.
-
-            It runs again when the launcher relaunches itself, which it does
-            when the prepared root it found was swept before it could lock
-            it, so a guard that asks a question can ask it twice.
-          '';
-        };
-
-        command = lib.mkOption {
-          type = lib.types.nonEmptyListOf lib.types.str;
-          example = lib.literalExpression ''[ (lib.getExe pkgs.hello) "--greeting=hello from a session" ]'';
-          description = ''
-            The payload, as an argument list: the program, then its fixed
-            arguments. The launcher's own arguments are appended, and it is
-            exec'd as `user` in the workspace. No element of either list is
-            read by a shell, so a space, a `;` or a `$` in one is passed as it
-            is.
-
-            It is exec'd after the container's `/etc/set-environment` has been
-            sourced, so a bare name is looked up on the container's `PATH` --
-            its `environment.systemPackages`, the user's `packages` -- and
-            the payload inherits every variable the container exports. An
-            absolute path, such as `lib.getExe` of a package, is run as it
-            is. Anything that needs a script is a package of its own, named
-            here by `lib.getExe`.
-          '';
-        };
-
-        postStart = lib.mkOption {
-          type = lib.types.lines;
-          default = "";
-          example = ''
-            nsenter --user="$userns" --net="$netns" nft -f /etc/my-ruleset.nft
-          '';
-          description = ''
-            A program run by the launcher as the caller, once per session, as
-            soon as the session's namespaces exist -- **before** `network` is
-            attached and **before** the payload starts. The payload waits for
-            it. `path` is on `PATH`, and the launcher's arguments are in "$@".
-
-            `$leader` is the session's pid 1 as seen from the host, `$userns`
-            the session's user namespace and `$netns` its network namespace,
-            each a `/proc/<launcher>/fd/<n>` descriptor the launcher holds.
-            `$machine`, `$uid`, `$gid`, `$home`, `$workspace`,
-            `$workspace_mode` and `$binds` are exported too. The session's
-            root exists only in its own mount namespace, reached as
-            `/proc/$leader/root`. The hook enters the session as its root,
-            with every capability over it and none over the host:
-            `nsenter --user="$userns" --net="$netns" nft -f ruleset.nft`.
-
-            **The ordering is the contract, and it is the security property.**
-            Whatever this installs into the namespace is in place before
-            anything gives it egress: a session's namespace starts with `lo`
-            up and an empty route table, so until egress exists the workload
-            has nowhere to go and there is no window to race. flong attaches
-            `network` only after this returns. A consumer that provisions
-            egress of its own first -- from `guard`, or from the top of this
-            hook -- has given the property away without any error.
-
-            A non-zero exit ends the session, and the launcher exits
-            non-zero. `exit 0` ends this hook and not the launch.
-
-            Unlike systemd's `ExecStartPost`, the main process is not yet
-            running: it is held until this hook and any `network` have
-            finished.
-          '';
-        };
-
-        postStop = lib.mkOption {
-          type = lib.types.lines;
-          default = "";
-          example = ''rm -f "$XDG_RUNTIME_DIR/my-gate/$machine.sock"'';
-          description = ''
-            Shell run as the caller after a session ends, to release whatever
-            `postStart` made outside it. `$machine` is set, exported, and
-            nothing else is.
-
-            It runs on two paths: from the launcher once the session has
-            stopped, and -- for a session whose launcher was SIGKILLed --
-            from the sweeper in the caller's holder unit, within moments,
-            where the machine name is all that survives. Each session records
-            its own `postStop`, so the one belonging to the session is run,
-            even after a rebuild.
-
-            So it must depend on `$machine` alone and succeed when what it
-            releases is already gone. It runs under `set -euo pipefail` with
-            `path` on `PATH`; a non-zero exit is reported and otherwise
-            ignored, because flong's own release follows it.
-          '';
-        };
-
-        network = lib.mkOption {
-          default = null;
-          example = lib.literalExpression ''
-            {
-              hostPorts = [ 5432 ];
-              forwardPorts = [ { hostPort = 8080; containerPort = 80; } ];
-            }
-          '';
-          description = ''
-            A real network for a `privateNetwork` session, provided by
-            [pasta](https://passt.top): present or absent, with no `enable` --
-            `network = { };` is a session that can reach the outside world and
-            no port on the host.
-
-            pasta rather than a veth, because flong runs many concurrent
-            sessions from one declaration: a veth needs an address per session,
-            forwarding, NAT and host firewall rules, and gives the sandbox
-            packet-level access to spoof with. pasta needs no host interface
-            and no host configuration, and hands the sandbox sockets rather than
-            packets.
-
-            Attached after `postStart` returns, never before, which is what
-            makes the hook's ordering hold. pasta runs as the caller, in the
-            session's cgroup, and goes with the session.
-
-            Always passed, and not options: `--no-map-gw`, because otherwise
-            the gateway address reaches the host's loopback; an explicit
-            `none` for every port class not listed here, because each defaults
-            to `auto`, which forwards every bound port on the other side; and
-            `--config-net`.
-
-            DNS goes through pasta as well, and is not an option either. The
-            session's /etc/resolv.conf is written at launch naming
-            ${dnsForward4} -- and ${dnsForward6}, where the host names an IPv6
-            nameserver -- with the host's `search`, `domain` and `options`
-            carried over. pasta catches a query sent there and re-sends it
-            from the host to the host's own first nameserver, so a stub
-            resolver on the host's loopback answers it. Both read the host's
-            file once, at launch: a host that moves networks keeps a live
-            session on the old resolver.
-          '';
-          type = lib.types.nullOr (lib.types.submodule {
-            options = {
-              forwardPorts = lib.mkOption {
-                type = lib.types.either (lib.types.enum [ "auto" ]) (lib.types.listOf (lib.types.submodule {
-                  options = {
-                    protocol = lib.mkOption {
-                      type = lib.types.enum [ "tcp" "udp" ];
-                      default = "tcp";
-                      description = "The protocol forwarded.";
-                    };
-                    hostPort = lib.mkOption {
-                      type = lib.types.port;
-                      description = "Port on the host, on every address.";
-                    };
-                    containerPort = lib.mkOption {
-                      type = lib.types.nullOr lib.types.port;
-                      default = null;
-                      description = "Port in the session; `hostPort` if null.";
-                    };
-                  };
-                }));
-                default = [ ];
-                description = ''
-                  Ports on the host forwarded into the session, shaped exactly
-                  like `containers.<name>.forwardPorts`, bound on every host
-                  address -- the host's firewall still decides who reaches them.
-                  pasta binds them as the caller, so a port below the host's
-                  `net.ipv4.ip_unprivileged_port_start` is refused.
-
-                  A host port is one session's at a time. A second concurrent
-                  session asking for the same one fails to attach its network,
-                  and is ended rather than left running without it.
-
-                  `"auto"`: whatever TCP port the session listens on is
-                  published on the host at the same port, while it listens --
-                  a dev server started inside is reached from the host's
-                  browser. A port another session already publishes is not,
-                  and that session is not ended for it.
-                '';
-              };
-              hostLoopbackToSession = lib.mkOption {
-                type = lib.types.bool;
-                default = false;
-                description = ''
-                  A forwarded connection from the host's loopback arrives on
-                  the session's loopback, rather than from the session's own
-                  address -- pasta's --host-lo-to-ns-lo. A dev server
-                  listening on 127.0.0.1 inside is then reached at
-                  localhost on the host. It also reaches anything else the
-                  session listens on only on its loopback, which is why pasta
-                  no longer does it by default; a connection from anywhere
-                  but the host's loopback is unaffected.
-                '';
-              };
-              hostPorts = lib.mkOption {
-                type = lib.types.listOf lib.types.port;
-                default = [ ];
-                example = [ 5432 ];
-                description = ''
-                  Ports on the host's loopback the session may reach, at the
-                  same port on its own loopback: the database the host is
-                  running, say. TCP and UDP both. Nothing else on the host's
-                  loopback is reachable, the gateway address included.
-                '';
-              };
-            };
-          });
-        };
-
-        overlays = lib.mkOption {
-          type = lib.types.attrsOf lib.types.path;
-          default = { };
-          example = lib.literalExpression ''{ "/home/alice/.state" = "/var/lib/state"; }'';
-          description = ''
-            Paths mounted as an overlay of `{ target = lower; }`: the lower
-            directory is readable and every write goes to an upper layer that
-            dies with the container.
-
-            overlayfs reports changing device and inode numbers as a file is
-            written, so this must not cover a path holding a sqlite database.
-
-            An overlay below a bind, at any depth, is allowed: a session that
-            renames its parent on the host only moves where its own writes
-            land.
-          '';
-        };
-
-        masks = lib.mkOption {
-          type = lib.types.listOf (lib.types.strMatching "/.*");
-          default = [ ];
-          example = [ "/home/alice/.cache/tool/token" ];
-          description = ''
-            Paths in the session replaced by an empty node of the same kind
-            that nobody can read. For carving one file out of a directory a
-            bind brings in whole.
-
-            USE WITH CARE. Prefer binding only what the session needs to
-            binding everything and masking the rest:
-
-            - A mask is a denylist. Whatever it does not name is in, so a file
-              the host's tool starts keeping beside the masked one next
-              release -- a second token, a refresh token -- is visible from
-              the day it appears.
-            - The path must exist when the session starts, or the launch
-              fails. A file that is written later, on the host, into a
-              directory that is bound through is not masked.
-            - It masks the file, not the name. A host program that replaces
-              the file by renaming a new one over it -- as many write a
-              credential -- detaches the mask in every running session, and
-              the new file shows through.
-
-            A mask may lie at most one level below the root of a writable
-            bind: deeper, a session that can
-            write the host directory renames the masked file's parent, leaves
-            a decoy for the mask, and reads the file at the new name. A
-            declared writable bind is checked at evaluation, and the
-            workspace and `binds` at launch. A mask below a read-only bind,
-            and a declared `tmpfs` or an overlay at any depth, is not
-            checked.
-          '';
-        };
-
         scopeConfig = lib.mkOption {
           type = lib.types.attrsOf lib.types.anything;
           default = { };
           visible = false;
           description = "Refused: a session has no scope unit. See `limits`.";
-        };
-
-        limits =
-          let
-            # A size as systemd writes one, and as the kernel's memparse reads
-            # it: bytes, or a number with K, M, G or T.
-            memSize = lib.types.either lib.types.ints.unsigned
-              (lib.types.strMatching "[0-9]+[KMGT]|infinity");
-            limit = type: description: lib.mkOption {
-              type = lib.types.nullOr type;
-              default = null;
-              inherit description;
-            };
-          in
-          lib.mkOption {
-            default = { };
-            example = { MemoryMax = "8G"; TasksMax = 4096; CPUQuota = "400%"; };
-            description = ''
-              Opt-in resource limits for a session, written into its own
-              cgroup, which the caller's user manager delegates to the
-              holder unit. Named and spelt as systemd's, and unset means
-              unlimited, as it does there.
-
-              Only the controllers a user manager is delegated are offered -- memory, pids and cpu -- so there is no
-              `IOWeight`: with no io controller below `user@.service`, it
-              would have nothing to write to.
-
-              A session's root, its TMPDIR and every overlay upper layer are
-              tmpfs, which is RAM: `MemoryMax` makes a payload that fills
-              them the session's problem rather than the host's.
-            '';
-            type = lib.types.submodule {
-              options = {
-                MemoryMax = limit memSize "`memory.max`: the hard limit.";
-                MemoryHigh = limit memSize "`memory.high`: the throttling limit.";
-                MemorySwapMax = limit memSize "`memory.swap.max`.";
-                TasksMax = limit
-                  (lib.types.either lib.types.ints.positive (lib.types.enum [ "infinity" ]))
-                  "`pids.max`: processes and threads together.";
-                CPUQuota = limit (lib.types.strMatching "[1-9][0-9]*%")
-                  "`cpu.max`: a share of one CPU, as `N%`; `200%` is two.";
-                CPUWeight = limit (lib.types.ints.between 1 10000)
-                  "`cpu.weight`, against the caller's other processes.";
-                oomGroup = lib.mkOption {
-                  type = lib.types.bool;
-                  default = false;
-                  description = ''
-                    `memory.oom.group`: an OOM kill takes the whole session
-                    rather than one process of it.
-                  '';
-                };
-              };
-            };
-          };
-
-        seccomp =
-          let
-            # A syscall's name or a systemd group's, as `systemd-analyze
-            # syscall-filter` lists them. The build refuses one it does not
-            # list.
-            syscallName = lib.types.strMatching "@?[a-z0-9_-]+";
-          in
-          lib.mkOption {
-            default = { };
-            example = { tier = "strict"; debug = true; };
-            description = ''
-              The session's syscall filter. A tier is an allow-list: the calls
-              it names are allowed, the rest of systemd's `@known` get
-              `errno`, and a call outside `@known` gets ENOSYS. It applies on
-              x86_64, i386 and x32 alike.
-
-              Three fixed filters are stacked behind it and are not options:
-              the audit mask (`socket(AF_NETLINK, ..., NETLINK_AUDIT)` gets
-              EAFNOSUPPORT), the tty filter (`ioctl` TIOCSTI, TIOCLINUX,
-              TIOCSETD and TIOCCONS get EPERM, in every tier and under any
-              project policy) and, unless `nestedSandbox`, the namespace mask
-              (clone and unshare with a `CLONE_NEW*` flag, and setns, get
-              EPERM, and clone3 ENOSYS).
-            '';
-            type = lib.types.submodule {
-              options = {
-                tier = lib.mkOption {
-                  type = lib.types.nullOr (lib.types.enum [ "parity" "strict" ]);
-                  default = "strict";
-                  description = ''
-                    `parity` is exactly the allow-list systemd-nspawn installs
-                    for a container. `strict` is parity without `@keyring`,
-                    `userfaultfd`, `@mount`, `io_uring_*`, `ptrace` and
-                    `process_vm_*`, which ordinary tools do without; strace
-                    and gdb need `debug`. `null` installs no allow-list, only
-                    the fixed filters, and warns.
-                  '';
-                };
-                debug = lib.mkOption {
-                  type = lib.types.bool;
-                  default = false;
-                  description = ''
-                    Adds `ptrace`, for strace and gdb. Its reach is the
-                    session's own pid namespace.
-                  '';
-                };
-                nestedSandbox = lib.mkOption {
-                  type = lib.types.bool;
-                  default = false;
-                  description = ''
-                    For a payload that sandboxes its own children, such as
-                    Chromium's sandbox, `codex sandbox` or a nested bwrap: the
-                    session may make user namespaces of its own, the namespace
-                    mask goes and `@mount` is allowed. All three are needed
-                    together. The payload still cannot reach the session's
-                    network namespace.
-                  '';
-                };
-                allow = lib.mkOption {
-                  type = lib.types.listOf syscallName;
-                  default = [ ];
-                  example = [ "@keyring" "userfaultfd" ];
-                  description = "Syscall names or `@groups` added to the tier.";
-                };
-                deny = lib.mkOption {
-                  type = lib.types.listOf syscallName;
-                  default = [ ];
-                  example = [ "@swap" ];
-                  description = ''
-                    Syscall names or `@groups` removed, after the tier, the
-                    loosenings and `allow`, which it overrides.
-                  '';
-                };
-                errno = lib.mkOption {
-                  type = lib.types.enum [ "EPERM" "EACCES" "ENOSYS" ];
-                  default = "EPERM";
-                  description = ''
-                    What a call in `@known` that the filter does not allow
-                    returns. ENOSYS makes a program fall back as it would on
-                    an older kernel.
-                  '';
-                };
-                log = lib.mkOption {
-                  type = lib.types.bool;
-                  default = false;
-                  description = ''
-                    Allows the calls `errno` would refuse and has the kernel
-                    log each (audit `type=1326`, with `syscall=NR`), to learn
-                    a policy. `scmp_sys_resolver -a x86_64 NR` names a number;
-                    the names become `allow` entries or `seccompPolicy` lines.
-                    Not for untrusted payloads, and it warns.
-                  '';
-                };
-              };
-            };
-          };
-
-        seccompPolicy = lib.mkOption {
-          type = lib.types.lines;
-          default = "";
-          example = ''chase-envelope approve "$workspace"'';
-          description = ''
-            A project's own changes to the `seccomp` filter, for a policy that
-            is only known at launch. Runs as the caller after `guard`, with
-            the launcher's arguments, the caller's stdin and stderr, and
-            `$workspace`, `$workspace_mode`, `$binds` and `$machine` in
-            scope, and prints lines of `allow X...` or `deny X...`, where
-            each X is a syscall name or an `@group`. `#` comments and blank
-            lines are skipped. A non-zero exit refuses the launch, and so
-            does a line it cannot read or a name systemd does not list.
-
-            `$machine` is the session's name, the one `postStart` and
-            `postStop` see, so anything it approves for them can be staged
-            per launch rather than per checkout.
-
-            The project's lines apply to the declaration's allow-list: its
-            allows are added and then its denies removed. The fixed filters
-            stay, the tty filter included. The result is compiled at launch
-            and cached under `$XDG_RUNTIME_DIR/flong/seccomp` by the hash of
-            what is compiled, so a policy already seen costs a hash. Printing
-            nothing compiles nothing. A relaunch runs it again.
-
-            It needs a tier to act on, and it is a consistency check in the
-            way `guard` is: the caller can run flong launch with any filter.
-          '';
-        };
-
-        protect = lib.mkOption {
-          type = lib.types.listOf (lib.types.strMatching "/.*");
-          default = [ ];
-          example = [ "/run/frisket" ];
-          description = ''
-            Host paths no mount of a session may reach: no source may equal,
-            lie inside or contain one. For a directory whose contents steer
-            sessions from outside, such as a daemon's control socket.
-
-            The wrapper protects
-            `/proc`, `/sys/fs/cgroup` and the user manager's `bus` and
-            `systemd` sockets as well, and the launcher its own state and
-            the holder's cgroup.
-          '';
         };
 
         path = lib.mkOption {

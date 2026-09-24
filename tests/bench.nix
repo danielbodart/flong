@@ -116,7 +116,7 @@ in
         net = plain // {
           path = [ pkgs.nftables ];
           network = { };
-          postStart = hook;
+          postStart = [ [ "${pkgs.writeShellScript "flong-bench-hook" ("set -euo pipefail\n" + hook)}" ] ];
         };
       in
       {

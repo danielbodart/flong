@@ -35,7 +35,15 @@ in
 
   name = "flong-basic" + lib.optionalString (part != "all") "-${part}";
 
-  nodes.machine = { pkgs, ... }: {
+  nodes.machine = { pkgs, ... }:
+    let
+      # A hook is a list of commands, and `workspace` one: each snippet
+      # below is a script of its own, under the options the snippets had.
+      script = name: text: "${pkgs.writeShellScript "flong-test-${name}" ("set -euo pipefail\n" + text)}";
+      ws = text: [ (script "workspace" text) ];
+      hook = name: text: [ [ (script name text) ] ];
+    in
+    {
     imports = [ ../module.nix ];
 
     virtualisation.memorySize = 3072;
@@ -291,7 +299,7 @@ in
 
     flong.netless = {
       user = "alice";
-      workspace = ''realpath /srv/work'';
+      workspace = ws ''realpath /srv/work'';
       command = [ "bash" "-c" ];
     };
 
@@ -300,22 +308,22 @@ in
     flong.hooked = {
       container = "netless";
       user = "alice";
-      workspace = ''realpath /srv/work'';
+      workspace = ws ''realpath /srv/work'';
       path = [ pkgs.nftables pkgs.netcat pkgs.procps ];
 
       # What the caller asked for, so that FLONG_BINDS has something in it
       # for the hook's binds to be absent from.
-      binds = ''printf '%s:rw\n' /srv/companion'';
+      binds = hook "binds" ''printf '%s:rw\n' /srv/companion'';
 
       # Releases what postStart made, and says so. Keyed on $machine alone,
       # because on the sweep's path that is all there is.
-      postStop = ''
+      postStop = hook "poststop" ''
         pkill -f "hook-sock-$machine" || true
         rm -f "${hookDir}/hook-file-$machine" "${hookDir}/hook-sock-$machine"
         echo "$machine" >> /tmp/stopped
       '';
 
-      postStart = ''
+      postStart = hook "poststart" ''
         # The caller's binds reach the hook, as they reached the guard.
         [ "$binds" = /srv/companion:rw ]
 
@@ -359,7 +367,7 @@ in
     flong.autoPorts = {
       container = "netless";
       user = "alice";
-      workspace = ''realpath /srv/work'';
+      workspace = ws ''realpath /srv/work'';
       network.forwardPorts = "auto";
       network.hostLoopbackToSession = true;
       command = [ "bash" "-c" ];
@@ -368,7 +376,7 @@ in
     flong.networked = {
       container = "netless";
       user = "alice";
-      workspace = ''realpath /srv/work'';
+      workspace = ws ''realpath /srv/work'';
       path = [ pkgs.nftables ];
 
       network = {
@@ -378,7 +386,7 @@ in
         forwardPorts = [ { hostPort = 18200; containerPort = 18201; } ];
       };
 
-      postStart = ''
+      postStart = hook "poststart" ''
         # How much egress the namespace had while the hook held it. pasta is
         # attached after this returns, so the answer must be none.
         ${enter} cat /proc/net/route | tail -n +2 | wc -l \
@@ -393,7 +401,7 @@ in
       # it did -- which it must not be, whichever way the launcher ended. A
       # session is its cgroup's sandbox leaf, which has a process in it for as
       # long as the session runs.
-      postStop = ''
+      postStop = hook "poststop" ''
         if read -r _ 2>/dev/null <"${holderCgroup}/netless/$machine/sandbox/cgroup.procs"; then
           echo "live-at-poststop" >> /tmp/stopped
         fi
@@ -410,8 +418,8 @@ in
     flong.recorded = {
       container = "netless";
       user = "alice";
-      workspace = ''realpath /srv/work'';
-      postStart = ''
+      workspace = ws ''realpath /srv/work'';
+      postStart = hook "poststart" ''
         echo "$machine" > /tmp/recorded-hook
         for _ in $(seq 1200); do
           [ -e /tmp/recorded-go ] && exit 0
@@ -419,7 +427,7 @@ in
         done
         exit 1
       '';
-      postStop = ''
+      postStop = hook "poststop" ''
         echo "$machine" >> /tmp/recorded-stopped
       '';
       command = [ "bash" "-c" ];
@@ -435,13 +443,13 @@ in
     flong.hookfds = {
       container = "netless";
       user = "alice";
-      workspace = ''realpath /srv/work'';
-      postStart = ''
+      workspace = ws ''realpath /srv/work'';
+      postStart = hook "poststart" ''
         ls /proc/self/fd > /tmp/hookfds-poststart
         exec 7</dev/null
         ls /proc/self/fd > /tmp/hookfds-poststart-control
       '';
-      postStop = ''
+      postStop = hook "poststop" ''
         ls /proc/self/fd > /tmp/hookfds-poststop
         exec 7</dev/null
         ls /proc/self/fd > /tmp/hookfds-poststop-control
@@ -455,8 +463,8 @@ in
     flong.badhook = {
       container = "netless";
       user = "alice";
-      workspace = ''realpath /srv/work'';
-      postStart = ''
+      workspace = ws ''realpath /srv/work'';
+      postStart = hook "poststart" ''
         echo "the hook refuses this session" >&2
         exit 1
       '';
@@ -475,7 +483,7 @@ in
 
       # The uid is recorded so the test can assert WHO evaluated this: the
       # caller, as everything outside the session runs.
-      workspace = ''
+      workspace = ws ''
         id -u > /tmp/workspace-uid
         printf '%s\n' "$*" > /tmp/workspace-args
         realpath /srv/work
@@ -484,7 +492,7 @@ in
       # Proves the gate sees the resolved workspace rather than having to
       # work one out from $PWD. Refusing here would fail every subtest below,
       # which is the point: the value has to be there and has to be right.
-      guard = ''
+      guard = hook "guard" ''
         [ "$workspace" = /srv/work ] || {
           echo "guard saw workspace='$workspace'" >&2
           exit 1
@@ -508,7 +516,7 @@ in
       # Resolved with $workspace in scope, which is what lets a consumer pair
       # directories rather than name a fixed set.
       # One read-write because it says so, one read-only by default.
-      binds = ''
+      binds = hook "binds" ''
         [ "$workspace" = /srv/work ] && printf '%s:rw\n' /srv/companion
         printf '%s\n' /srv/reference
       '';
@@ -528,7 +536,7 @@ in
     flong.argv = {
       container = "demo";
       user = "alice";
-      workspace = ''realpath /srv/work'';
+      workspace = ws ''realpath /srv/work'';
       command = [ "printf" "[%s]\\n" "fixed; $HOME *" "trailing\\" ];
     };
 
@@ -538,7 +546,7 @@ in
     flong.userpath = {
       container = "demo";
       user = "alice";
-      workspace = ''realpath /srv/work'';
+      workspace = ws ''realpath /srv/work'';
       command = [ "hello" "--greeting" ];
     };
 
@@ -549,7 +557,7 @@ in
     flong.symlinkoverlay = {
       container = "demo";
       user = "alice";
-      workspace = ''realpath /srv/work'';
+      workspace = ws ''realpath /srv/work'';
       overlays."/home/alice/escape/inner" = "/srv/lower";
       command = [ "true" ];
     };
@@ -558,7 +566,7 @@ in
     flong.badmask = {
       container = "demo";
       user = "alice";
-      workspace = ''realpath /srv/work'';
+      workspace = ws ''realpath /srv/work'';
       masks = [ "/srv/no-such-path" ];
       command = [ "true" ];
     };
@@ -566,7 +574,7 @@ in
     flong.badworkspace = {
       container = "demo";
       user = "alice";
-      workspace = ''realpath "/srv/odd:name"'';
+      workspace = ws ''realpath "/srv/odd:name"'';
       command = [ "true" ];
     };
 
@@ -576,8 +584,8 @@ in
     flong.badbinds = {
       container = "demo";
       user = "alice";
-      workspace = ''realpath /srv/work'';
-      binds = ''realpath "/srv/odd:name"'';
+      workspace = ws ''realpath /srv/work'';
+      binds = hook "binds" ''realpath "/srv/odd:name"'';
       command = [ "true" ];
     };
 
@@ -586,8 +594,8 @@ in
     flong.failingbinds = {
       container = "demo";
       user = "alice";
-      workspace = ''realpath /srv/work'';
-      binds = ''
+      workspace = ws ''realpath /srv/work'';
+      binds = hook "binds" ''
         printf '%s\n' /srv/reference
         false
       '';
@@ -598,8 +606,8 @@ in
     flong.roworkspace = {
       container = "demo";
       user = "alice";
-      workspace = ''printf '%s:ro\n' /srv/work'';
-      guard = ''
+      workspace = ws ''printf '%s:ro\n' /srv/work'';
+      guard = hook "guard" ''
         [ "$workspace" = /srv/work ] && [ "$workspace_mode" = ro ]
       '';
       command = [ "bash" "-c" ];
@@ -612,11 +620,11 @@ in
     flong.guardexit = {
       container = "demo";
       user = "alice";
-      workspace = ''realpath /srv/work'';
+      workspace = ws ''realpath /srv/work'';
       # Conditional, as an early allow is in practice: a bare `exit 0` in the
       # launcher's own shell leaves the rest of it unreachable, which
       # shellcheck would refuse before any test ran.
-      guard = ''
+      guard = hook "guard" ''
         if [ -n "$workspace" ]; then exit 0; fi
       '';
       command = [ "bash" "-c" ];
@@ -624,10 +632,10 @@ in
     flong.guardreassign = {
       container = "demo";
       user = "alice";
-      workspace = ''realpath /srv/work'';
+      workspace = ws ''realpath /srv/work'';
       # Through eval, because shellcheck reads a plain assignment in a
       # subshell as the mistake it is and refuses to build the launcher.
-      guard = ''eval workspace=/srv/reference'';
+      guard = hook "guard" ''eval workspace=/srv/reference'';
       command = [ "bash" "-c" ];
     };
 
@@ -646,7 +654,7 @@ in
     flong.failingworkspace = {
       container = "demo";
       user = "alice";
-      workspace = "false";
+      workspace = ws "false";
       command = [ "true" ];
     };
   };

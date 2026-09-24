@@ -154,7 +154,14 @@ in
 
   name = "flong-rootless" + lib.optionalString (part != "all") "-${part}";
 
-  nodes.machine = { config, pkgs, ... }: {
+  nodes.machine = { config, pkgs, ... }:
+    let
+      # A hook is a list of commands, and `workspace` one: each snippet
+      # here is a script of its own, under the options the snippets had.
+      script = name: text: "${pkgs.writeShellScript "flong-test-${name}" ("set -euo pipefail\n" + text)}";
+      hook = name: text: [ [ (script name text) ] ];
+    in
+    {
     imports = [ ../module.nix ];
 
     virtualisation.memorySize = 2048;
@@ -307,12 +314,13 @@ in
     flong =
       let
         hooked = base // {
-          inherit postStart postStop;
+          postStart = hook "poststart" postStart;
+          postStop = hook "poststop" postStop;
         };
         # A hook's nft table and declared limits: what the payload tries to
         # undo.
         fenced = base // {
-          postStart = fenceHook;
+          postStart = hook "fence" fenceHook;
           path = [ pkgs.nftables ];
           limits = { MemoryMax = "256M"; TasksMax = 64; };
         };
@@ -350,13 +358,13 @@ in
           # One level below the writable bind, which the depth rule allows.
           masks = [ "/rw/secret" ];
           protect = [ "/srv/protected" ];
-          workspace = "echo /srv/work:ro";
+          workspace = [ (script "workspace" "echo /srv/work:ro") ];
           # The caller's bind, and one more the caller's environment names.
-          binds = ''
+          binds = hook "binds" ''
             printf '%s:rw\n' /srv/companion
             if [ -n "''${FLONG_TEST_BIND:-}" ]; then printf '%s\n' "$FLONG_TEST_BIND"; fi
           '';
-          guard = ''[ -z "''${FLONG_TEST_DENY:-}" ] || { echo "the guard refuses" >&2; exit 1; }'';
+          guard = hook "guard" ''[ -z "''${FLONG_TEST_DENY:-}" ] || { echo "the guard refuses" >&2; exit 1; }'';
         };
 
         # The tiers and loosenings beside plain's default, strict.
@@ -365,8 +373,8 @@ in
         nested = base // { seccomp.nestedSandbox = true; };
         learner = base // { seccomp.log = true; };
         project = base // {
-          inherit seccompPolicy;
-          postStart = ''echo "$machine" > /tmp/project-poststart'';
+          seccompPolicy = hook "policy" seccompPolicy;
+          postStart = hook "poststart" ''echo "$machine" > /tmp/project-poststart'';
         };
       };
 

@@ -67,6 +67,16 @@
           # byte: stdout, stderr, status, and filters (tests/golden.nix).
           golden = import ./tests/golden.nix { inherit pkgs; };
 
+          # decl-options.json, which module.nix builds its options from,
+          # against a fresh walk of src/decl.zig (native.nix's declOptions).
+          decl-options-fresh = pkgs.runCommand "decl-options-fresh" { } ''
+            if ! diff -u ${./decl-options.json} ${native.declOptions}/decl-options.json; then
+              echo "decl-options.json is stale: run nix run .#update-options" >&2
+              exit 1
+            fi
+            touch $out
+          '';
+
           # The version script decides what every release is called, so it is
           # gated by the same check that gates the release.
           shellcheck = pkgs.runCommand "shellcheck"
@@ -105,6 +115,24 @@
           type = "app";
           program = "${self.checks.x86_64-linux.golden.update}/bin/golden-update";
           meta.description = "Rewrite tests/golden's filters after a libseccomp bump";
+        };
+
+        # update-options rewrites decl-options.json from src/decl.zig, after
+        # a change to the declaration or a doc comment in it: run it from the
+        # repository's root, and commit the result with the change.
+        update-options = {
+          type = "app";
+          program = pkgs.lib.getExe (pkgs.writeShellApplication {
+            name = "flong-update-options";
+            text = ''
+              if [[ ! -f flake.nix || ! -f src/decl.zig ]]; then
+                echo "update-options: run it from flong's repository root" >&2
+                exit 1
+              fi
+              install -m 0644 ${(import ./native.nix { inherit pkgs; }).declOptions}/decl-options.json decl-options.json
+            '';
+          });
+          meta.description = "Rewrite decl-options.json from src/decl.zig";
         };
 
         # The local gate, `nix run .#gate` from the repository's root: every

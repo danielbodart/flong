@@ -98,7 +98,7 @@ let
       (refused "a seccompPolicy with no tier"
         {
           flong.box.seccomp.tier = null;
-          flong.box.seccompPolicy = "echo allow ptrace";
+          flong.box.seccompPolicy = [ [ "echo" "allow" "ptrace" ] ];
         }
         "no filter")
       (accepted "debug and errno with no tier"
@@ -119,7 +119,7 @@ let
             deny = [ "ptrace" "@swap" ];
             errno = "ENOSYS";
           };
-          flong.box.seccompPolicy = "echo allow ptrace";
+          flong.box.seccompPolicy = [ [ "echo" "allow" "ptrace" ] ];
         })
       # A name is a syscall or a group, in the form systemd lists them.
       (untyped { flong.box.seccomp.allow = [ "Ptrace" ]; } [ "flong" "box" "seccomp" "allow" ]
@@ -129,7 +129,7 @@ let
       (untyped { flong.box.seccomp.errno = "EINVAL"; } [ "flong" "box" "seccomp" "errno" ]
         || throw "assertions: an errno outside EPERM, EACCES and ENOSYS was accepted")
       (lib.any (lib.hasInfix "consistency check and not a gate")
-        (flongWarnings { flong.box.guard = "true"; })
+        (flongWarnings { flong.box.guard = [ [ "true" ] ]; })
         || throw "assertions: a guard is not warned about")
       (refused "a container name beginning with a dot"
         {
@@ -304,6 +304,47 @@ let
         (configWith { flong.box.command = lib.mkForce [ ]; }).flong.box.command
         true)).success
         || throw "assertions: an empty command was accepted")
+      # Every hook is a list of commands, and `workspace` one command or
+      # null: a shell string, the type they had, does not evaluate, and
+      # neither does an empty command.
+      (untyped { flong.box.guard = "true"; } [ "flong" "box" "guard" ]
+        || throw "assertions: a guard as a shell string was accepted")
+      (untyped { flong.box.guard = [ [ ] ]; } [ "flong" "box" "guard" ]
+        || throw "assertions: an empty guard command was accepted")
+      (untyped { flong.box.binds = [ "printf" "/srv" ]; } [ "flong" "box" "binds" ]
+        || throw "assertions: binds as one command rather than a list of them was accepted")
+      (untyped { flong.box.postStart = "true"; } [ "flong" "box" "postStart" ]
+        || throw "assertions: a postStart as a shell string was accepted")
+      (untyped { flong.box.postStop = [ "true" ]; } [ "flong" "box" "postStop" ]
+        || throw "assertions: a postStop of bare strings was accepted")
+      (untyped { flong.box.seccompPolicy = "echo allow ptrace"; } [ "flong" "box" "seccompPolicy" ]
+        || throw "assertions: a seccompPolicy as a shell string was accepted")
+      (untyped { flong.box.workspace = "pwd"; } [ "flong" "box" "workspace" ]
+        || throw "assertions: a workspace as a shell string was accepted")
+      (untyped { flong.box.workspace = [ ]; } [ "flong" "box" "workspace" ]
+        || throw "assertions: an empty workspace command was accepted")
+      # The hooks merge in order, mkBefore and mkAfter included, as a
+      # consumer layering onto another's declaration relies on.
+      ((configWith {
+          flong.box.guard = lib.mkMerge [
+            (lib.mkAfter [ [ "c" ] ])
+            [ [ "b" "x" ] ]
+            (lib.mkBefore [ [ "a" ] ])
+          ];
+        }).flong.box.guard == [ [ "a" ] [ "b" "x" ] [ "c" ] ]
+        || throw "assertions: guard's commands did not merge in mkOrder order")
+      # The generated options keep the types they had where the
+      # declaration did not change them.
+      (untyped { flong.box.limits.CPUWeight = 0; } [ "flong" "box" "limits" "CPUWeight" ]
+        || throw "assertions: a CPUWeight of 0 was accepted")
+      (untyped { flong.box.limits.MemoryMax = "8X"; } [ "flong" "box" "limits" "MemoryMax" ]
+        || throw "assertions: a MemoryMax of 8X was accepted")
+      (untyped { flong.box.limits.TasksMax = 0; } [ "flong" "box" "limits" "TasksMax" ]
+        || throw "assertions: a TasksMax of 0 was accepted")
+      (untyped { flong.box.network.forwardPorts = "all"; } [ "flong" "box" "network" "forwardPorts" ]
+        || throw "assertions: forwardPorts = \"all\" was accepted")
+      (accepted "every limit spelling"
+        { flong.box.limits = { MemoryMax = "infinity"; MemoryHigh = 1073741824; MemorySwapMax = "2G"; TasksMax = "infinity"; CPUQuota = "150%"; CPUWeight = 10000; }; })
   ];
 
   # Case i is in shard i mod shards. Every case is forced before the
