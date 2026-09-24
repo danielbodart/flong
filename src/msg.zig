@@ -49,6 +49,11 @@ pub fn say(comptime fmt: []const u8, args: anytype) void {
     emit(fmt, args, null);
 }
 
+/// fl_err's message where the caller goes on: "<prog>: <body>: <strerror(e)>".
+pub fn sayErrno(e: sys.E, comptime fmt: []const u8, args: anytype) void {
+    emit(fmt, args, e);
+}
+
 /// Says "<body>\n" with no prefix, as a usage line is
 /// (flong-seccomp.c:334).
 pub fn bare(comptime fmt: []const u8, args: anytype) void {

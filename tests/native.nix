@@ -3,8 +3,10 @@
 # proofs' binaries on PATH (tests/integration.nix's `vm`), and each proof's
 # testScript fragment after the common setup below, in tests/proofs/ name
 # order (ZIG.md, "Tests", checks.native). Before them, flong-init past its
-# argv. A fourth VM beside basic, rootless and parity; nothing in it is
-# about time.
+# argv, the walker, and flong-proc: clone3 into a cgroup, a fork after
+# setns(CLONE_NEWUSER), a session swept, and the C and the Zig sweepers
+# over the same records (phase 5). A fourth VM beside basic, rootless and
+# parity; nothing in it is about time.
 #
 # Fragments are Python run in this testScript's scope, so they may use
 # `machine`, `shlex` and `as_alice`; each opens its own subtest.
@@ -89,6 +91,247 @@ let
     kill $swapping
     echo "said $(sed 's/y[0-9]*$/yN/' $R/race.err | sort -u | tr '\n' '|')"
     echo "view $(ls $R/view/deep | tr '\n' ' ')"
+  '';
+
+  # The sweeper's differential fixture (ZIG.md phase 5, "the record
+  # contract"): sweep-diff PROGRAM builds one state directory of records a
+  # launcher writes and hostile ones, and the sessions they name under a
+  # holder h of the calling unit's, runs PROGRAM as the holder's sweeper in
+  # h/supervisor until it blocks in its inotify read, adds a record, lets it
+  # sweep that, stops it, and prints what it said and left. The C
+  # (native.nix's sweeperC) and the Zig print the same.
+  sweeperC = (import ../native.nix { pkgs = hostPkgs; }).sweeperC;
+  # postStop programs (flong-record.c:436-484): one that logs its argv,
+  # environment, stdin and directory, one exiting 3, one killed by SIGTERM,
+  # a store symlink out of the store and one into it, a file that is not
+  # executable, a directory.
+  psLog = hostPkgs.writeShellScript "flong-ps-log" ''
+    IFS= read -r line
+    rc=$?
+    echo "$0 argc=$# 1=$1 machine=$machine pwd=$PWD stdin-rc=$rc env="$(export -p) >>/tmp/ps.log
+  '';
+  psFail = hostPkgs.writeShellScript "flong-ps-fail" "exit 3";
+  psSig = hostPkgs.writeShellScript "flong-ps-sig" "kill -TERM $$";
+  psOut = hostPkgs.runCommand "flong-ps-out" { } "ln -s /tmp/ps-outside $out";
+  psIn = hostPkgs.runCommand "flong-ps-in" { } "ln -s ${psLog} $out";
+  psNoexec = hostPkgs.writeText "flong-ps-noexec" "#!/bin/sh\n";
+  psDir = hostPkgs.runCommand "flong-ps-dir" { } "mkdir $out";
+  # A program exiting 3 whose path is PATH_MAX - 1 bytes, which realpath
+  # takes (flong-record.c:444). A build cannot make it, the daemon's own
+  # path to it being too long, and the VM's store is read-only: root mounts
+  # a tmpfs on the empty store directory `deep` and makes it there.
+  deep = hostPkgs.runCommand "flong-ps-deep" { } "mkdir $out";
+  mkDeep = hostPkgs.writeShellScript "mk-ps-deep" ''
+    set -eu
+    p=${deep}
+    mount -t tmpfs -o mode=0755 flong-ps-deep $p
+    while [ $((4095 - ''${#p} - 1)) -gt 255 ]; do
+      p=$p/$(printf 'd%.0s' $(seq 200))
+      mkdir -p $p
+    done
+    p=$p/$(printf 'f%.0s' $(seq $((4095 - ''${#p} - 1))))
+    printf '#!${hostPkgs.runtimeShell}\nexit 3\n' >$p
+    chmod 0555 $p
+    test ''${#p} = 4095
+  '';
+  sweepDiff = hostPkgs.writeShellScript "sweep-diff" ''
+    set -u
+    prog=$1
+    cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
+    # The unit's cgroup and the job's pids differ from run to run.
+    main() {
+    H=$cg/h
+    S=/tmp/sweep-state
+    D=$S/sessions
+    rm -rf $S /tmp/ps.log /tmp/ps-outside
+    printf '#!/bin/sh\necho outside >>/tmp/ps.log\n' >/tmp/ps-outside
+    chmod +x /tmp/ps-outside
+    mkdir -m 0700 $S $D
+    mkdir -p $H/supervisor $H/c/s-full/sandbox $H/c/s-full/hooks $H/c/s-full/extra/inner \
+      $H/c/s-noleader/sandbox
+    sleep 600 & a=$!; echo $a >$H/c/s-full/sandbox/cgroup.procs
+    sleep 600 & b=$!; echo $b >$H/c/s-full/hooks/cgroup.procs
+    sleep 600 & c=$!; echo $c >$H/c/s-full/extra/inner/cgroup.procs
+    rec() { printf '%b' "$2" >$D/$1; }
+    long=$(printf 'a%.0s' $(seq 4000))
+    # As a launcher writes them (flong-record.c:324-398), and blanked.
+    rec s-full "poststop=${psLog}\ncgroup=$H/c/s-full\nleader=$a:$(cut -d' ' -f22 /proc/$a/stat)\n"
+    rec s-noleader "poststop=${psFail}\ncgroup=$H/c/s-noleader\n"
+    rec s-absent "poststop=${psSig}\ncgroup=$H/c/s-absent\nleader=$$:1\n"
+    rec s-nocontainer "cgroup=$H/none/s-nocontainer\n"
+    rec s-other "poststop=${psLog}\ncgroup=$cg/other/c/s-other\n"
+    rec blanked "\n\n\ncgroup=$H/c/blanked\n"
+    # cgroup= that is no session's (flong-cgroup.c:415-462).
+    rec s-dotdot "cgroup=$H/../h/c/s-dotdot\n"
+    rec s-machine "cgroup=$H/c/someone-else\n"
+    rec s-short "cgroup=/sys/fs/cgroup/c/s-short\n"
+    rec s-container "cgroup=$H/.c/s-container\n"
+    rec s-outside "cgroup=/tmp/h/c/s-outside\n"
+    rec s-longcg "cgroup=/sys/fs/cgroup/$long\n"
+    # poststop= that is no program in the store (:436-449), and ones that are.
+    rec ps-notstore "poststop=/tmp/ps-outside\ncgroup=$H/c/ps-notstore\n"
+    rec ps-dotdot "poststop=/nix/store/../tmp/ps-outside\ncgroup=$H/c/ps-dotdot\n"
+    rec ps-symout "poststop=${psOut}\ncgroup=$H/c/ps-symout\n"
+    rec ps-symin "poststop=${psIn}\ncgroup=$H/c/ps-symin\n"
+    rec ps-noexec "poststop=${psNoexec}\ncgroup=$H/c/ps-noexec\n"
+    rec ps-dir "poststop=${psDir}\ncgroup=$H/c/ps-dir\n"
+    rec ps-deep "poststop=$(find ${deep} -type f)\ncgroup=$H/c/ps-deep\n"
+    rec ps-missing "poststop=/nix/store/nothing-here\ncgroup=$H/c/ps-missing\n"
+    rec ps-long "poststop=/tmp/$long\ncgroup=$H/c/ps-long\n"
+    # Not a record's form (:264-308).
+    rec bad-nul "cgroup=/x\0\n"
+    rec bad-nonl "cgroup=$H/c/bad-nonl"
+    rec bad-unknown "x=1\ncgroup=$H/c/bad-unknown\n"
+    rec bad-order "cgroup=$H/c/bad-order\npoststop=${psLog}\n"
+    rec bad-twice "cgroup=$H/c/bad-twice\ncgroup=$H/c/bad-twice\n"
+    rec bad-leader "cgroup=$H/c/bad-leader\nleader=01:1\n"
+    rec bad-leader2 "cgroup=$H/c/bad-leader2\nleader=1:18446744073709551616\n"
+    rec bad-empty ""
+    rec bad-novalue "poststop=\ncgroup=$H/c/bad-novalue\n"
+    rec bad-longpath "cgroup=/$long$long\n"
+    head -c 8300 /dev/zero >$D/bad-big
+    rec unreadable "cgroup=$H/c/unreadable\n"
+    chmod 000 $D/unreadable
+    # Not records, or not ours to open (:641-654, 712-715).
+    rec .hidden "cgroup=$H/c/.hidden\n"
+    rec '#123' "cgroup=$H/c/x\n"
+    rec "$(printf 'n%.0s' $(seq 129))" "cgroup=$H/c/x\n"
+    ln -s s-other $D/linkrec
+    ln -s nowhere $D/dangling
+    mkdir $D/dirrec
+    mkfifo $D/fiforec
+    # A record whose lock is held: tried once, left (:657-664).
+    rec locked "cgroup=$H/c/locked\n"
+    flock -s $D/locked sleep 600 </dev/null >/dev/null 2>&1 & l=$!
+    for i in $(seq 3000); do grep -q ":$(stat -c %i $D/locked) " /proc/locks && break; sleep 0.05; done
+
+    # The sweeper in the holder's supervisor leaf (flong-cgroup.c:279-298).
+    (echo $BASHPID >$H/supervisor/cgroup.procs; exec "$prog" $S) 2>/tmp/sweeper.err &
+    swp=$!
+    blocked() {
+      local s fd
+      read -r s fd _ </proc/$swp/syscall 2>/dev/null || return 1
+      [ "$s" = 0 ] && [ "$(readlink /proc/$swp/fd/$((fd)))" = "anon_inode:inotify" ]
+    }
+    waitblocked() {
+      for i in $(seq 3000); do blocked && return 0; sleep 0.1; done
+      echo "never blocked in its inotify read"
+    }
+    waitblocked
+    # A record closed after the first sweeps: an event by its name, a sweep
+    # with LOCK_NB (flong-record.c:736-753).
+    rec late "cgroup=$H/c/late\n"
+    for i in $(seq 3000); do [ -e $D/late ] || break; sleep 0.1; done
+    waitblocked
+    kill -TERM $swp
+    wait $swp
+    echo "== sweeper status $?"
+    for p in $a $b $c; do wait $p; echo "== sleep status $?"; done
+    echo "== said"
+    cat /tmp/sweeper.err
+    echo "== left"
+    chmod 600 $D/unreadable
+    (cd $D && for f in $(ls -A | LC_ALL=C sort); do
+      if [ -f "$f" ] && [ ! -L "$f" ]; then
+        echo "$f $(stat -c '%F %s %a' "$f") $(od -An -c "$f" | head -c 300 | tr -s ' \n' ' ')"
+      else
+        echo "$f $(stat -c '%F' "$f")"
+      fi
+    done)
+    echo "== cgroups"
+    find $H -mindepth 1 -type d | sed "s|^$H/||" | LC_ALL=C sort
+    echo "== poststop"
+    cat /tmp/ps.log 2>/dev/null
+    pkill -P $l; kill $l; wait $l
+    find $H -depth -type d -exec rmdir {} +
+    rm -rf $S /tmp/ps.log /tmp/ps-outside /tmp/sweeper.err
+    }
+    main 2>&1 | sed -e "s|$cg|CG|g" -e '/ Killed  *sleep 600$/d'
+  '';
+
+  # postStop once, and the watch before the first sweep (ZIG.md phase 5,
+  # ordering checkpoint 11; flong-record.c:193-217, 755-825): sweep-order
+  # PROGRAM runs PROGRAM as the holder's sweeper over three records, all
+  # dead but one. `gated`'s postStop (psGate) holds the first sweep until
+  # told. `late` comes before it in the directory's order and its lock is
+  # held by a stand-in launcher, so the first sweep tries it once and leaves
+  # it; the stand-in is SIGKILLed while that sweep is held, and only a watch
+  # added before the sweep hears the close. `once` cannot be removed (its
+  # sandbox leaf is mode 0500 around a nested cgroup), so its record
+  # outlives its postStop: blanked, no later sweep runs postStop again,
+  # and it goes once the leaf is writable.
+  psGate = hostPkgs.writeShellScript "flong-ps-gate" ''
+    echo "$machine" >>/tmp/order/ran
+    if [ -e /tmp/order/gate-$machine ]; then
+      : >/tmp/order/in-$machine
+      while [ -e /tmp/order/gate-$machine ]; do ${hostPkgs.coreutils}/bin/sleep 0.05; done
+    fi
+  '';
+  sweepOrder = hostPkgs.writeShellScript "sweep-order" ''
+    set -u
+    prog=$1
+    cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
+    H=$cg/h
+    S=/tmp/order/state
+    D=$S/sessions
+    rm -rf /tmp/order
+    mkdir -p /tmp/order
+    mkdir -m 0700 $S $D
+    mkdir -p $H/supervisor $H/c/once/sandbox/inner
+    chmod 0500 $H/c/once/sandbox
+    ps=${psGate}
+    printf 'poststop=%s\ncgroup=%s\n' $ps $H/c/once >$D/once
+    # Of two names, the first in the order a sweep reads is `late`.
+    : >$D/r1
+    : >$D/r2
+    read -r late gated < <(ls -f $D | grep -x 'r[12]' | tr '\n' ' ')
+    printf 'cgroup=%s\n' $H/c/$late >$D/$late
+    printf 'poststop=%s\ncgroup=%s\n' $ps $H/c/$gated >$D/$gated
+    : >/tmp/order/gate-$gated
+    # The stand-in launcher: late's lock, on a descriptor open for writing.
+    (exec 9<>$D/$late; flock -x 9; exec sleep 600) &
+    stand=$!
+    for i in $(seq 600); do flock -n $D/$late true || break; sleep 0.05; done
+
+    (echo $BASHPID >$H/supervisor/cgroup.procs; exec "$prog" $S) 2>/tmp/order/err &
+    swp=$!
+    blocked() {
+      local s fd
+      read -r s fd _ </proc/$swp/syscall 2>/dev/null || return 1
+      [ "$s" = 0 ] && [ "$(readlink /proc/$swp/fd/$((fd)))" = "anon_inode:inotify" ]
+    }
+    waitblocked() {
+      for i in $(seq 600); do blocked && return 0; sleep 0.05; done
+      echo "never blocked in its inotify read"
+    }
+    for i in $(seq 600); do [ -e /tmp/order/in-$gated ] && break; sleep 0.05; done
+    echo "gate entered: $([ -e /tmp/order/in-$gated ] && echo yes || echo no)"
+    echo "late in the first sweep: $([ -e $D/$late ] && echo left || echo gone)"
+    kill -KILL $stand
+    wait $stand 2>/dev/null
+    for i in $(seq 600); do flock -n $D/$late true && break; sleep 0.05; done
+    rm /tmp/order/gate-$gated
+    # Nothing but the stand-in's close wakes the sweeper now.
+    for i in $(seq 100); do [ -e $D/$late ] || break; sleep 0.1; done
+    echo "late: $([ -e $D/$late ] && echo left || echo released)"
+    waitblocked
+    { head -c $((10 + ''${#ps})) /dev/zero | tr '\0' '\n'; printf 'cgroup=%s\n' $H/c/once; } >/tmp/order/blanked
+    echo "once: $(cmp -s /tmp/order/blanked $D/once && echo blanked || echo not blanked)"
+    ran() { echo "ran: gated=$(grep -cx $gated /tmp/order/ran) once=$(grep -cx once /tmp/order/ran) late=$(grep -cx $late /tmp/order/ran)"; }
+    ran
+    chmod 0700 $H/c/once/sandbox
+    # A close of something open for writing: a sweep.
+    : >>$D/.nudge
+    for i in $(seq 100); do [ -e $D/once ] || break; sleep 0.1; done
+    waitblocked
+    echo "once: $([ -e $D/once ] && echo left || echo released), cgroup $([ -e $H/c/once ] && echo left || echo gone)"
+    ran
+    kill -TERM $swp
+    wait $swp
+    echo "said:"
+    sed -e "s|$H|H|g" /tmp/order/err | LC_ALL=C sort -u
+    find $H -depth -type d -exec rmdir {} +
+    rm -rf /tmp/order
   '';
 in
 {
@@ -266,5 +509,127 @@ in
                         "flong-walker: a symlink is on the way to /ws/sub/deep/yN"}, race
         assert (len(said) > 0) == (int(counts["exists"]["refused"]) + int(counts["missing"]["refused"]) > 0), race
         assert race["view"] == "x ", race
+
+    # proc.zig, sig.zig and cgroup.zig's sweep half (phase 5), through
+    # flong-proc (tests/zig/procdriver.zig): P3's questions (tests/proofs/p3,
+    # retired in phase 5) asked of the real modules, and a session swept.
+    with subtest("proc: the noreturn fork, as alice"):
+        for mode, status in (("fork", "7"), ("fork-panic", "125")):
+            out = machine.succeed(as_alice(f"flong-proc {mode} 2>&1")).splitlines()
+            print("\n".join(out))
+            assert len([l for l in out if l.startswith("child ran: ")]) == (1 if mode == "fork" else 0), out
+            assert out[-2:-1] == [f"child exited {status}"], out
+            assert out[-1].startswith("parent defer ran: "), out
+            assert (mode == "fork") != ("flong-proc: internal error: planted" in out), out
+
+    with subtest("proc: fork and Spawn with clone3(CLONE_INTO_CGROUP) into an O_PATH leaf of a delegated unit"):
+        out = machine.succeed(as_alice(
+            "cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); mkdir $cg/leaf; "
+            "flong-proc cgroup $cg/leaf; rc=$?; rmdir $cg/leaf; exit $rc")).splitlines()
+        print("\n".join(out))
+        child = [l for l in out if l.startswith("child cgroup: ")]
+        parent = [l for l in out if l.startswith("parent cgroup: ")]
+        spawned = [l for l in out if l.startswith("cgroup: ")]
+        assert len(child) == 1 and len(parent) == 1 and len(spawned) == 1, out
+        assert child[0] == parent[0].replace("parent", "child", 1) + "/leaf", out
+        assert spawned[0] == parent[0].replace("parent ", "", 1) + "/leaf", out
+        assert "/user@1000.service/" in child[0], out
+        # The control: a cgroup that is not alice's refuses the child.
+        out = machine.fail(as_alice("flong-proc cgroup /sys/fs/cgroup/system.slice 2>&1"))
+        print(out)
+        assert "flong-proc: clone3: Permission denied" in out, out
+
+    with subtest("proc: a fork after setns(CLONE_NEWUSER), into the leaf"):
+        out = machine.succeed(as_alice(
+            "unshare --user --map-auto --map-root-user sleep 600 & h=$!; "
+            "for i in $(seq 100); do grep -q 100000 /proc/$h/uid_map && break; sleep 0.1; done; "
+            "cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); mkdir $cg/leaf; "
+            "flong-proc userns /proc/$h/ns/user $cg/leaf 2>&1; rc=$?; "
+            "kill $h; wait $h; rmdir $cg/leaf; exit $rc")).splitlines()
+        print("\n".join(out))
+        assert "parent uid after setns: 0" in out, out
+        assert "child uid: 0" in out, out
+        assert "child uid_map: 0 1000 1 / 1 100000 65536" in out, out
+        assert "child hostname: p3-userns" in out, out
+        assert any(l.startswith("child cgroup: ") and l.endswith("/leaf") for l in out), out
+        assert out[-1] == "child exited 0", out
+
+    with subtest("cgroup: a session killed, waited for and removed, a cgroup nested in its leaf included"):
+        # A holder h of alice's with a container c and a session m, as a
+        # launch lays it out (flong-cgroup.h:1-17), but for pasta's leaf;
+        # a process in each leaf and one in a cgroup the payload made in its
+        # own. The sweep's half opens it by the record's path, kills it,
+        # waits for cgroup.events and removes it; the container stays.
+        out = machine.succeed(as_alice(
+            "cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); "
+            "mkdir -p $cg/h/c/m/sandbox/inner $cg/h/c/m/hooks; "
+            "sleep 600 & a=$!; echo $a > $cg/h/c/m/sandbox/cgroup.procs; "
+            "sleep 600 & b=$!; echo $b > $cg/h/c/m/sandbox/inner/cgroup.procs; "
+            "sleep 600 & c=$!; echo $c > $cg/h/c/m/hooks/cgroup.procs; "
+            "flong-proc session $cg/h c m 2>&1; echo rc=$?; "
+            "for p in $a $b $c; do wait $p; echo status=$?; done; "
+            "test -e $cg/h/c/m && echo session remains; test -d $cg/h/c && echo container remains; "
+            "flong-proc session $cg/h c m 2>&1; echo rc=$?; "
+            "rmdir $cg/h/c $cg/h")).splitlines()
+        print("\n".join(out))
+        assert out == ["opened: session", "leaf sandbox: open", "leaf hooks: open", "leaf pasta: absent",
+                       "killed", "empty", "removed: gone", "rc=0", "status=137", "status=137", "status=137",
+                       "container remains", "opened: absent", "rc=0"], out
+
+    with subtest("sweeper: the C and the Zig sweep the same records alike"):
+        # sweep-diff (above) as alice, once with each sweeper; every line
+        # the same, and the fixture reached what it is for: sessions
+        # released, postStop run, each refusal said (controls against a
+        # vacuous equality, such as both stopping at the holder).
+        machine.succeed("${mkDeep}")
+        runs = {}
+        for name, prog in (("c", "${sweeperC}/bin/flong-sweeper"), ("zig", "${launcher}/bin/flong-sweeper")):
+            runs[name] = machine.succeed(as_alice(f"${sweepDiff} {prog} 2>&1"))
+            print(f"--- {name}\n" + runs[name])
+        assert runs["c"] == runs["zig"], "the sweepers differ"
+        out = runs["zig"]
+        assert "never blocked" not in out, out
+        for want in ("== sweeper status 143", "== sleep status 137",
+                     "flong-sweeper: released 1 dead session\n",
+                     "flong-sweeper: postStop failed for s-noleader (status 3)",
+                     "flong-sweeper: postStop failed for s-absent (status 143)",
+                     "flong-sweeper: postStop failed for ps-dir (status 127)",
+                     "flong-sweeper: postStop failed for ps-deep (status 3)",
+                     "flong-sweeper: exec ${psDir}: Permission denied",
+                     "flong-sweeper: postStop failed for ps-symout: ${psOut} is not a program in /nix/store",
+                     "flong-sweeper: the record of bad-nul is removed: it is not lines of text",
+                     "flong-sweeper: the record of bad-leader2 is removed: its leader= is not <pid>:<starttime>",
+                     "flong-sweeper: the record s-dotdot does not name a session's cgroup:",
+                     "flong-sweeper: read the record of bad-big: File too large",
+                     "flong-sweeper: open the record of unreadable: Permission denied",
+                     "${psLog} argc=1 1=s-full machine=s-full pwd=/ stdin-rc=1",
+                     "${psLog} argc=1 1=ps-symin machine=ps-symin pwd=/ stdin-rc=1",
+                     "\ns-other regular file", "\nlocked regular file", "\nlinkrec symbolic link",
+                     "\n== cgroups\nc\nsupervisor\n== poststop"):
+            assert want in out, want
+        # Cut at 1023 bytes, newline included (quirk 22).
+        assert max(len(l) for l in out.split("\n")) == 1022, out
+        assert "outside" not in out.split("== poststop")[1], out
+
+    with subtest("sweeper: postStop once across a failed removal, and the watch before the first sweep"):
+        # sweep-order (above) as alice, with the C sweeper as the control
+        # the fixture is right, then the Zig. A sweep that skips the blank
+        # runs once's postStop twice; a watch added after the first sweep
+        # leaves late (checkpoint 11).
+        for name, prog in (("c", "${sweeperC}/bin/flong-sweeper"), ("zig", "${launcher}/bin/flong-sweeper")):
+            out = machine.succeed(as_alice(f"${sweepOrder} {prog} 2>&1"))
+            print(f"--- {name}\n" + out)
+            assert out.splitlines() == [
+                "gate entered: yes",
+                "late in the first sweep: left",
+                "late: released",
+                "once: blanked",
+                "ran: gated=1 once=1 late=0",
+                "once: released, cgroup gone",
+                "ran: gated=1 once=1 late=0",
+                "said:",
+                "flong-sweeper: released 1 dead session",
+                "flong-sweeper: rmdir H/c/once/sandbox/inner: Permission denied",
+            ], (name, out)
   '' + lib.concatMapStrings (p: "\n# ${p.name}\n" + p.script) integration.vm.vmScripts;
 }

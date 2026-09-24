@@ -93,3 +93,64 @@ test "random strings of digits and prefixes" {
         try expectLikeC(s[0..len]);
     }
 }
+
+// ---- num.strtoull10 against glibc's strtoull, base 10 ----
+// fl_starttime's field 22 (flong-util.c:384) and closed_inode's "#<inode>"
+// (flong-record.c:751) read outside text with it: the value, where it
+// stopped and ERANGE must be glibc's for any bytes.
+
+fn expectBase10LikeC(s: []const u8) !void {
+    var buf: [128]u8 = undefined;
+    @memcpy(buf[0..s.len], s);
+    buf[s.len] = 0;
+    __errno_location().* = 0;
+    var end: [*:0]const u8 = undefined;
+    const v = __isoc23_strtoull(@ptrCast(&buf), &end, 10);
+    const want: num.Strtoull = .{
+        .value = v,
+        .len = @intFromPtr(end) - @intFromPtr(&buf),
+        .range = __errno_location().* != 0,
+    };
+    std.testing.expectEqual(want, num.strtoull10(s)) catch |err| {
+        std.debug.print("strtoull10 differs on \"{f}\"\n", .{std.zig.fmtString(s)});
+        return err;
+    };
+}
+
+const alphabet10 = "0123456789 \t\n\x0b\x0c\r+-x\x00a";
+
+test "strtoull10: every string of up to 4 characters, and random ones" {
+    var s: [4]u8 = undefined;
+    try expectBase10LikeC("");
+    for (1..5) |len| {
+        var idx = [_]usize{0} ** 4;
+        outer: while (true) {
+            for (0..len) |i| s[i] = alphabet10[idx[i]];
+            try expectBase10LikeC(s[0..len]);
+            var k: usize = 0;
+            while (k < len) : (k += 1) {
+                idx[k] += 1;
+                if (idx[k] < alphabet10.len) continue :outer;
+                idx[k] = 0;
+            }
+            break;
+        }
+    }
+    var seed: u64 = 0x5eed10;
+    for (0..2) |round| {
+        if (round == 1) std.crypto.random.bytes(std.mem.asBytes(&seed));
+        var prng = std.Random.DefaultPrng.init(seed);
+        const r = prng.random();
+        var t: [40]u8 = undefined;
+        for (0..10_000) |_| {
+            const len = r.intRangeAtMost(usize, 0, t.len);
+            for (t[0..len]) |*ch| ch.* = if (r.boolean()) '0' + r.uintLessThan(u8, 10) else alphabet10[r.uintLessThan(usize, alphabet10.len)];
+            expectBase10LikeC(t[0..len]) catch |err| {
+                std.debug.print("seed {d}\n", .{seed});
+                return err;
+            };
+        }
+    }
+    for ([_][]const u8{ "18446744073709551615", "18446744073709551616", "-18446744073709551615", "-18446744073709551616", "  -1", "+", "-", "00000000000000000000000000001" }) |e|
+        try expectBase10LikeC(e);
+}

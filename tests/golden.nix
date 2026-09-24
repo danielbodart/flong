@@ -5,7 +5,9 @@
 # so a port meets the same cases its C met.
 #
 # A set is a directory tests/golden/<set>/ run against one program (`sets`
-# below). A case NAME there is these files, NAME.status the only required one:
+# below), or another set's directory (`dir`), so a transition runs one set
+# of cases against the C and the Zig. A case NAME there is these files,
+# NAME.status the only required one:
 #
 #   NAME.status    the exit status, in decimal, then a newline
 #   NAME.args      the arguments, one per line (none if absent)
@@ -65,6 +67,8 @@
     }) { },
   seccomp ? import ../seccomp { inherit pkgs; },
   launcher ? import ../launcher { inherit pkgs; },
+  # The C flong-sweeper, built for phase 5 (a)'s transition only.
+  sweeperC ? (import ../native.nix { inherit pkgs; }).sweeperC,
 }:
 let
   inherit (pkgs) lib;
@@ -153,21 +157,12 @@ let
     # rootless.nix:629-642 has), fstat or mkdir failing on a directory the
     # caller owns, and the holder's other refusals, which need a cgroup the
     # sandbox does not give. CALLER is the builder's uid, OWNER that of the
-    # store directory GOLDEN.
-    sweeper = {
-      program = "${launcher}/bin/flong-sweeper";
-      vars = {
-        GOLDEN = "${cases}";
-      };
-      caseVars = ''
-        echo "CALLER=$(id -u)"
-        echo "OWNER=$(stat -c %u ${cases})"
-        own=$(sed -n 's/^0:://p' /proc/self/cgroup)
-        if [[ $own == / ]]; then
-          own=
-        fi
-        echo "OWN=/sys/fs/cgroup$own"
-      '';
+    # store directory GOLDEN. Run against the Zig flong-sweeper (src/
+    # sweeper.zig, phase 5), and, until phase 5 (b), against the C as
+    # `sweeper-c` (the transition).
+    sweeper = sweeperSet "${launcher}/bin/flong-sweeper";
+    sweeper-c = sweeperSet "${sweeperC}/bin/flong-sweeper" // {
+      dir = "sweeper";
     };
 
     # The subcommands' usage errors, the one text phase 2 (a) changed
@@ -178,6 +173,22 @@ let
         DUMP = "${policy.dump}";
       };
     };
+  };
+
+  sweeperSet = program: {
+    inherit program;
+    vars = {
+      GOLDEN = "${cases}";
+    };
+    caseVars = ''
+      echo "CALLER=$(id -u)"
+      echo "OWNER=$(stat -c %u ${cases})"
+      own=$(sed -n 's/^0:://p' /proc/self/cgroup)
+      if [[ $own == / ]]; then
+        own=
+      fi
+      echo "OWN=/sys/fs/cgroup$own"
+    '';
   };
 
   cases = lib.fileset.toSource {
@@ -263,8 +274,8 @@ let
   '';
 
   # A call of FN (run_set or prepare) for set NAME: its case_vars, then FN
-  # NAME PROGRAM VAR=VALUE... with the set's vars. case_vars DIR NAME prints
-  # the case's own VAR=VALUE lines.
+  # NAME DIR PROGRAM VAR=VALUE... with the set's directory and vars.
+  # case_vars DIR NAME prints the case's own VAR=VALUE lines.
   setCall =
     fn: name: s:
     ''
@@ -274,7 +285,13 @@ let
         ${s.caseVars or ""}
       }
       ${fn} ${name} ${
-        lib.escapeShellArgs ([ s.program ] ++ lib.mapAttrsToList (k: v: "${k}=${v}") s.vars)
+        lib.escapeShellArgs (
+          [
+            (s.dir or name)
+            s.program
+          ]
+          ++ lib.mapAttrsToList (k: v: "${k}=${v}") s.vars
+        )
       }
     '';
 
@@ -302,12 +319,26 @@ let
           fi
         done
 
+        # The transition's two sides (ZIG.md, phase 5 (a)): the launcher's
+        # flong-sweeper is the Zig, static, which names no glibc symbol;
+        # the C's does. So each set ran what it says: the programs the two
+        # sets run are the ones tested, so a set pointed at the other's
+        # program fails here.
+        if grep -q GLIBC_ ${sets.sweeper.program}; then
+          echo "golden: the sweeper set's program is not the Zig one" >&2
+          exit 1
+        fi
+        if ! grep -q GLIBC_ ${sets.sweeper-c.program}; then
+          echo "golden: the sweeper-c set's program is not the C one" >&2
+          exit 1
+        fi
+
         failed=0
         mkdir -p $out
         run_set() {
-          local set=$1 program=$2 dir=${cases}/$1 status name got bpf n=0
+          local set=$1 program=$3 dir=${cases}/$2 status name got bpf n=0
           local -a vars
-          shift 2
+          shift 3
           for status in "$dir"/*.status; do
             name=$(basename "$status" .status)
             mapfile -t vars < <(case_vars "$dir" "$name")
@@ -357,10 +388,10 @@ let
         ${lib.concatStrings (
           lib.mapAttrsToList (
             name: s:
-            if builtins.pathExists (./golden + "/${name}") then
+            if builtins.pathExists (./golden + "/${s.dir or name}") then
               setCall "run_set" name s
             else
-              throw "golden: tests/golden/${name} does not exist"
+              throw "golden: tests/golden/${s.dir or name} does not exist"
           ) sets
         )}
         if ((failed)); then
@@ -394,9 +425,9 @@ let
 
       # Every new byte is made and judged before any file is written.
       prepare() {
-        local set=$1 program=$2 dir=tests/golden/$1 bpf name got filter
+        local set=$1 program=$3 dir=tests/golden/$2 bpf name got filter
         local -a vars
-        shift 2
+        shift 3
         if [[ $(<"$dir/LIBSECCOMP") == "$want" ]]; then
           echo "golden-update: $dir/LIBSECCOMP already says $want; at one version a changed byte is a bug" >&2
           exit 1

@@ -8,7 +8,8 @@
 #   <pN>         a proof's `build`, whose own build runs its assertions
 #   <pN>-bins    a proof's `bins`, a tree with bin/
 #   drivers      `zig build integration` over the package: bin/flong-walker
-#                (tests/zig/walker.zig, phase 4), for checks.native
+#                (tests/zig/walker.zig, phase 4) and bin/flong-proc
+#                (tests/zig/procdriver.zig, phase 5), for checks.native
 #   vm           every proof's bins and the drivers joined, for the VM
 #                node's PATH, with passthru.vmScripts, the proofs' testScript
 #                fragments in order
@@ -73,8 +74,14 @@ let
       ../src/fd.zig
       ../src/msg.zig
       ../src/errno.zig
+      ../src/num.zig
       ../src/mount.zig
+      ../src/sig.zig
+      ../src/proc.zig
+      ../src/names.zig
+      ../src/cgroup.zig
       ../tests/zig/walker.zig
+      ../tests/zig/procdriver.zig
     ];
   };
 

@@ -4,7 +4,8 @@
 # paths; the checks of the Zig package; the dependency fetch they share.
 #
 # Phase 1 has the seccomp set, which seccomp/default.nix imports; phase 3
-# adds launcher, which launcher/default.nix imports; phase 6 fixtures.
+# adds launcher, which launcher/default.nix imports (phase 5 adds
+# flong-sweeper to it); phase 6 fixtures.
 # tests/integration.nix builds phase 0's proofs with the same zigSet.
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:11-20
@@ -158,10 +159,11 @@ let
 
   # flong-launch, flong-sweeper and flong-init side by side in one $out
   # (tests/rootless.nix:636-641 finds the sweeper beside the launcher):
-  # flong-init is Zig, -Dtini its compiled-in tini; the rest is still C,
-  # built by $CC with launcherCflags (ZIG.md, "Phase 3"), and flong-launch
-  # links the Zig mount helper, libflong-mount.a, never installed (ZIG.md,
-  # "The mount-helper shim"), whose clash check fails this build. The fileset holds
+  # flong-init and flong-sweeper are Zig (phases 3 and 5), -Dtini
+  # flong-init's compiled-in tini; flong-launch is still C, built by $CC
+  # with launcherCflags (ZIG.md, "Phase 3"), and links the Zig mount
+  # helper, libflong-mount.a, never installed (ZIG.md, "The mount-helper
+  # shim"), whose clash check fails this build. The fileset holds
   # src/ but for the seccomp set's and the fixtures' own sources, and
   # launcher/'s C, so neither set's edits move the other (ZIG.md, "The Nix
   # build").
@@ -183,13 +185,15 @@ let
       pkgs.binutils
     ];
     extra = ''
-      # flong-init: static, no INTERP, and no stack size in PT_GNU_STACK,
-      # so the start code leaves RLIMIT_STACK alone (quirk 20; ZIG.md,
-      # "Measured": P2).
-      file -b $out/bin/flong-init | tee /dev/stderr | grep -q 'statically linked'
-      readelf -lW $out/bin/flong-init > $TMPDIR/init.phdrs
-      if grep -q INTERP $TMPDIR/init.phdrs; then echo "flong-init has an INTERP"; exit 1; fi
-      [[ $(awk '$1 == "GNU_STACK" { print $6 }' $TMPDIR/init.phdrs) == 0x000000 ]]
+      # flong-init and flong-sweeper: static, no INTERP, and no stack size
+      # in PT_GNU_STACK, so the start code leaves RLIMIT_STACK alone (quirk
+      # 20; ZIG.md, "Measured": P2).
+      for prog in flong-init flong-sweeper; do
+        file -b $out/bin/$prog | tee /dev/stderr | grep -q 'statically linked'
+        readelf -lW $out/bin/$prog > $TMPDIR/$prog.phdrs
+        if grep -q INTERP $TMPDIR/$prog.phdrs; then echo "$prog has an INTERP"; exit 1; fi
+        [[ $(awk '$1 == "GNU_STACK" { print $6 }' $TMPDIR/$prog.phdrs) == 0x000000 ]]
+      done
 
       # The mount helper: the archive (src/hybrid/mount_c.zig), then the C
       # launcher linked with it.
@@ -199,8 +203,6 @@ let
       cflags=(${launcherCflags})
       $CC "''${cflags[@]}" -o $out/bin/flong-launch flong-launch.c flong-spec.c flong-ns.c \
         flong-cgroup.c flong-record.c flong-tty.c flong-util.c $mountlib
-      $CC "''${cflags[@]}" -o $out/bin/flong-sweeper \
-        flong-sweeper.c flong-cgroup.c flong-record.c flong-util.c
       cd ..
       ${clashCheck}
       ${shimRun}
@@ -233,6 +235,29 @@ let
     grep -Eq ' U memset(@|$)' $TMPDIR/launch.dynamic
     grep -Eq ' U __stack_chk_fail(@|$)' $TMPDIR/launch.dynamic
   '';
+
+  # The C flong-sweeper (ZIG.md, phase 5 (a) only): launcher/flong-sweeper.c
+  # with the C it links, built by $CC with launcherCflags as the launcher
+  # set built it until then, for golden's transition, which runs the
+  # sweeper's cases against it and against the Zig one; never an output.
+  sweeperC = pkgs.stdenv.mkDerivation {
+    pname = "flong-sweeper-c";
+    version = "0";
+    src = lib.fileset.toSource {
+      root = ./launcher;
+      fileset = lib.fileset.fileFilter (f: f.hasExt "c" || f.hasExt "h") ./launcher;
+    };
+    dontConfigure = true;
+    buildPhase = ''
+      runHook preBuild
+      mkdir -p $out/bin
+      cflags=(${launcherCflags})
+      $CC "''${cflags[@]}" -o $out/bin/flong-sweeper \
+        flong-sweeper.c flong-cgroup.c flong-record.c flong-util.c
+      runHook postBuild
+    '';
+    dontInstall = true;
+  };
 
   # The shim run where no namespace is needed, linked as the launcher links
   # it: a destination twice is said in the launcher's words, one line, 1;
@@ -279,9 +304,16 @@ let
         ./src
         ./tests/zig
         # flong-mount.h and the header it includes, for the shim's layout
-        # check (tests/zig/libc_mount.zig).
+        # check (tests/zig/libc_mount.zig); the sweep's C and what it
+        # includes, for the readers' differential (tests/zig/record_c.c).
         ./launcher/flong-mount.h
         ./launcher/flong-spec.h
+        ./launcher/flong-record.c
+        ./launcher/flong-record.h
+        ./launcher/flong-cgroup.c
+        ./launcher/flong-cgroup.h
+        ./launcher/flong-util.c
+        ./launcher/flong-util.h
       ];
       steps = "test test-libc";
       flags = "-Ddev=true";
@@ -324,11 +356,11 @@ let
     # aarch64 from x86_64 (P6's pieces, ZIG.md "Phase 2"): flong-seccomp
     # compiled and not linked, since the flake has no aarch64 libseccomp
     # here; tests/zig/abi.zig's aarch64 half, and its controls, each plant
-    # failing the build naming what differs on both arches; flong-init for
-    # aarch64 with a dummy tini, the launcher set's Zig; and the mount
-    # library for aarch64, its symbols checked as the launcher's build
-    # checks x86_64's (the aarch64 C link is unchecked, ZIG.md "The
-    # mount-helper shim").
+    # failing the build naming what differs on both arches; flong-init
+    # (with a dummy tini) and flong-sweeper for aarch64, the launcher set's
+    # Zig; and the mount library for aarch64, its symbols checked as the
+    # launcher's build checks x86_64's (the aarch64 C link is unchecked,
+    # ZIG.md "The mount-helper shim").
     cross-aarch64 = pkgs.linkFarm "cross-aarch64" {
       flong = zigSet {
         pname = "cross-aarch64";
@@ -337,6 +369,12 @@ let
           ./src/init.zig
           ./src/mount.zig
           ./src/hybrid
+          ./src/sweeper.zig
+          ./src/record.zig
+          ./src/cgroup.zig
+          ./src/names.zig
+          ./src/proc.zig
+          ./src/sig.zig
           ./tests/zig/abi.zig
           ./tests/zig/abi.h
         ]
@@ -347,9 +385,12 @@ let
           pkgs.binutils
         ];
         extra = ''
-          # flong-init for aarch64, with a dummy tini: static, no INTERP.
-          file -b $out/cross/flong-init | tee /dev/stderr | grep -q 'ARM aarch64.*statically linked'
-          if file -b $out/cross/flong-init | grep -q interpreter; then exit 1; fi
+          # flong-init (with a dummy tini) and flong-sweeper for aarch64:
+          # static, no INTERP.
+          for prog in flong-init flong-sweeper; do
+            file -b $out/cross/$prog | tee /dev/stderr | grep -q 'ARM aarch64.*statically linked'
+            if file -b $out/cross/$prog | grep -q interpreter; then exit 1; fi
+          done
           # The mount library for aarch64: flong_mount_main its only global
           # definition, and nothing undefined that glibc does not define:
           # memcpy and memset as on x86_64, and getauxval, as its page size
@@ -385,6 +426,7 @@ in
     deps
     seccomp
     launcher
+    sweeperC
     checks
     ;
 }

@@ -131,6 +131,8 @@ By this plan (each detailed below):
 | `nix build .#bench`, C flong-init (57e2de0) against Zig (phase 3 a; reported, not gated) | medians of 20, three runs, ms, median (p10-p90) per run. No network: C 31.8 (26.8-35.4), 31.0 (26.4-34.0), 31.8 (30.0-34.9); Zig 32.9 (28.5-35.8), 29.5 (27.3-33.5), 33.5 (30.4-34.5). Pasta + nft hook: C 60.1, 56.1, 57.0; Zig 58.3, 52.8, 49.0. Forwarded port: C 78.2, 72.9, 73.4; Zig 75.2, 78.1, 70.1. Cold: C 376.9, 365.9, 367.9; Zig 370.8, 379.5, 367.9. Within the runs' spread | same, `numbers.md` of each |
 | the Zig mount helper in the C launcher (phase 4 a) | `libflong-mount.a` (ReleaseSafe, stripped, pic, no libc, no compiler-rt): 185,626 bytes, `T flong_mount_main` its only global, needing `memcpy` and `memset` only (`sys.clockRealtime` makes the syscall in a library, as std's vDSO lookup would add `getauxval`); aarch64 183,778 bytes, needing `getauxval`, `memcpy`, `memset`. `flong-launch` 234,976 bytes after `strip -S` (107,224 before), the launcher closure 43,952,824 bytes (43,825,072); the clash check holds on the real link (no glibc name defined; `memcpy`, `memset`, `__stack_chk_fail` from glibc). `rootless.nix` passes unchanged with the Zig helper; its transition subtest runs the refusals and their controls, the declaration's mounts (each mount's `/proc/self/mountinfo` options included), the protected paths, the prepared-root symlink and the trace under both helpers, output and status equal; the swap race 20+20 under each, 0 escapes (Zig 15-20 refused, the rest contained; C 17-23), and 16 extra-mount cases (symlinks on the way, protected paths through a link, tmpfs and overlay under a caller's directory with host owner and mode, masks, sysfs, home) equal under both. The walker (`checks.native`): a path open following symlinks escapes 11-67 of 200 under the swapper (29 in the commit's run), the walk 0 of 400. Plants a review found missed, now caught: `walkOpen` without `RESOLVE_BENEATH` (`/..` walks out), a last-component file following a symlink (relative links), `/run` left writable, the transition running one launcher twice. Plants in a scratch copy, each caught: compiler-rt bundled (the clash check: more globals), `flong-launch` linked `-s` (the clash check: no symbols), a mirror field of the wrong size (test-libc's layout check), a walk without `RESOLVE_NO_SYMLINKS` (the walker's transcript and race), masks without `noexec` (only the transition subtest) | this host, 2026-09-23, phase 4 (a), `nm`, `nix path-info -S` |
 | phase 4 (a)'s derivations and runs | `launcher` 14.5 s (`nix build --rebuild`, bit-identical); test scripts rootless 109.2-115.7 s, native 16.0-25.4 s (the walker's subtest 0.2 s), basic 80.2 s, parity 20.2 s; the transition subtest 7.2 s. Local `nix flake check -L`, alone: green, 5 min 0.7 s, then 321.1 s for the commit; `--no-build --all-systems` 280.3 s; `launcher` again 15.5 s, bit-identical. CI before it (e07049a, run 35918252132): `nix flake check` 7 min 49 s. `sys.zig` moved seccomp's store path once more (quirk 36) | same |
+| the Zig flong-sweeper against the C (phase 5 a) | `golden`'s 30 sweeper cases green against both, the C built in the check (`native.nix`'s `sweeperC`), each side told by whether it names a glibc symbol; `test-libc`'s differential of `record.parse`, `cgroup.sessionForm` and `record.closedInode` against `parse_record`, `session_form` and `closed_inode` compiled from `launcher/` (`tests/zig/record_c.c`), 10,000 token-built inputs under a fixed and a random seed each (parse also cut at a random length), 0 differences; `num.strtoull10` against glibc's base-10 `strtoull` (every string of up to 4 over 21 characters, 20,000 random): equal. Fuzzing (minish, Debug and ReleaseSafe): 7 targets, each its corpus (`tests/zig/corpus/`, 79 files) then 10,000 token lists and 10,000 byte strings under a fixed and a random seed: no panic; token runs accept per 10,000 record-parse 1,317, session-form 752, closed-inode 2,006, proc-stat 1,210, own 205, populated 4,753, inotify 2,050 (before structured builders: 15, 17, 39, 0), each run needing 1%. A review's scratch fuzz, about 24.3M structured mutations over 9 seeds: 0 panics; end to end, 9,000 fuzzed records, 22,000 churn rounds, 1,100-deep nested cgroups: the sweeper alive, 7 descriptors idle. Mutations in a scratch copy, each caught by `native-test`: a child ignoring the keep list, `retainOnly` without its final `close_range`, `retainOnly` skipping `close_range` (the keep-list test, the property); `close` without the generation bump (fd's stale tests, fd_props, the property); Spawn skipping the signal reset (the reset test); `dup2` without staging (the permutation test); a fork child keeping a stale signalfd (the signalfd test); `awaitFd` ignoring POLLHUP, and POLLERR (the awaitFd test, `error.Hung` after its 10 s bound). Plants, each red: a changed record byte (basic's record-bytes); postStop run twice, the blank skipped, the watch after the first sweep (checkpoint 11), a 4095-byte realpath refused (`checks.native`'s two sweeper subtests); golden running the Zig on both sides; a fuzz target that never parses; the lockWait helper not taking the lock; four models (B20-B23, 22 findings). `checks.native`'s differential runs both sweepers over one state directory of launcher-written and hostile records: byte-identical output, records, cgroups and postStop log, 1.1 s. The VM suite unchanged: rootless, basic, parity, native green with the Zig sweeper | this host, 2026-09-24, phase 5 (a) |
+| the Zig flong-sweeper (phase 5 a) | 142,208 bytes, static, stripped, no INTERP, PT_GNU_STACK size 0 (the C 49,808, dynamic); the launcher closure 44,045,224 bytes (43,952,824); `launcher` `nix build --rebuild` 9.3-16.6 s, bit-identical. `cgroup.removeTree`'s frame 2,576 bytes (6,720 before its shared path buffer; the C about 4.2 KB): 1,100 nested cgroups peak at 2,672 kB of stack, stopping at the descriptor table as the C does. `waitEmpty` can wait forever when another process of the user removes the cgroup inside the kernel's 10 ms `cgroup.events` notification delay, as `flong-cgroup.c:495-529` does; kept. Local `nix flake check -L`, alone: 285.1 s (native and basic cached; test scripts native 17.9 s, parity 22.2 s, basic 87.3 s, rootless 110.0 s); `--no-build --all-systems` 280.2 s. CI before it (d698a44, run 35932499136): `nix flake check` 7 min 52 s. `sys.zig`, `fd.zig` and `msg.zig` moved seccomp's store path (quirk 36). P3 retired: its questions run on `src/proc.zig` (`checks.native`'s `proc:` subtests, `native-test`, `fork_body_returns.zig`) | same |
 
 **Reporting.** CI runs after a push and trunk commits are never amended, so
 each phase's first commit reports the previous push's CI flake-check time (run
@@ -413,7 +415,10 @@ the child (`flong-mount.c:524`). flong-seccomp: an arena over `c_allocator`.
   `openPtmx`, `openSlave`, `reopenOut`, and `adoptForeign`), added with the
   function; closes `close`, `await`, `reapNow`, `release` (a close model for
   `fd.closeChecked` is not honoured, measured phase 4: its double close is
-  the table's to catch at run time). It must still report
+  the table's to catch at run time; nor are `reapNow(.kill)`, a close with an
+  argument, and `try c.await()` as an ending, measured phase 5: a `release`
+  after either is not reported, one after `release` is, so they only miss
+  findings). It must still report
   `tests/zig/analyze/bugs.zig` (spike B1-B3, B6-B8; B9-B11 on `fd.zig` from
   phase 2); leaks come from
   `liveCount` and the `/proc/self/fd` property.
@@ -548,8 +553,11 @@ and `tests/integration.nix`. It records only what flong's code determines:
 - **Fuzzing**, never a panic or `unreachable`: properties in ReleaseSafe,
   10,000 cases each, a fixed seed plus a random one printed on failure, a
   checked-in crash corpus (`tests/zig/corpus/`) replayed first; over
-  `record.parse`, `session_form`, the mountinfo reader, `cgroup.events`,
-  `/proc/<pid>/stat` field 22, `closed_inode`, inotify events.
+  `record.parse`, `session_form`, the mountinfo reader (with the launch
+  half, phase 7), `cgroup.events`, `/proc/<pid>/stat` field 22,
+  `closed_inode`, inotify events; each token run must accept at least 1% of
+  its inputs and refuse one (measured phase 5: token lists alone reached
+  stat's field 22 in 0 of 10,000).
 - The child-pid parser over split reads and the 4096-byte bound
   (`flong-launch.c:455-531`); the `^]` detector as a pure state machine, 137
   iff three 0x1d within 1 s with nothing between, over any chunking
@@ -625,7 +633,7 @@ never a helper, and a review item on every commit that touches it.
 | 8 | **The watchdog** forks before raw mode, only when `isatty(0)`, keeping `{pipe_r, leader}` and 0-2 (`flong-tty.c:284-323`) | the L0 watchdog subtest |
 | 9 | **flong-init** (`flong-init.c:195-238`): setgroups, the bounding set, the ambient set, capset, `TIOCSCTTY`, INT and QUIT default and an empty mask, `r` then close, the gate byte, chdir, `close_range(3, ~0U, 0)`, the trace, exec | phase 3's strace subtest, `basic.nix:742-744, 874-893` |
 | 10 | **Records:** `O_TMPFILE`, `LOCK_EX\|LOCK_NB`, one write, `linkat` through `selfPath` with the uncounted EEXIST loop; `leader=` at the offset; unlink before close (`flong-record.c:343-386, 391-398, 408-417`) | the record-bytes subtest, `basic.nix:1186-1212` |
-| 11 | **The sweeper** adds its inotify watch before the first sweep (`flong-record.c:769-777`) | `rootless.nix:718-729` |
+| 11 | **The sweeper** adds its inotify watch before the first sweep (`flong-record.c:769-777`) | `checks.native`'s "postStop once across a failed removal, and the watch before the first sweep" (a record released only by a close during a held first sweep; measured phase 5, no `rootless.nix` subtest reaches that window) |
 
 ## Behaviour: keep or fix
 
@@ -772,7 +780,8 @@ set; the project-launch stderr subtest.
 - **`spike/` moves to `~/Projects/flong-spikes-archive`** (as the rootless
   spikes did): P1 retires (the derivations subsume it), P6 too
   (`cross-aarch64`); P3 stays
-  in `checks.native`; P2 and P5 move to `tests/proofs/` until phase 3's strace
+  in `checks.native` (until phase 5, whose `proc:` subtests ask its
+  questions of `src/proc.zig` and retire it); P2 and P5 move to `tests/proofs/` until phase 3's strace
   subtest and phase 4's clash check replace them; P4 becomes `abi.zig`, with
   its own struct copies until phase 4.
 - **(a)** `checks.seccomp-tools-transition`, awk and bash against Zig over the

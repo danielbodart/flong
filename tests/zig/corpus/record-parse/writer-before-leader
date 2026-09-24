@@ -1,0 +1,2 @@
+poststop=/nix/store/x
+cgroup=/sys/fs/cgroup/h/c/m

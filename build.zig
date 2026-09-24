@@ -4,13 +4,14 @@
 //!
 //!   install       -Dset=seccomp (flong-seccomp and its subcommands; needs
 //!                 -Dself, the project key's compiler path), launcher
-//!                 (flong-init; needs -Dtini, the tini it execs; the C
-//!                 beside it is native.nix's) or fixtures (phase 6)
+//!                 (flong-init and flong-sweeper; needs -Dtini, the tini
+//!                 flong-init execs; the C beside them is native.nix's) or
+//!                 fixtures (phase 6)
 //!   test          unit and property tests, Debug, or ReleaseSafe with
 //!                 -Drelease=true (as every step); needs -Ddev=true
 //!   test-libc     errno.zig and num.zig against glibc, scmp.zig against
-//!                 seccomp.h (tests/zig/libc_*.zig), and the host's half of
-//!                 `abi`
+//!                 seccomp.h, the sweep's readers against the C they port
+//!                 (tests/zig/libc_*.zig), and the host's half of `abi`
 //!   abi           tests/zig/abi.zig: the kernel structs and constants
 //!                 against Zig's bundled headers, x86_64 and aarch64 (run on
 //!                 the host's arch); -Dabi-plant=arch|offset plants a
@@ -22,14 +23,15 @@
 //!   analyze       zwanzig over src/, and over its planted bugs
 //!                 (tests/zig/analyze/); needs -Ddev=true
 //!   cross         flong-seccomp compiled for aarch64-linux, not linked,
-//!                 flong-init built for it (in cross/, with a dummy tini),
+//!                 flong-init (with a dummy tini) and flong-sweeper built
+//!                 for it (in cross/),
 //!                 the mount library for it (cross/libflong-mount.a), and
 //!                 abi's aarch64 half
 //!   mountlib      lib/libflong-mount.a, the Zig mount helper the C launcher
 //!                 links (src/hybrid/mount_c.zig; phases 4-7): no libc, no
 //!                 compiler-rt, one exported symbol
-//!   integration   the drivers checks.native runs (bin/flong-walker), built
-//!                 only by tests/integration.nix
+//!   integration   the drivers checks.native runs (bin/flong-walker,
+//!                 bin/flong-proc), built only by tests/integration.nix
 //!
 //! Every path a step reads is a lazy b.path, so an install set's derivation,
 //! which holds build.zig, build.zig.zon and its own sources only, configures
@@ -67,6 +69,7 @@ pub fn build(b: *std.Build) void {
         },
         .launcher => if (tini) |path| {
             b.installArtifact(init(b, target, optimize, path));
+            b.installArtifact(sweeper(b, target, optimize));
         } else {
             install.dependOn(&b.addFail("-Dset=launcher needs -Dtini=PATH, tini's store path").step);
         },
@@ -81,7 +84,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addFail("needs -Ddev=true").step);
     } else if (b.lazyDependency("minish", .{ .target = target, .optimize = optimize })) |minish| {
         // Each module's own tests, with the modules it imports.
-        for ([_][]const u8{ "sys", "errno", "msg", "num", "fd", "mount" }) |name| {
+        for ([_][]const u8{ "sys", "errno", "msg", "num", "fd", "mount", "sig", "proc", "names", "cgroup", "record" }) |name| {
             const m = modules(b, target, optimize);
             const t = b.addTest(.{ .name = name, .root_module = m.get(name) });
             test_step.dependOn(&b.addRunArtifact(t).step);
@@ -117,6 +120,61 @@ pub fn build(b: *std.Build) void {
         {
             // flong-init's argv parsing, in its root module.
             const t = b.addTest(.{ .name = "init", .root_module = initModule(b, target, optimize, "/nix/store/test-only/bin/tini") });
+            test_step.dependOn(&b.addRunArtifact(t).step);
+        }
+        {
+            // proc.zig and sig.zig from outside: fork, Spawn against the
+            // spawn probe (flong-proc, built for it), Child, lockWait, the
+            // signalfd, and the property over forks and spawns.
+            const m = modules(b, target, optimize);
+            const opts = b.addOptions();
+            opts.addOptionPath("driver", procDriver(b, target, optimize).getEmittedBin());
+            const t = b.addTest(.{
+                .name = "proc_props",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/zig/proc_props.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "minish", .module = minish.module("minish") },
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "fd", .module = m.fd },
+                        .{ .name = "sig", .module = m.sig },
+                        .{ .name = "proc", .module = m.proc },
+                        .{ .name = "options", .module = opts.createModule() },
+                    },
+                }),
+            });
+            test_step.dependOn(&b.addRunArtifact(t).step);
+        }
+        {
+            // The sweep's readers fuzzed, the corpus replayed first.
+            const m = modules(b, target, optimize);
+            const opts = b.addOptions();
+            opts.addOptionPath("corpus", b.path("tests/zig/corpus"));
+            const t = b.addTest(.{
+                .name = "fuzz",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/zig/fuzz.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "minish", .module = minish.module("minish") },
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "fd", .module = m.fd },
+                        .{ .name = "proc", .module = m.proc },
+                        .{ .name = "cgroup", .module = m.cgroup },
+                        .{ .name = "record", .module = m.record },
+                        .{ .name = "inputs", .module = inputsModule(b, target, optimize) },
+                        .{ .name = "options", .module = opts.createModule() },
+                    },
+                }),
+            });
+            test_step.dependOn(&b.addRunArtifact(t).step);
+        }
+        {
+            // flong-sweeper's root compiles as a test too.
+            const t = b.addTest(.{ .name = "sweeper", .root_module = sweeperModule(b, target, optimize) });
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
         const m = modules(b, target, optimize);
@@ -226,6 +284,31 @@ pub fn build(b: *std.Build) void {
         libc_step.dependOn(&b.addRunArtifact(t).step);
     }
 
+    {
+        // The sweep's readers against the C they port (tests/zig/
+        // record_c.c includes flong-record.c and flong-cgroup.c; flong-util.c
+        // links beside), compiled with the launcher's standard and
+        // _GNU_SOURCE.
+        const m = modules(b, target, optimize);
+        const root = b.createModule(.{
+            .root_source_file = b.path("tests/zig/libc_record.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "cgroup", .module = m.cgroup },
+                .{ .name = "record", .module = m.record },
+                .{ .name = "inputs", .module = inputsModule(b, target, optimize) },
+            },
+        });
+        root.addIncludePath(b.path("launcher"));
+        root.addCSourceFile(.{ .file = b.path("tests/zig/record_c.c"), .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE" } });
+        root.addCSourceFile(.{ .file = b.path("launcher/flong-util.c"), .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE" } });
+        const t = b.addTest(.{ .name = "libc_record", .root_module = root });
+        libc_step.dependOn(&b.addRunArtifact(t).step);
+    }
+
     // ---- compile-fail: what must not compile, and the compiler's words ----
     const cf_step = b.step("compile-fail", "Check that each file in tests/zig/compile_fail/ fails to compile, and why");
     const cases = [_]struct { file: []const u8, expect: []const u8 }{
@@ -239,12 +322,16 @@ pub fn build(b: *std.Build) void {
         .{ .file = "file_as_at.zig", .expect = "a directory handle or fd.cwd, not fd.Handle(.file,.owned)" },
         .{ .file = "setns_wrong_ns.zig", .expect = "setns(.mnt) of a netns descriptor" },
         .{ .file = "setfd_path.zig", .expect = "FsCtx.setFd of a path descriptor: FSCONFIG_SET_FD takes a directory, never O_PATH" },
+        .{ .file = "read_on_pipe_w.zig", .expect = "read on a pipe_w descriptor" },
+        .{ .file = "dir_as_cgroup.zig", .expect = "expected type '?fd.Handle(.cgroup,.owned)', found 'fd.Handle(.dir,.owned)'" },
+        .{ .file = "passfd_stdio.zig", .expect = "passFd of Stdio: 0-2 are the program's stdio, set in Spawn.stdio, not a descriptor to pass" },
+        .{ .file = "fork_body_returns.zig", .expect = "expected type 'fn (u8) noreturn', found 'fn (u8) void'" },
     };
     for (cases) |c| {
         // Every module of src/ is on the command line, each with its own
         // imports; the case imports what it needs.
         const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build-obj", "-fno-emit-bin" });
-        run.addArgs(&.{ "--dep", "sys", "--dep", "errno", "--dep", "msg", "--dep", "num", "--dep", "fd" });
+        run.addArgs(&.{ "--dep", "sys", "--dep", "errno", "--dep", "msg", "--dep", "num", "--dep", "fd", "--dep", "sig", "--dep", "proc" });
         run.addPrefixedFileArg("-Mroot=", b.path(b.fmt("tests/zig/compile_fail/{s}", .{c.file})));
         run.addPrefixedFileArg("-Msys=", b.path("src/sys.zig"));
         run.addArgs(&.{ "--dep", "sys" });
@@ -254,6 +341,10 @@ pub fn build(b: *std.Build) void {
         run.addPrefixedFileArg("-Mnum=", b.path("src/num.zig"));
         run.addArgs(&.{ "--dep", "sys" });
         run.addPrefixedFileArg("-Mfd=", b.path("src/fd.zig"));
+        run.addArgs(&.{ "--dep", "sys", "--dep", "fd", "--dep", "msg" });
+        run.addPrefixedFileArg("-Msig=", b.path("src/sig.zig"));
+        run.addArgs(&.{ "--dep", "sys", "--dep", "fd", "--dep", "msg", "--dep", "sig", "--dep", "num" });
+        run.addPrefixedFileArg("-Mproc=", b.path("src/proc.zig"));
         run.addCheck(.{ .expect_stderr_match = c.expect });
         run.addCheck(.{ .expect_term = .{ .Exited = 1 } });
         cf_step.dependOn(&run.step);
@@ -372,9 +463,17 @@ pub fn build(b: *std.Build) void {
                 "bugs.zig:156:9: error: [store-violations-engine] use after close", // B13, openTree
                 "bugs.zig:163:9: error: [store-violations-engine] use after close", // B14, fsopen
                 "bugs.zig:172:12: error: [store-violations-engine] double-close", // B15, openExact
+                "bugs.zig:190:13: error: [store-violations-engine] double-close", // B16, openCgroup
+                "bugs.zig:197:9: error: [store-violations-engine] use after close", // B17, inotifyInit
+                "bugs.zig:204:9: error: [store-violations-engine] use after close", // B18, pidfdOpen
+                "bugs.zig:211:12: error: [store-violations-engine] double-close", // B19, openDirNoFollow
+                "bugs.zig:232:14: error: [store-violations-engine] double-close", // B20, fork
+                "bugs.zig:239:9: error: [store-violations-engine] use after close", // B21, start
+                "bugs.zig:246:9: error: [store-violations-engine] use after close", // B22, openSignalfd
+                "bugs.zig:254:14: error: [store-violations-engine] double-close", // B23, pipe
             }) |want| run.addCheck(.{ .expect_stdout_match = want });
-            // And those fourteen only: the ok* controls stay quiet.
-            run.addCheck(.{ .expect_stdout_match = "Found 14 issue(s):\n" });
+            // And those twenty-two only: the ok* controls stay quiet.
+            run.addCheck(.{ .expect_stdout_match = "Found 22 issue(s):\n" });
             run.addCheck(.{ .expect_term = .{ .Exited = 1 } });
             analyze_step.dependOn(&run.step);
         }
@@ -385,8 +484,9 @@ pub fn build(b: *std.Build) void {
     mountlib_step.dependOn(&b.addInstallArtifact(mountLib(b, target, optimize), .{}).step);
 
     // ---- integration: the drivers checks.native runs ----
-    const integration_step = b.step("integration", "Build the drivers checks.native runs: bin/flong-walker");
+    const integration_step = b.step("integration", "Build the drivers checks.native runs: bin/flong-walker, bin/flong-proc");
     integration_step.dependOn(&b.addInstallArtifact(walker(b, target, optimize), .{}).step);
+    integration_step.dependOn(&b.addInstallArtifact(procDriver(b, target, optimize), .{}).step);
 
     // ---- cross: aarch64 ----
     // flong-seccomp for aarch64-linux, analysed and compiled but not linked
@@ -402,6 +502,11 @@ pub fn build(b: *std.Build) void {
             .dest_dir = .{ .override = .{ .custom = "cross" } },
         });
         cross_step.dependOn(&arm_init.step);
+        // flong-sweeper too, the launcher set's other Zig.
+        const arm_sweeper = b.addInstallArtifact(sweeper(b, arm, optimize), .{
+            .dest_dir = .{ .override = .{ .custom = "cross" } },
+        });
+        cross_step.dependOn(&arm_sweeper.step);
         // The mount library for aarch64: native.nix's cross-aarch64 reads
         // its symbols; the aarch64 C link is unchecked (ZIG.md, "The
         // mount-helper shim").
@@ -463,6 +568,11 @@ const Modules = struct {
     num: *std.Build.Module,
     fd: *std.Build.Module,
     mount: *std.Build.Module,
+    sig: *std.Build.Module,
+    proc: *std.Build.Module,
+    names: *std.Build.Module,
+    cgroup: *std.Build.Module,
+    record: *std.Build.Module,
 
     fn get(m: Modules, name: []const u8) *std.Build.Module {
         inline for (@typeInfo(Modules).@"struct".fields) |f| {
@@ -499,7 +609,65 @@ fn modules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .optimize = optimize,
         .imports = &.{ .{ .name = "sys", .module = sys }, .{ .name = "fd", .module = fd }, .{ .name = "msg", .module = msg } },
     });
-    return .{ .sys = sys, .errno = errno, .msg = msg, .num = num, .fd = fd, .mount = mount };
+    const sig = b.createModule(.{
+        .root_source_file = b.path("src/sig.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "sys", .module = sys }, .{ .name = "fd", .module = fd }, .{ .name = "msg", .module = msg } },
+    });
+    const proc = b.createModule(.{
+        .root_source_file = b.path("src/proc.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sys", .module = sys },
+            .{ .name = "fd", .module = fd },
+            .{ .name = "msg", .module = msg },
+            .{ .name = "sig", .module = sig },
+            .{ .name = "num", .module = num },
+        },
+    });
+    const names = b.createModule(.{ .root_source_file = b.path("src/names.zig"), .target = target, .optimize = optimize });
+    const cgroup = b.createModule(.{
+        .root_source_file = b.path("src/cgroup.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sys", .module = sys },
+            .{ .name = "fd", .module = fd },
+            .{ .name = "msg", .module = msg },
+            .{ .name = "sig", .module = sig },
+            .{ .name = "names", .module = names },
+        },
+    });
+    const record = b.createModule(.{
+        .root_source_file = b.path("src/record.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sys", .module = sys },
+            .{ .name = "fd", .module = fd },
+            .{ .name = "msg", .module = msg },
+            .{ .name = "sig", .module = sig },
+            .{ .name = "num", .module = num },
+            .{ .name = "proc", .module = proc },
+            .{ .name = "names", .module = names },
+            .{ .name = "cgroup", .module = cgroup },
+        },
+    });
+    return .{
+        .sys = sys,
+        .errno = errno,
+        .msg = msg,
+        .num = num,
+        .fd = fd,
+        .mount = mount,
+        .sig = sig,
+        .proc = proc,
+        .names = names,
+        .cgroup = cgroup,
+        .record = record,
+    };
 }
 
 /// src/hybrid/mount_c.zig as a module over `m`'s modules.
@@ -570,6 +738,39 @@ fn walker(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     });
     exe.stack_size = 0;
     return exe;
+}
+
+/// flong-proc (tests/zig/procdriver.zig): proc.zig, sig.zig and
+/// cgroup.zig's sweep half driven from a shell, and the spawn probe.
+/// Static, no libc, stripped, as an installed artifact.
+fn procDriver(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const m = modules(b, target, optimize);
+    const exe = b.addExecutable(.{
+        .name = "flong-proc",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/zig/procdriver.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = true,
+            .single_threaded = true,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "fd", .module = m.fd },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "sig", .module = m.sig },
+                .{ .name = "proc", .module = m.proc },
+                .{ .name = "cgroup", .module = m.cgroup },
+            },
+        }),
+    });
+    exe.stack_size = 0;
+    return exe;
+}
+
+/// tests/zig/inputs.zig, the fuzz inputs fuzz.zig and libc_record.zig
+/// share.
+fn inputsModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("tests/zig/inputs.zig"), .target = target, .optimize = optimize });
 }
 
 /// flong-seccomp's root module, the settings every installed artifact has
@@ -646,6 +847,35 @@ fn init(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.O
     const exe = b.addExecutable(.{ .name = "flong-init", .root_module = initModule(b, target, optimize, tini) });
     // No stack size in PT_GNU_STACK: the start code then leaves RLIMIT_STACK
     // to bwrap's, tini's and the payload's (quirk 20; ZIG.md, "Measured": P2).
+    exe.stack_size = 0;
+    return exe;
+}
+
+/// flong-sweeper's root module (src/sweeper.zig; ZIG.md, "Per binary"):
+/// record, cgroup, names, proc, sig, fd, sys, msg, errno, num; the
+/// settings every installed artifact has, and no libc: static.
+fn sweeperModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const m = modules(b, target, optimize);
+    return b.createModule(.{
+        .root_source_file = b.path("src/sweeper.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = true,
+        .single_threaded = true,
+        .imports = &.{
+            .{ .name = "sys", .module = m.sys },
+            .{ .name = "msg", .module = m.msg },
+            .{ .name = "sig", .module = m.sig },
+            .{ .name = "proc", .module = m.proc },
+            .{ .name = "record", .module = m.record },
+            .{ .name = "cgroup", .module = m.cgroup },
+        },
+    });
+}
+
+fn sweeper(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const exe = b.addExecutable(.{ .name = "flong-sweeper", .root_module = sweeperModule(b, target, optimize) });
+    // As flong-init's: RLIMIT_STACK reaches postStop unchanged (quirk 20).
     exe.stack_size = 0;
     return exe;
 }

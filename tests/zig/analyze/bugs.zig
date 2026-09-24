@@ -3,8 +3,8 @@
 //! there are no pipes yet) and phase 2's B9-B11, written against src/fd.zig
 //! as flong's code calls it: an open's result through msg.check.
 //! zwanzig reads syntax and matches methods by name, so this is analysed,
-//! never compiled (proc.zig's Spawn arrives in phase 5). Each function is
-//! one bug; `ok*` are controls that must stay quiet. B4 (a leak) and B5 (a
+//! never compiled. Each function is one bug (B12-B23 one per minting
+//! function); `ok*` are controls that must stay quiet. B4 (a leak) and B5 (a
 //! stale copy in a struct) are beyond zwanzig: the table and the property
 //! test (tests/zig/fd_props.zig) catch those.
 
@@ -179,4 +179,77 @@ pub fn ok6WalkStep(root: fd.Fd(.path)) !fd.Fd(.path) {
     const b = try msg.check(fd.walkOpen(a, "work", true), "x", .{});
     a.close();
     return b;
+}
+
+// ---- phase 5's B16-B19: the sweeper's and the process layer's kinds ----
+
+// B16: a cgroup closed twice
+pub fn b16CgroupClosedTwice() !void {
+    const cg = try msg.check(fd.openCgroup(fd.cwd, "/sys/fs/cgroup/x"), "x", .{});
+    cg.close();
+    cg.close();
+}
+
+// B17: an inotify descriptor watched after it was closed
+pub fn b17InotifyAfterClose() !void {
+    const i = try msg.check(fd.inotifyInit(), "x", .{});
+    i.close();
+    _ = i.addWatch("/proc/self/fd/3", 8);
+}
+
+// B18: a pidfd signalled after it was closed
+pub fn b18PidfdAfterClose() !void {
+    const p = (try msg.check(fd.pidfdOpen(1), "x", .{}));
+    p.close();
+    _ = p.sendSignal(9);
+}
+
+// B19: a state directory, opened without following, closed twice
+pub fn b19NoFollowClosedTwice() !void {
+    const d = try msg.check(fd.openDirNoFollow(fd.cwd, "/run/user/1000/flong"), "x", .{});
+    d.close();
+    d.close();
+}
+
+// OK7: a leader's pidfd awaited then closed once, as record.zig's
+// wait_leader does
+pub fn ok7PidfdOnce() !void {
+    const p = try msg.check(fd.pidfdOpen(1), "x", .{});
+    defer p.close();
+    _ = p.waitid(4);
+}
+
+// ---- B20-B23: the other minting functions phase 5 added ----
+// zwanzig honours `release` as a Child's ending, but not `reapNow(.kill)`
+// (a close model's call with an argument) nor `try c.await()` (measured
+// phase 5): a Child ended twice through those is the table's to catch at
+// run time, as closeChecked's double close is.
+
+// B20: a forked helper's Child released twice
+pub fn b20ForkReleasedTwice(ctx: u8, comptime body: fn (u8) noreturn) !void {
+    const c = try proc.fork(.{}, ctx, body);
+    c.release();
+    c.release();
+}
+
+// B21: a spawned program's Child awaited after it was released
+pub fn b21SpawnAwaitedAfterRelease(s: *proc.Spawn) !void {
+    const c = try s.start();
+    c.release();
+    _ = c.await() catch 0;
+}
+
+// B22: a signalfd read after it was closed
+pub fn b22SignalfdAfterClose(si: anytype) !void {
+    const s = try msg.check(fd.openSignalfd(0), "x", .{});
+    s.close();
+    _ = s.readSiginfo(si);
+}
+
+// B23: a pipe's write end closed twice
+pub fn b23PipeClosedTwice() !void {
+    const p = try msg.check(fd.pipe(), "x", .{});
+    p.r.close();
+    p.w.close();
+    p.w.close();
 }

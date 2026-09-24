@@ -1,0 +1,3 @@
+poststop=/nix/store/aaaa-flong-poststop-demo
+cgroup=/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/flong-sessions.service/demo/demo
+leader=4242:1234567

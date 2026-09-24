@@ -18,7 +18,11 @@
 //! close_range, execve), each as glibc makes it (flong-init.c:195-238);
 //! phase 4 the mount helper's (flong-mount.c): openat2, the mount API,
 //! statx's unique mount id and statmount, setns and unshare, the fs and res
-//! ids, fchownat, umask, readlinkat, umount2 and the pidfd namespace ioctls.
+//! ids, fchownat, umask, readlinkat, umount2 and the pidfd namespace ioctls;
+//! phase 5 the process layer's (flong-util.c:244-513): clone3, waitid on a
+//! pidfd, pidfd_open and pidfd_send_signal, poll, pipe2, the signal mask,
+//! signalfd4 and dispositions, fcntl and dup2 for Spawn's child, inotify,
+//! the real and effective uid, and faccessat for postStop's X_OK.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -341,7 +345,7 @@ pub const sa_restorer = 0x04000000;
 /// disposition never calls, so the call is the C's argument for argument.
 /// Not std's sigaction, which asserts on SIGKILL and SIGSTOP
 /// (linux.zig:1857-1861).
-pub fn sigDefault(sig: u6) Result(void) {
+pub fn sigDefault(sig: u7) Result(void) {
     const x86 = builtin.cpu.arch == .x86_64;
     const act: KSigaction = .{
         .handler = SIG.DFL,
@@ -619,6 +623,226 @@ pub const PIDFD_GET_NET_NAMESPACE: u32 = 0xff04;
 /// ioctl(2) with an integer argument, whose value is a new descriptor.
 pub fn ioctlFd(fd: fd_t, request: u32, arg: usize) Result(fd_t) {
     return result(fd_t, linux.syscall3(.ioctl, @bitCast(@as(isize, fd)), request, arg));
+}
+
+// ---- processes and signals (flong-util.c:244-513) ----
+
+pub const pid_t = linux.pid_t;
+pub const uid_t = linux.uid_t;
+
+/// struct clone_args (linux/sched.h), CLONE_ARGS_SIZE_VER2: every field a
+/// __aligned_u64, the same on x86_64 and aarch64. The kernel takes the size
+/// as clone3's second argument (ZIG.md, "Measured": P3, P4).
+pub const CloneArgs = extern struct {
+    flags: u64 = 0,
+    pidfd: u64 = 0,
+    child_tid: u64 = 0,
+    parent_tid: u64 = 0,
+    exit_signal: u64 = 0,
+    stack: u64 = 0,
+    stack_size: u64 = 0,
+    tls: u64 = 0,
+    set_tid: u64 = 0,
+    set_tid_size: u64 = 0,
+    cgroup: u64 = 0,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(CloneArgs) == 88);
+    std.debug.assert(@offsetOf(CloneArgs, "exit_signal") == 32);
+    std.debug.assert(@offsetOf(CloneArgs, "cgroup") == 80);
+}
+
+/// clone3's flags (linux/sched.h): the pidfd, and the cgroup the child is
+/// created in (flong-util.c:390-402).
+pub const CLONE_PIDFD: u64 = linux.CLONE.PIDFD;
+pub const CLONE_INTO_CGROUP: u64 = linux.CLONE.INTO_CGROUP;
+
+/// clone3(2) with no stack and no CLONE_VM: a fork, 0 in the child, the
+/// pid in the parent. std wraps none (ZIG.md, "Measured": P3).
+pub fn clone3(args: *CloneArgs) Result(pid_t) {
+    return result(pid_t, linux.syscall2(.clone3, @intFromPtr(args), @sizeOf(CloneArgs)));
+}
+
+/// The signals by number (asm-generic/signal.h, x86_64's and aarch64's).
+pub const SIGHUP = 1;
+pub const SIGINT = 2;
+pub const SIGQUIT = 3;
+pub const SIGKILL = 9;
+pub const SIGUSR1 = 10;
+pub const SIGPIPE = 13;
+pub const SIGTERM = 15;
+pub const SIGCHLD = 17;
+pub const SIGCONT = 18;
+pub const SIGWINCH = 28;
+/// glibc's NSIG: the signals are 1 to 64.
+pub const nsig = 65;
+
+/// The bit of `sig` (1-64) in a kernel sigset, a u64 on both arches.
+pub fn sigBit(sig: u7) u64 {
+    return @as(u64, 1) << @as(u6, @intCast(sig - 1));
+}
+
+/// waitid(2)'s options (linux/wait.h).
+pub const WEXITED = linux.W.EXITED;
+pub const WNOWAIT = linux.W.NOWAIT;
+pub const WNOHANG = linux.W.NOHANG;
+/// si_code of a child that exited, rather than was killed (asm-generic/siginfo.h).
+pub const CLD_EXITED = 1;
+
+/// What waitid says of a child: its si_code and si_status, and si_pid,
+/// which WNOHANG leaves 0 when the child has not exited.
+pub const ChildInfo = struct {
+    code: i32,
+    status: i32,
+    pid: pid_t,
+};
+
+/// waitid(P_PIDFD, pidfd, &si, flags), EINTR retried as flong-util.c:342
+/// and :355 retry it. The siginfo starts zeroed (:341).
+pub fn waitidPidfd(pidfd: fd_t, flags: u32) Result(ChildInfo) {
+    var si: linux.siginfo_t = std.mem.zeroes(linux.siginfo_t);
+    while (true) {
+        switch (result(void, linux.waitid(.PIDFD, pidfd, &si, flags))) {
+            .ok => return .{ .ok = .{
+                .code = si.code,
+                .status = si.fields.common.second.sigchld.status,
+                .pid = si.fields.common.first.piduid.pid,
+            } },
+            .err => |e| if (e != .INTR) return .{ .err = e },
+        }
+    }
+}
+
+/// pidfd_open(2). ESRCH, the process gone, is an answer the caller reads
+/// (flong-util.c:326-334).
+pub fn pidfdOpen(pid: pid_t) Result(fd_t) {
+    return result(fd_t, linux.pidfd_open(pid, 0));
+}
+
+/// pidfd_send_signal(2) with no siginfo, as flong-util.c:354 sends SIGKILL.
+pub fn pidfdSendSignal(pidfd: fd_t, sig: i32) Result(void) {
+    return result(void, linux.pidfd_send_signal(pidfd, sig, null, 0));
+}
+
+pub const pollfd = linux.pollfd;
+pub const POLL = linux.POLL;
+
+/// poll(2) with no timeout (-1) or one; EINTR is the caller's, as fl_await
+/// retries it itself (flong-util.c:292-296).
+pub fn poll(fds: []pollfd, timeout_ms: i32) Result(usize) {
+    return result(usize, linux.poll(fds.ptr, fds.len, timeout_ms));
+}
+
+/// close_range(2)'s flag that marks the range close-on-exec instead of
+/// closing it (linux/close_range.h), as Spawn's child uses it
+/// (flong-util.c:435).
+pub const CLOSE_RANGE_CLOEXEC: u32 = 1 << 2;
+
+/// pipe2(2), both ends O_CLOEXEC.
+pub fn pipe2(fds: *[2]fd_t) Result(void) {
+    return result(void, linux.pipe2(fds, .{ .CLOEXEC = true }));
+}
+
+/// rt_sigprocmask(2)'s `how` (asm-generic/signal-defs.h).
+pub const SIG_BLOCK = 0;
+pub const SIG_SETMASK = 2;
+
+/// rt_sigprocmask(how, &set, &old): the mask before the call.
+pub fn sigprocmask(how: u32, set: u64) Result(u64) {
+    var old: u64 = 0;
+    return switch (result(void, linux.syscall4(.rt_sigprocmask, how, @intFromPtr(&set), @intFromPtr(&old), @sizeOf(u64)))) {
+        .ok => .{ .ok = old },
+        .err => |e| .{ .err = e },
+    };
+}
+
+/// SA_RESTART (asm-generic/signal-defs.h), which glibc's signal() sets.
+pub const sa_restart = 0x10000000;
+/// SIG_IGN, the handler value.
+pub const sig_ign = 1;
+
+/// signal(sig, handler) as glibc's signal() makes the call, BSD semantics
+/// (glibc signal/signal.c, __bsd_signal): the signal itself masked while
+/// its handler runs, SA_RESTART, and SA_RESTORER with its restorer on
+/// x86_64 as sigDefault sets it. `handler` is SIG_DFL or SIG_IGN. The old
+/// action is asked for, as glibc asks, and dropped.
+pub fn signal(sig: u7, handler: usize) Result(void) {
+    const x86 = builtin.cpu.arch == .x86_64;
+    const act: KSigaction = .{
+        .handler = handler,
+        .flags = sa_restart | (if (x86) sa_restorer else 0),
+        .restorer = if (x86) @intFromPtr(&linux.restore_rt) else 0,
+        .mask = sigBit(sig),
+    };
+    var old: KSigaction = undefined;
+    return result(void, linux.syscall4(.rt_sigaction, sig, @intFromPtr(&act), @intFromPtr(&old), @sizeOf(u64)));
+}
+
+/// signalfd4(2)'s flags (linux/signalfd.h): O_CLOEXEC's and O_NONBLOCK's
+/// bits, as fl_sigfd is made (flong-launch.c:881).
+pub const SFD_CLOEXEC: u32 = 0o2000000;
+pub const SFD_NONBLOCK: u32 = 0o4000;
+
+/// signalfd4(-1, mask, flags): a new descriptor reading `mask`'s signals.
+pub fn signalfd(mask: u64, flags: u32) Result(fd_t) {
+    const none: isize = -1;
+    return result(fd_t, linux.syscall4(.signalfd4, @bitCast(none), @intFromPtr(&mask), @sizeOf(u64), flags));
+}
+
+/// struct signalfd_siginfo (linux/signalfd.h): 128 bytes, ssi_signo first.
+pub const SignalfdSiginfo = linux.signalfd_siginfo;
+
+comptime {
+    std.debug.assert(@sizeOf(SignalfdSiginfo) == 128);
+    std.debug.assert(@offsetOf(SignalfdSiginfo, "signo") == 0);
+}
+
+/// fcntl(2)'s commands Spawn's child makes (flong-util.c:425, 440).
+pub const F_SETFD = 2;
+pub const F_DUPFD_CLOEXEC = 1030;
+
+/// fcntl(2) with an integer argument: its value, a descriptor for
+/// F_DUPFD_CLOEXEC.
+pub fn fcntl(fd: fd_t, cmd: i32, arg: usize) Result(fd_t) {
+    return result(fd_t, linux.fcntl(fd, cmd, arg));
+}
+
+/// dup2(2); aarch64 has only dup3, which glibc's dup2 calls when the two
+/// differ, and Spawn's child never passes two that are the same (a copy
+/// above 2 onto 0-2, flong-util.c:429-433).
+pub fn dup2(old: fd_t, new: fd_t) Result(void) {
+    std.debug.assert(old != new);
+    return result(void, linux.dup2(old, new));
+}
+
+pub fn getuid() uid_t {
+    return linux.getuid();
+}
+
+pub fn geteuid() uid_t {
+    return linux.geteuid();
+}
+
+/// X_OK, access(2)'s execute bit.
+pub const X_OK = linux.X_OK;
+
+/// access(path, mode) as glibc's aarch64 access makes it,
+/// faccessat(AT_FDCWD, path, mode), on both arches: the real ids decide.
+pub fn access(path: [*:0]const u8, mode: u32) Result(void) {
+    return result(void, linux.syscall3(.faccessat, @bitCast(@as(isize, AT.FDCWD)), @intFromPtr(path), mode));
+}
+
+/// inotify's event bits and init flag (linux/inotify.h).
+pub const IN = linux.IN;
+
+pub fn inotifyInit1(flags: u32) Result(fd_t) {
+    return result(fd_t, linux.inotify_init1(flags));
+}
+
+/// inotify_add_watch(2): the watch descriptor.
+pub fn inotifyAddWatch(fd: fd_t, path: [*:0]const u8, mask: u32) Result(i32) {
+    return result(i32, linux.inotify_add_watch(fd, path, mask));
 }
 
 test "read and write carry the errno" {

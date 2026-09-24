@@ -22,7 +22,14 @@
 //! adds the mount helper's (flong-mount.c): `path` (O_PATH), `tree` (a
 //! detached mount), `fsctx` (a filesystem being configured), the four
 //! namespaces it enters, `pipe_r` (the ready pipe) and `pidfd` (the
-//! leader's, adopted); and `adoptForeign`, for the shim alone.
+//! leader's, adopted); and `adoptForeign`, for the shim alone. Phase 5
+//! adds flong-sweeper's and the process layer's (flong-util.c,
+//! flong-cgroup.c, flong-record.c): `cgroup` (an O_PATH cgroup directory,
+//! the only kind fork and Spawn create a child in), `inotify`, `pipe_w`,
+//! `signalfd`, `inherited` (a descriptor the caller handed over, which
+//! Spawn keeps), pidfds of its own children (`proc.zig`, whose slot is
+//! reserved before clone3) and `retainOnly`, a fork child's close of all
+//! but its keep list.
 //!
 //!   Fd(k)       an owned handle: `close` once, then every copy is stale
 //!   Held(k)     `h.holdUntilExit()`: the same descriptor, no `close`, for
@@ -54,6 +61,14 @@ pub const Kind = enum(u8) {
     cgroupns,
     pipe_r,
     pidfd,
+    /// O_PATH|O_DIRECTORY|O_NOFOLLOW of a cgroup (flong-cgroup.c:123-126).
+    cgroup,
+    inotify,
+    pipe_w,
+    signalfd,
+    /// A descriptor the caller handed over at a number the spec named
+    /// (flong-launch.c:407-408; ZIG.md, "The descriptor layer").
+    inherited,
 };
 
 /// A namespace setns enters, with the kind of descriptor naming it.
@@ -88,8 +103,14 @@ pub const capacity = 1024;
 
 pub const Error = error{TableFull};
 
+/// A slot's raw value when it holds no descriptor, and when fork or
+/// Spawn.start has reserved it for the pidfd clone3 is about to make
+/// (quirk 26). Neither is live.
+const free: sys.fd_t = -1;
+const reserved: sys.fd_t = -2;
+
 const Slot = struct {
-    raw: sys.fd_t = -1,
+    raw: sys.fd_t = free,
     gen: u32 = 0,
     kind: Kind = .file,
 };
@@ -108,7 +129,7 @@ fn live(slot: u16, gen: u32, k: Kind) *Slot {
 }
 
 fn release(s: *Slot) void {
-    s.raw = -1;
+    s.raw = free;
     s.gen +%= 1;
 }
 
@@ -116,7 +137,7 @@ fn release(s: *Slot) void {
 /// holds a descriptor the table does not know.
 fn adopt(comptime k: Kind, raw: sys.fd_t) Error!Fd(k) {
     for (&slots, 0..) |*s, i| {
-        if (s.raw < 0) {
+        if (s.raw == free) {
             s.raw = raw;
             s.kind = k;
             return .{ .slot = @intCast(i), .gen = s.gen };
@@ -147,6 +168,11 @@ pub const AnyFd = struct {
     pub fn isLive(self: AnyFd) bool {
         const s = &slots[self.slot];
         return s.raw >= 0 and s.gen == self.gen and s.kind == self.kind;
+    }
+
+    /// Itself, so a keep list or Spawn.passFd takes it as any handle.
+    pub fn any(self: AnyFd) AnyFd {
+        return self;
     }
 };
 
@@ -230,13 +256,13 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
         }
 
         pub fn write(self: Self, bytes: []const u8) sys.Result(usize) {
-            comptime need("write", &.{.file});
+            comptime need("write", &.{ .file, .pipe_w });
             return sys.write(self.raw(), bytes);
         }
 
         /// Writes all of `bytes`, going on after a short write.
         pub fn writeAll(self: Self, bytes: []const u8) sys.Result(void) {
-            comptime need("write", &.{.file});
+            comptime need("write", &.{ .file, .pipe_w });
             return writeAllTo(self.raw(), bytes);
         }
 
@@ -251,7 +277,7 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
         }
 
         pub fn fstat(self: Self) sys.Result(sys.Stat) {
-            comptime need("fstat", &.{ .file, .dir, .path, .tree });
+            comptime need("fstat", &.{ .file, .dir, .path, .tree, .cgroup });
             return sys.fstat(self.raw());
         }
 
@@ -264,13 +290,13 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
         // ---- dir: calls on paths relative to it ----
 
         pub fn mkdirat(self: Self, path: [*:0]const u8, mode: sys.mode_t) sys.Result(void) {
-            comptime need("mkdirat", &.{ .dir, .path, .tree });
+            comptime need("mkdirat", &.{ .dir, .path, .tree, .cgroup });
             return sys.mkdirat(self.raw(), path, mode);
         }
 
         /// unlinkat(2); `flags` is 0 or AT.REMOVEDIR.
         pub fn unlinkat(self: Self, path: [*:0]const u8, flags: u32) sys.Result(void) {
-            comptime need("unlinkat", &.{ .dir, .path });
+            comptime need("unlinkat", &.{ .dir, .path, .cgroup });
             return sys.unlinkat(self.raw(), path, flags);
         }
 
@@ -365,6 +391,43 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
                 @compileError("setns(." ++ @tagName(ns) ++ ") of a " ++ @tagName(k) ++ " descriptor");
             return sys.setns(self.raw(), ns.flag());
         }
+
+        // ---- pidfd ----
+
+        /// waitid(P_PIDFD) with `flags` (WEXITED, WNOWAIT, WNOHANG), EINTR
+        /// retried.
+        pub fn waitid(self: Self, flags: u32) sys.Result(sys.ChildInfo) {
+            comptime need("waitid", &.{.pidfd});
+            return sys.waitidPidfd(self.raw(), flags);
+        }
+
+        pub fn sendSignal(self: Self, sig: i32) sys.Result(void) {
+            comptime need("sendSignal", &.{.pidfd});
+            return sys.pidfdSendSignal(self.raw(), sig);
+        }
+
+        // ---- inotify ----
+
+        /// inotify_add_watch(2) of `path` (a selfPath, flong-record.c:770-771).
+        pub fn addWatch(self: Self, path: [*:0]const u8, mask: u32) sys.Result(i32) {
+            comptime need("addWatch", &.{.inotify});
+            return sys.inotifyAddWatch(self.raw(), path, mask);
+        }
+
+        /// One read of events into `buf`, read with `InotifyEvents`.
+        pub fn readEvents(self: Self, buf: []align(@alignOf(InotifyEvent)) u8) sys.Result(usize) {
+            comptime need("readEvents", &.{.inotify});
+            return sys.read(self.raw(), buf);
+        }
+
+        // ---- signalfd ----
+
+        /// One read of a queued signal: 128 bytes, or EAGAIN when none is
+        /// (the descriptor is non-blocking, flong-util.c:258-269).
+        pub fn readSiginfo(self: Self, si: *sys.SignalfdSiginfo) sys.Result(usize) {
+            comptime need("readSiginfo", &.{.signalfd});
+            return sys.read(self.raw(), std.mem.asBytes(si));
+        }
     };
 }
 
@@ -380,11 +443,11 @@ pub const Cwd = struct {
 pub const cwd: Cwd = .{};
 
 /// The number of `at`, a directory handle (owned or held), `cwd`, or an
-/// O_PATH handle or a detached tree, which name a directory as well
-/// (flong-mount.c:283-284, 384).
+/// O_PATH handle, a detached tree or a cgroup, which name a directory as
+/// well (flong-mount.c:283-284, 384; flong-cgroup.c:352, 466, 497).
 fn dirRaw(at: anytype) sys.fd_t {
     const T = @TypeOf(at);
-    if (!@hasDecl(T, "kind") or (T.kind != .dir and T.kind != .path and T.kind != .tree))
+    if (!@hasDecl(T, "kind") or (T.kind != .dir and T.kind != .path and T.kind != .tree and T.kind != .cgroup))
         @compileError("a directory handle or fd.cwd, not " ++ @typeName(T));
     return at.raw();
 }
@@ -402,6 +465,69 @@ pub fn openFile(at: anytype, path: [*:0]const u8, flags: sys.O, mode: sys.mode_t
 /// A directory under `at`, `O_RDONLY|O_DIRECTORY|O_CLOEXEC`.
 pub fn openDir(at: anytype, path: [*:0]const u8) Error!sys.Result(Dir) {
     return adopted(.dir, sys.openat(dirRaw(at), path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0));
+}
+
+/// A directory under `at` that is not a symlink,
+/// `O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`: the state directory and
+/// sessions/ (flong-record.c:61, 74), and a cgroup to list
+/// (flong-cgroup.c:546).
+pub fn openDirNoFollow(at: anytype, path: [*:0]const u8) Error!sys.Result(Dir) {
+    return adopted(.dir, sys.openat(dirRaw(at), path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0));
+}
+
+/// A cgroup directory (flong-cgroup.c:119-126): `path` absolute under
+/// `cwd`, or one component under a cgroup already open, with
+/// O_PATH|O_DIRECTORY|O_NOFOLLOW, so a symlink as the last component is
+/// refused. The only kind fork and Spawn create a child in.
+pub fn openCgroup(at: anytype, path: [*:0]const u8) Error!sys.Result(Fd(.cgroup)) {
+    const T = @TypeOf(at);
+    if (T != Cwd and (!@hasDecl(T, "kind") or T.kind != .cgroup))
+        @compileError("a cgroup is opened under fd.cwd or a cgroup, not " ++ @typeName(T));
+    return adopted(.cgroup, sys.openat(at.raw(), path, .{ .PATH = true, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0));
+}
+
+/// A pipe, both ends O_CLOEXEC.
+pub const Pipe = struct { r: Fd(.pipe_r), w: Fd(.pipe_w) };
+
+pub fn pipe() Error!sys.Result(Pipe) {
+    var p: [2]sys.fd_t = undefined;
+    switch (sys.pipe2(&p)) {
+        .err => |e| return .{ .err = e },
+        .ok => {},
+    }
+    const r = adopt(.pipe_r, p[0]) catch |err| {
+        sys.close(p[1]);
+        return err;
+    };
+    const w = adopt(.pipe_w, p[1]) catch |err| {
+        r.close();
+        return err;
+    };
+    return .{ .ok = .{ .r = r, .w = w } };
+}
+
+/// pidfd_open(2) of `pid` (flong-util.c:326-334): ESRCH, the process gone,
+/// is an answer in `.err`, as every other errno.
+pub fn pidfdOpen(pid: sys.pid_t) Error!sys.Result(Fd(.pidfd)) {
+    return adopted(.pidfd, sys.pidfdOpen(pid));
+}
+
+/// inotify_init1(IN_CLOEXEC) (flong-record.c:765).
+pub fn inotifyInit() Error!sys.Result(Fd(.inotify)) {
+    return adopted(.inotify, sys.inotifyInit1(sys.IN.CLOEXEC));
+}
+
+/// signalfd4(-1, mask, SFD_CLOEXEC|SFD_NONBLOCK) (flong-launch.c:881):
+/// sig.openSignalfd's, which keeps it in sig.fd.
+pub fn openSignalfd(mask: u64) Error!sys.Result(Fd(.signalfd)) {
+    return adopted(.signalfd, sys.signalfd(mask, sys.SFD_CLOEXEC | sys.SFD_NONBLOCK));
+}
+
+/// A descriptor the caller handed over at number `n`, once the spec has
+/// checked it is open (flong-spec.c:656-667; ZIG.md, "The descriptor
+/// layer"): Spawn.keepInherited passes it on, and `close` closes it.
+pub fn adoptInherited(n: sys.fd_t) Error!Fd(.inherited) {
+    return adopt(.inherited, n);
 }
 
 /// openat(2) with O_PATH under `at`, O_CLOEXEC added: `flags` may add
@@ -499,6 +625,93 @@ pub fn adoptForeign(comptime k: Kind, raw: sys.fd_t) Error!Fd(k) {
     return adopt(k, raw);
 }
 
+// ---- fork and spawn: the pidfd's slot, and the child's descriptors ----
+
+/// A slot held for the pidfd clone3 is about to make, so a full table is
+/// found before the child exists, never after (quirk 26: the spike leaked
+/// the child when its pidfd could not be adopted, fd.zig:280, 326). The
+/// child drops it with every other slot it does not keep (`retainOnly`,
+/// or its exec).
+pub const Reservation = struct {
+    slot: u16,
+
+    /// The parent's pidfd, in the reserved slot.
+    pub fn fill(self: Reservation, comptime k: Kind, raw: sys.fd_t) Fd(k) {
+        const s = &slots[self.slot];
+        std.debug.assert(s.raw == reserved);
+        s.raw = raw;
+        s.kind = k;
+        return .{ .slot = self.slot, .gen = s.gen };
+    }
+
+    /// clone3 failed: the slot is free again.
+    pub fn cancel(self: Reservation) void {
+        const s = &slots[self.slot];
+        std.debug.assert(s.raw == reserved);
+        release(s);
+    }
+};
+
+pub fn reserve() Error!Reservation {
+    for (&slots, 0..) |*s, i| {
+        if (s.raw == free) {
+            s.raw = reserved;
+            return .{ .slot = @intCast(i) };
+        }
+    }
+    return error.TableFull;
+}
+
+/// Where retainOnly's close_range failed: its first descriptor, as
+/// fl_close_from says it ("close_range %d", flong-util.c:160), and the
+/// errno.
+pub const CloseRangeFailure = struct { low: u32, err: sys.E };
+
+/// For a fork child (flong-util.c:154-165, 467-482): closes every
+/// descriptor from 3 up that `keep` does not hold, in the kernel and in the
+/// table. Every other handle, in any variable, is stale from here on: the
+/// parent's signalfd among them unless kept, so a wait in the child polls
+/// nothing that may be reused (flong-util.c:476-479). A reserved slot goes
+/// too. One close_range per gap between kept numbers, the last up to ~0U,
+/// in the C's order (next_kept, not a sort). Allocates nothing. A stale
+/// keep handle panics.
+pub fn retainOnly(keep: []const AnyFd) ?CloseRangeFailure {
+    var kept: [capacity]sys.fd_t = undefined;
+    const n = @min(keep.len, capacity);
+    for (keep[0..n], 0..) |h, i| kept[i] = h.raw();
+    for (&slots, 0..) |*s, i| {
+        if (s.raw == free) continue;
+        const wanted = for (keep) |h| {
+            if (h.slot == i) break true;
+        } else false;
+        if (!wanted) release(s);
+    }
+    var low: u32 = 3;
+    while (true) {
+        const next = nextKept(low, kept[0..n]);
+        const last: u32 = if (next) |k| k -% 1 else std.math.maxInt(u32);
+        if (next == null or next.? != low) {
+            switch (sys.closeRange(low, last, 0)) {
+                .ok => {},
+                .err => |e| return .{ .low = low, .err = e },
+            }
+        }
+        low = (next orelse return null) + 1;
+    }
+}
+
+/// next_kept (flong-util.c:143-152): the smallest number in `kept` that is
+/// at least `low`, or null.
+fn nextKept(low: u32, kept: []const sys.fd_t) ?u32 {
+    var best: ?u32 = null;
+    for (kept) |k| {
+        if (k < 0) continue;
+        const u: u32 = @intCast(k);
+        if (u >= low and (best == null or u < best.?)) best = u;
+    }
+    return best;
+}
+
 // ---- stdio ----
 
 /// Descriptors 0-2, which are not in the table: read and write only, never
@@ -584,12 +797,15 @@ pub fn selfPath(h: anytype) SelfPath {
 
 // ---- directory entries ----
 
-/// The entries of one getdents64 buffer, each name and inode.
+/// The entries of one getdents64 buffer, each name, inode and type.
 pub const Entries = struct {
     buf: []align(8) const u8,
     off: usize = 0,
 
-    pub const Entry = struct { name: []const u8, ino: u64 };
+    pub const Entry = struct { name: []const u8, ino: u64, type: u8 };
+
+    /// d_type's value for a directory (DT_DIR, dirent.h).
+    pub const dt_dir = 4;
 
     pub fn next(self: *Entries) ?Entry {
         if (self.off >= self.buf.len) return null;
@@ -599,13 +815,52 @@ pub const Entries = struct {
         const name_at = @offsetOf(sys.Dirent64, "name");
         const name = std.mem.sliceTo(at[name_at..reclen], 0);
         self.off += reclen;
-        return .{ .name = name, .ino = ino };
+        return .{ .name = name, .ino = ino, .type = at[18] };
     }
 };
 
+// ---- inotify events ----
+
+/// struct inotify_event's fixed part (linux/inotify.h): 16 bytes, then
+/// `len` bytes of NUL-padded name.
+pub const InotifyEvent = extern struct {
+    wd: i32,
+    mask: u32,
+    cookie: u32,
+    len: u32,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(InotifyEvent) == 16);
+}
+
+/// The events of one inotify read (flong-record.c:800-821), each mask and
+/// name (up to its first NUL; empty when `len` is 0). The kernel writes
+/// whole events, but this reads any bytes without a panic: a fixed part
+/// or a name that would run past the end ends the iteration.
+pub const InotifyEvents = struct {
+    buf: []const u8,
+    off: usize = 0,
+
+    pub const Event = struct { mask: u32, name: []const u8 };
+
+    pub fn next(self: *InotifyEvents) ?Event {
+        const rest = self.buf[self.off..];
+        if (rest.len < @sizeOf(InotifyEvent)) return null;
+        const mask = std.mem.readInt(u32, rest[4..8], builtin_endian);
+        const len = std.mem.readInt(u32, rest[12..16], builtin_endian);
+        if (len > rest.len - @sizeOf(InotifyEvent)) return null;
+        const name = std.mem.sliceTo(rest[@sizeOf(InotifyEvent)..][0..len], 0);
+        self.off += @sizeOf(InotifyEvent) + len;
+        return .{ .mask = mask, .name = name };
+    }
+};
+
+const builtin_endian = @import("builtin").cpu.arch.endian();
+
 // ---- for tests ----
 
-/// The number of live handles.
+/// The number of live handles; a reserved slot is not one.
 pub fn liveCount() usize {
     var n: usize = 0;
     for (slots) |s| n += @intFromBool(s.raw >= 0);

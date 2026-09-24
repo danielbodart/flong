@@ -76,9 +76,16 @@ column 0, like the rest of the testScript.
 
 ## The proofs
 
-- `p3`: processes. `clone3` into a delegated `O_PATH` leaf, the `noreturn`
-  fork (`compile-fail` and at run time), a fork after `setns(CLONE_NEWUSER)`.
-  Stays in `checks.native`.
+None stands now; the contract stays for the next question.
+
+Retired in phase 5: `p3`, processes (its last version is `tests/proofs/p3/`
+at b79babb). Its questions are asked of the real `src/proc.zig` now: the
+`noreturn` fork's compile failure is `tests/zig/compile_fail/fork_body_returns.zig`
+(`native-lint`), its run and a panicking body are `native-test`'s
+(`tests/zig/proc_props.zig`, through `flong-proc`, `tests/zig/procdriver.zig`),
+and `clone3` into a delegated `O_PATH` leaf, its `system.slice` control and a
+fork after `setns(CLONE_NEWUSER)` are `checks.native`'s `proc:` subtests
+(`tests/native.nix`), with a `Spawn` into the leaf beside them.
 
 Retired in phase 4: `p5`, the hybrid link (its last version is
 `tests/proofs/p5/` at a7919be), a Zig archive with the shim's settings

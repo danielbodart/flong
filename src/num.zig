@@ -53,6 +53,48 @@ pub fn strtoullBase0(s: []const u8) ?u64 {
     return v;
 }
 
+/// What glibc's strtoull(s, &end, 10) answers over the C string `s` (up to
+/// its first NUL, if any): the value, how many bytes it read (`end - s`;
+/// 0 when there were no digits), and whether it said ERANGE. As glibc, in
+/// the C locale: blanks (space, \t, \n, \v, \f, \r) skipped, then one
+/// optional sign, then decimal digits; a '-' negates the value modulo 2^64;
+/// past 2^64 - 1 the value is 2^64 - 1 and ERANGE is set, whatever the
+/// sign. For fl_starttime's field 22 (flong-util.c:384) and closed_inode's
+/// "#<inode>" (flong-record.c:745-753), which read outside text as the C did.
+pub const Strtoull = struct { value: u64, len: usize, range: bool };
+
+pub fn strtoull10(s: []const u8) Strtoull {
+    const text = s[0 .. std.mem.indexOfScalar(u8, s, 0) orelse s.len];
+    var i: usize = 0;
+    while (i < text.len and isCSpace(text[i])) i += 1;
+    var negative = false;
+    if (i < text.len and (text[i] == '+' or text[i] == '-')) {
+        negative = text[i] == '-';
+        i += 1;
+    }
+    const first = i;
+    var v: u64 = 0;
+    var range = false;
+    while (i < text.len and std.ascii.isDigit(text[i])) : (i += 1) {
+        if (range) continue;
+        const shifted = @mulWithOverflow(v, 10);
+        const added = @addWithOverflow(shifted[0], text[i] - '0');
+        if (shifted[1] != 0 or added[1] != 0) {
+            range = true;
+            v = std.math.maxInt(u64);
+        } else v = added[0];
+    }
+    // No digits: 0, and end is s itself, the blanks and sign unread.
+    if (i == first) return .{ .value = 0, .len = 0, .range = false };
+    if (negative and !range) v = 0 -% v;
+    return .{ .value = v, .len = i, .range = range };
+}
+
+/// isspace in the C locale.
+fn isCSpace(ch: u8) bool {
+    return ch == ' ' or (ch >= '\t' and ch <= '\r');
+}
+
 /// A digit's value in any base up to 36, as strtoull reads it, or 36 when
 /// `ch` is no digit at all.
 fn digitValue(ch: u8) u8 {
@@ -95,6 +137,21 @@ test "what the C refused" {
     }) |s| {
         try testing.expectEqual(@as(?u64, null), strtoullBase0(s));
     }
+}
+
+test "strtoull10 reads as glibc's base 10" {
+    const T = Strtoull;
+    try testing.expectEqual(T{ .value = 12, .len = 2, .range = false }, strtoull10("12"));
+    try testing.expectEqual(T{ .value = 12, .len = 4, .range = false }, strtoull10(" \t12x"));
+    try testing.expectEqual(T{ .value = 3, .len = 2, .range = false }, strtoull10("+3"));
+    try testing.expectEqual(T{ .value = std.math.maxInt(u64) - 4, .len = 2, .range = false }, strtoull10("-5"));
+    try testing.expectEqual(T{ .value = 0, .len = 0, .range = false }, strtoull10(" -"));
+    try testing.expectEqual(T{ .value = 0, .len = 0, .range = false }, strtoull10(""));
+    try testing.expectEqual(T{ .value = 0, .len = 0, .range = false }, strtoull10("x1"));
+    try testing.expectEqual(T{ .value = 7, .len = 1, .range = false }, strtoull10("7\x008"));
+    try testing.expectEqual(T{ .value = std.math.maxInt(u64), .len = 20, .range = false }, strtoull10("18446744073709551615"));
+    try testing.expectEqual(T{ .value = std.math.maxInt(u64), .len = 20, .range = true }, strtoull10("18446744073709551616"));
+    try testing.expectEqual(T{ .value = std.math.maxInt(u64), .len = 22, .range = true }, strtoull10("-999999999999999999999"));
 }
 
 test "every u64 reads back from each base" {

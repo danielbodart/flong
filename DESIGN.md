@@ -1353,12 +1353,13 @@ Component costs are quoted in their sections, with their harness.
 ## The native launcher
 
 Three programs, installed side by side by `native.nix`'s `launcher` set:
-`flong-launch` and `flong-sweeper`, C in `launcher/`, built by `$CC` with
-`-std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror` and fortify (an unchecked
-`write`, `read` or `fscanf` is an error), `flong-launch` linking the mount
-helper, Zig (`src/mount.zig`, through `src/hybrid/mount_c.zig`), as a static
-library with no libc and no compiler-rt; and `flong-init`, Zig
-(`src/init.zig`, static, no libc), which `ZIG.md` is porting the rest to. The
+`flong-launch`, C in `launcher/`, built by `$CC` with `-std=gnu11 -O2
+-D_GNU_SOURCE -Wall -Wextra -Werror` and fortify (an unchecked `write`,
+`read` or `fscanf` is an error), linking the mount helper, Zig
+(`src/mount.zig`, through `src/hybrid/mount_c.zig`), as a static library
+with no libc and no compiler-rt; and `flong-init` and `flong-sweeper`, Zig
+(`src/init.zig`, `src/sweeper.zig`, static, no libc), which `ZIG.md` is
+porting the rest to. The
 store paths they run (bwrap, pasta, tini, flong-init) and
 `/run/wrappers/bin/newuidmap` and `newgidmap` are compiled in, so the wrapper
 cannot point the launcher at another bwrap.
@@ -1384,16 +1385,21 @@ does, when it is called and how it fails.
 | `flong-mount.h` | the mount helper's job and its one call, `flong_mount_main`, which `flong-launch` makes in the forked child |
 | `flong-tty` | the foreground wait, the pty relay or passthrough, raw mode, the watchdog, `^]^]^]`, the wait for bwrap |
 | `flong-launch.c` | `main`: the order of a launch, bwrap's argv, the hook, pasta, the gate, the one teardown path, exit codes |
-| `flong-sweeper.c` | `main` of the holder unit's process |
+| `flong-sweeper.c` | `main` of the holder unit's process, until `src/sweeper.zig` replaced it (built for `golden`'s transition only) |
+| `src/sweeper.zig` | `flong-sweeper`, the holder unit's process: the state directory, its holder, then `record.watch`; static, no libc, no allocator |
+| `src/record.zig`, `src/cgroup.zig`, `src/names.zig` | the sweep's half of `flong-record` and `flong-cgroup`, and names: the state directory, reading and releasing records, `postStop`, the watch; a record's session opened, killed, waited for and removed |
+| `src/proc.zig`, `src/sig.zig` | the process layer: `fork` (a `noreturn` body, the keep list), `Spawn`, `Child`, `lockWait`, starttime; the signal mask, the signalfd, `awaitFd` |
 | `src/mount.zig` | the mount helper, linked into `flong-launch` through `src/hybrid/mount_c.zig`: sources, the walker, masks, overlays, `/sys`, `/run` read-only; no libc |
 | `src/init.zig` | `flong-init`, pid 1 in the session: groups, capabilities, controlling tty, ready byte, the gate, chdir, exec tini; static, no libc, no allocator |
 
 Dependencies point one way: util, then spec, then ns, cgroup (then record)
-and tty; `flong-launch` uses all of them and the mount helper, `flong-sweeper`
-util, cgroup and record. The Zig uses none of them: the mount helper reads
-`flong-mount.h`'s job through mirrors checked against the header, and imports
-the Zig package's `sys`, `fd` and `msg`, as `flong-init` imports `sys` and
-`msg`.
+and tty; `flong-launch` uses all of them and the mount helper. The Zig uses
+none of them: the mount helper reads `flong-mount.h`'s job through mirrors
+checked against the header, and imports the Zig package's `sys`, `fd` and
+`msg`, as `flong-init` imports `sys` and `msg`, and `flong-sweeper` `record`,
+`cgroup`, `names`, `proc`, `sig`, `fd`, `sys` and `msg`. The C launcher still
+writes the records the Zig sweeper sweeps, byte for byte as before
+(`tests/golden/records/`).
 
 ### Conventions
 
