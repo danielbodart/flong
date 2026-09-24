@@ -46,21 +46,22 @@ const oversize = "b" ** 8300;
 pub fn record(tokens: []const u16, buf: []u8) []u8 {
     if (tokens.len > 0 and tokens[0] % 2 == 0) return recordLines(tokens[1..], buf);
     return build(&.{
-        "poststop=",            "cgroup=",                       "leader=",                 "\n",
-        "\n",                   "\n",                            "/",                       "a",
-        "1",                    "0",                             ":",                       "-",
-        "+",                    " ",                             "\x00",                    "/sys/fs/cgroup",
-        "/nix/store/",          "2147483647",                    "2147483648",              "18446744073709551615",
-        "18446744073709551616", "9",                             "..",                      "=",
-        "leader=1:1\n",         "cgroup=/sys/fs/cgroup/h/c/m\n", "poststop=/nix/store/x\n", long_a,
-        oversize,               "leader=01:1\n",                 "leader=1:+1\n",           "x=y\n",
-        "\t",                   "leader=4294967297:1\n",         "cgroup=\n",               "\r",
+        "poststop=",            "cgroup=",                       "leader=",                                      "\n",
+        "\n",                   "\n",                            "/",                                            "a",
+        "1",                    "0",                             ":",                                            "-",
+        "+",                    " ",                             "\x00",                                         "/sys/fs/cgroup",
+        "/nix/store/",          "2147483647",                    "2147483648",                                   "18446744073709551615",
+        "18446744073709551616", "9",                             "..",                                           "=",
+        "leader=1:1\n",         "cgroup=/sys/fs/cgroup/h/c/m\n", "poststop=/nix/store/x\n",                      long_a,
+        oversize,               "leader=01:1\n",                 "leader=1:+1\n",                                "x=y\n",
+        "\t",                   "leader=4294967297:1\n",         "cgroup=\n",                                    "\r",
+        "\x1e",                 "\x1f",                          "poststop=/nix/store/x\x1fa\x1e/nix/store/y\n",
     }, tokens, buf);
 }
 
 fn recordLines(tokens: []const u16, buf: []u8) []u8 {
     const keys = [_][]const u8{ "poststop=", "cgroup=", "leader=" };
-    const paths = [_][]const u8{ "/nix/store/x", "/sys/fs/cgroup/h/c/m", "/", "a", "..", "", " ", ":", "\x00", long_a };
+    const paths = [_][]const u8{ "/nix/store/x", "/sys/fs/cgroup/h/c/m", "/", "a", "..", "", " ", ":", "\x00", long_a, "\x1e", "\x1f" };
     const leaders = [_][]const u8{ "1", ":", "12", "0", "2147483647", "2147483648", "18446744073709551615", "18446744073709551616", "+", " ", "01", "x" };
     var n: usize = 0;
     var i: usize = 0;
@@ -79,6 +80,15 @@ fn recordLines(tokens: []const u16, buf: []u8) []u8 {
         if (k != 2 or t % 7 != 6) put(buf, &n, "\n");
     }
     return buf[0..n];
+}
+
+/// poststop='s value (record.words, over its commands): store paths, words,
+/// both separators, a NUL, and a run past PATH_MAX, so commands of one and
+/// of many words, empty ones and ones too long all come up.
+pub fn poststopList(tokens: []const u16, buf: []u8) []u8 {
+    return build(&.{
+        "/nix/store/x", "\x1e", "\x1f", "\x1f", "\x1e", "a", "", "--", "..", "x y", "\x00", long_a, "/", "=", "\n",
+    }, tokens, buf);
 }
 
 /// A machine name, then a cgroup path, for cgroup.sessionForm: the first

@@ -76,33 +76,32 @@ let
   flatCommands = cmds: lib.concatMap (cmd: [ (toString (lib.length cmd)) ] ++ cmd) cmds;
 
   # postStart and postStop are ordered lists of commands, and the launcher's
-  # spec names one program for each, so each list is composed into ONE
-  # program here: it runs the commands in order, each with the hook's
-  # environment and the hook's arguments after its own, and stops at the
-  # first that fails, exiting with its status. Temporary: S3 moves the list
-  # into flong launch itself (STANDALONE.md).
+  # spec carries them as such: one `post-start N WORD...` or
+  # `post-stop N WORD...` per command, run in order, the first that fails
+  # ending the list (src/launch/hook.zig, src/record.zig's poststop). Each
+  # command is put behind the declaration's hook program, which gives it the
+  # hook's environment and then execs it, so it is the command's own
+  # process:
   #
-  # postStart's arguments are the launcher's. postStop's one argument is the
-  # session's name, which the launcher and the sweeper pass: it is exported
-  # as $machine, and a postStop command gets no arguments of its own, since
-  # on the sweeper's path the name is all that survives. `path` is on PATH
-  # for both, as it is for every hook.
+  #   flong-<kind>-<name> WORD... [ARG...]
+  #
+  # `path` is on PATH for both, as it is for every hook, and a bare program
+  # name is looked up there. postStart's arguments are the launcher's, after
+  # the command's words. postStop's are the session's name alone, which the
+  # launcher and the sweeper both append and pass as $machine: the program
+  # drops it, so a postStop command gets no arguments of its own, since on
+  # the sweeper's path the name is all that survives, and the environment
+  # there is $machine and nothing else. The program is in the store, as a
+  # postStop program must be.
   mkHookProgram = name: kind: c: pkgs.writeShellApplication {
     name = "flong-${kind}-${name}";
     runtimeInputs = [ pkgs.coreutils pkgs.util-linux ] ++ c.path;
     text = ''
       ${lib.optionalString (kind == "poststop") ''
-        export machine=$1
-        set --
+        export machine=''${!#}
+        set -- "''${@:1:$#-1}"
       ''}
-      # shellcheck disable=SC2016,SC2054
-      commands=(${lib.escapeShellArgs (flatCommands (if kind == "poststop" then c.postStop else c.postStart))})
-      i=0
-      while ((i < ''${#commands[@]})); do
-        n=''${commands[i]}
-        "''${commands[@]:i+1:n}" "$@" || exit
-        i=$((i + 1 + n))
-      done
+      exec "$@"
     '';
   };
 
@@ -426,12 +425,12 @@ let
       s = c.seccomp;
       f = seccompFiltersOf c;
 
-      # The hook programs the launcher's spec names, each composed of its
-      # list of commands (mkHookProgram). postStop is not always run by THIS
+      # The hook programs each of the launcher's hook commands is run
+      # through (mkHookProgram). postStop is not always run by THIS
       # launcher: a SIGKILLed launcher's session is released by the holder's
-      # sweeper, which runs the program the session's record names -- a
-      # superseded generation's included, whose commands this launcher no
-      # longer carries.
+      # sweeper, which runs the commands the session's record names -- a
+      # superseded generation's included, which this launcher no longer
+      # carries.
       postStartScript = mkHookProgram name "poststart" c;
       postStopScript = mkHookProgram name "poststop" c;
 
@@ -478,8 +477,9 @@ let
         ++ [ "holder" "app.slice/flong-sessions.service" ]
         ++ lib.concatMap (a: [ "holder-start" a ])
           [ "/run/current-system/sw/bin/systemctl" "--user" "start" "flong-sessions.service" ]
-        ++ lib.optionals (c.postStop != [ ])
-          [ "post-stop" "${postStopScript}/bin/flong-poststop-${name}" ]
+        # One post-stop per command: its word count, then its words, the
+        # declaration's hook program first (mkHookProgram).
+        ++ lib.concatMap (cmd: [ "post-stop" (toString (1 + lib.length cmd)) "${postStopScript}/bin/flong-poststop-${name}" ] ++ cmd) c.postStop
         ++ lib.optionals (c.network != null) ([ "network" ]
           ++ lib.concatMap (a: [ "pasta-arg" a ]) (pastaPortArgs c.network ++ [ "--no-map-gw" ])
           # Fixed ports are bound on the host, so teardown waits for pasta to
@@ -492,7 +492,7 @@ let
       names = [
         "name" "container" "user" "closure" "cuid" "cgid" "closure8" "steps8"
         "static" "declared_dests" "declared_binds" "masks" "mask_hosts"
-        "launcher" "cache_tool" "flock" "mkdir" "payload" "post_start"
+        "launcher" "cache_tool" "flock" "mkdir" "payload" "post_start_commands"
         "network" "dns_forward4" "dns_forward6"
         "workspace_command" "binds_commands" "guard_commands"
         "seccomp_tier" "seccomp_fixed" "seccomp_project" "seccomp_policy_commands"
@@ -523,7 +523,7 @@ let
         flock=${q "${pkgs.util-linux}/bin/flock"}
         mkdir=${q "${pkgs.coreutils}/bin/mkdir"}
         payload=${q (lib.getExe (mkPayload name c))}
-        post_start=${q (if c.postStart == [ ] then "" else "${postStartScript}/bin/flong-poststart-${name}")}
+        post_start_commands=(${qs (flatCommands (map (cmd: [ "${postStartScript}/bin/flong-poststart-${name}" ] ++ cmd) c.postStart))})
         network=${if c.network == null then "0" else "1"}
         dns_forward4=${q dnsForward4}
         dns_forward6=${q dnsForward6}

@@ -189,7 +189,12 @@ let
     # recorded from the C launcher before L4 switched to the Zig one. The
     # valid spec: machine m, container c, state /state, cache /cache,
     # closure CLOSURE, uidmap and gidmap 0 100000 65536, user 1000 100
-    # /home/u, holder flong.slice/s, -- /bin/true.
+    # /home/u, holder flong.slice/s, -- /bin/true. Since S3, post-start and
+    # post-stop are one command each, `N WORD...`, and repeat: the C's
+    # cases carry a count, once-post-stop went, and the post-start-* and
+    # post-stop-* cases of the count (missing, 0, empty, signed, past
+    # INT_MAX, a program in its place, words running out) and of a second
+    # command's program were written for the Zig, not recorded from the C.
     # CLOSURE is a store directory, LEADSOUT a store path that is a symlink
     # to /, which realpath resolves out of the store (:245-256), and TOSTORE
     # one to /nix/store, which it resolves to the store's directory, not a

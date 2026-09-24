@@ -1,6 +1,7 @@
 //! The sweep's readers fuzzed (minish, the `test` step; DESIGN.md, "Tests":
-//! fuzzing). flong sweeper reads records, cgroup paths, cgroup.events,
-//! /proc files and inotify events a caller can shape, and its exit stops
+//! fuzzing). flong sweeper reads records (poststop='s list of commands
+//! included), cgroup paths, cgroup.events, /proc files and inotify events
+//! a caller can shape, and its exit stops
 //! the holder and every session (module.nix:936-941), so none may panic or
 //! reach `unreachable` on any input (DESIGN.md, open decision 2). Each target
 //! first replays its checked-in corpus (tests/zig/corpus/<target>/, one
@@ -73,6 +74,48 @@ fn parse(b: []const u8) !void {
         try testing.expect(std.mem.indexOf(u8, b, fields.cgroupPath()) != null);
     }
     _ = record.poststopLineLen(b);
+    // poststop='s list, as the sweep splits it before it runs anything.
+    if (ok) {
+        if (fields.poststopList()) |l| _ = try splitList(l);
+    }
+}
+
+var words_buf: [sys.path_max]u8 = undefined;
+
+/// poststop='s list split as record.poststop splits it: each command's
+/// words, NUL-terminated, rejoined, are the command, and `n` is how many
+/// there are. True when every command fits.
+fn splitList(l: []const u8) !bool {
+    var it = std.mem.splitScalar(u8, l, record.command_sep);
+    while (it.next()) |cmd| {
+        var ws = record.words(cmd, &words_buf) orelse {
+            try testing.expect(cmd.len >= sys.path_max);
+            return false;
+        };
+        var n: usize = 0;
+        var at: usize = 0;
+        while (ws.next()) |w| {
+            try testing.expect(std.mem.indexOfAny(u8, w, &.{ 0, record.word_sep }) == null);
+            try testing.expectEqualStrings(cmd[at..][0..w.len], w);
+            at += w.len;
+            if (at < cmd.len) {
+                try testing.expect(cmd[at] == record.word_sep or cmd[at] == 0);
+                at += 1;
+            } else {
+                try testing.expectEqual(cmd.len, at);
+            }
+            n += 1;
+        }
+        try testing.expectEqual(ws.n, n);
+        try testing.expect(n >= 1);
+    }
+    return true;
+}
+
+fn poststopList(b: []const u8) !void {
+    // More than one command, each split: the list's own answer.
+    const whole = try splitList(b);
+    count(whole and std.mem.indexOfScalar(u8, b, record.command_sep) != null);
 }
 
 fn sessionForm(b: []const u8) !void {
@@ -276,6 +319,10 @@ fn statTokens(t: []const u16) []const u8 {
     return inputs.stat(t, &scratch);
 }
 
+fn poststopTokens(t: []const u16) []const u8 {
+    return inputs.poststopList(t, &scratch);
+}
+
 fn inodeTokens(t: []const u16) []const u8 {
     return inputs.inodeName(t, &scratch);
 }
@@ -290,6 +337,10 @@ fn inotifyTokens(t: []const u16) []const u8 {
 
 test "fuzz record.parse (and blank_poststop's line)" {
     try Target("record-parse", parse, recordTokens).run();
+}
+
+test "fuzz record.words (poststop='s list of commands)" {
+    try Target("record-poststop-list", poststopList, poststopTokens).run();
 }
 
 test "fuzz cgroup.sessionForm" {

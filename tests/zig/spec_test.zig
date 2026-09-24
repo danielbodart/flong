@@ -318,8 +318,9 @@ const Model = struct {
     holder: []const u8,
     holder_start: [][]const u8,
     limits: []spec.Limit,
-    post_start: [][]const u8,
-    post_stop: ?[]const u8,
+    /// commands, each its words, the program first
+    post_start: [][]const []const u8,
+    post_stop: [][]const []const u8,
     network: bool,
     pasta_args: [][]const u8,
     pasta_wait: bool,
@@ -400,6 +401,12 @@ const Gen = struct {
         return out;
     }
 
+    /// A command: `program`, then up to three words.
+    fn command(g: Gen, program: []const u8) ![]const []const u8 {
+        const rest = try g.words(3);
+        return std.mem.concat(g.a, []const u8, &.{ &.{program}, rest });
+    }
+
     /// Disjoint extents, none reaching host id 0.
     fn idmap(g: Gen) ![]spec.IdMap {
         const out = try g.a.alloc(spec.IdMap, 1 + g.below(3));
@@ -476,8 +483,10 @@ const Gen = struct {
         for (seccomp) |*p| p.* = try g.absPath();
         const holder_start = try g.words(2);
         if (holder_start.len > 0) holder_start[0] = try g.absPath();
-        const post_start = try g.words(2);
-        if (post_start.len > 0) post_start[0] = try g.absPath();
+        const post_start = try g.a.alloc([]const []const u8, g.below(3));
+        for (post_start) |*c| c.* = try g.command(try g.absPath());
+        const post_stop = try g.a.alloc([]const []const u8, g.below(3));
+        for (post_stop) |*c| c.* = try g.command(try std.mem.concat(g.a, u8, &.{ "/nix/store/", try g.cleanPath(.relative) }));
 
         var limits: std.ArrayList(spec.Limit) = .empty;
         const files = [_][:0]const u8{ "memory.max", "memory.high", "memory.swap.max", "memory.oom.group", "pids.max", "cpu.max", "cpu.weight", "io.weight" };
@@ -548,7 +557,7 @@ const Gen = struct {
             .holder_start = holder_start,
             .limits = limits.items,
             .post_start = post_start,
-            .post_stop = if (g.r.boolean()) try std.mem.concat(g.a, u8, &.{ "/nix/store/", try g.cleanPath(.relative) }) else null,
+            .post_stop = post_stop,
             .network = network,
             .pasta_args = pasta_args,
             .pasta_wait = network and g.r.boolean(),
@@ -570,6 +579,11 @@ fn item(a: Allocator, kw: []const u8, fields: []const []const u8) !Item {
 
 fn num(a: Allocator, v: u64) ![]const u8 {
     return std.fmt.allocPrint(a, "{d}", .{v});
+}
+
+/// A post-start or post-stop: its word count, then its words.
+fn commandItem(a: Allocator, kw: []const u8, cmd: []const []const u8) !Item {
+    return .{ .kw = kw, .fields = try std.mem.concat(a, []const u8, &.{ &.{try num(a, cmd.len)}, cmd }) };
 }
 
 /// The model as the wrapper would pass it, keyword by keyword.
@@ -600,8 +614,8 @@ fn items(a: Allocator, m: *const Model) !std.ArrayList(Item) {
     try out.append(a, try item(a, "holder", &.{m.holder}));
     for (m.holder_start) |w| try out.append(a, try item(a, "holder-start", &.{w}));
     for (m.limits) |l| try out.append(a, try item(a, "limit", &.{ l.file, l.value }));
-    for (m.post_start) |w| try out.append(a, try item(a, "post-start", &.{w}));
-    if (m.post_stop) |p| try out.append(a, try item(a, "post-stop", &.{p}));
+    for (m.post_start) |c| try out.append(a, try commandItem(a, "post-start", c));
+    for (m.post_stop) |c| try out.append(a, try commandItem(a, "post-stop", c));
     if (m.network) try out.append(a, try item(a, "network", &.{}));
     for (m.pasta_args) |w| try out.append(a, try item(a, "pasta-arg", &.{w}));
     if (m.pasta_wait) try out.append(a, try item(a, "pasta-wait", &.{}));
@@ -685,9 +699,10 @@ fn expectModel(m: *const Model, s: *const spec.Spec) !void {
         try testing.expectEqualStrings(x.file, y.file);
         try testing.expectEqualStrings(x.value, y.value);
     }
-    try expectSlicesOfStrings(m.post_start, s.post_start);
-    try testing.expectEqual(m.post_stop == null, s.post_stop == null);
-    if (m.post_stop) |p| try testing.expectEqualStrings(p, s.post_stop.?);
+    try testing.expectEqual(m.post_start.len, s.post_start.len);
+    for (m.post_start, s.post_start) |x, y| try expectSlicesOfStrings(x, y);
+    try testing.expectEqual(m.post_stop.len, s.post_stop.len);
+    for (m.post_stop, s.post_stop) |x, y| try expectSlicesOfStrings(x, y);
     try testing.expectEqual(m.network, s.network);
     try expectSlicesOfStrings(m.pasta_args, s.pasta_args);
     try testing.expectEqual(m.pasta_wait, s.pasta_wait);
@@ -794,6 +809,7 @@ const Rule = enum {
     pasta_without_network,
     holder_start_relative,
     post_start_relative,
+    command_count_bad,
 };
 
 /// A descriptor number no test holds.
@@ -832,7 +848,9 @@ fn mutate(g: Gen, rule: Rule, m: *Model) !struct { words: []const []const u8, wa
             want = "spec: holder-start's program is not an absolute path: 'bin/start'";
         },
         .post_start_relative => {
-            m.post_start = try a.dupe([]const u8, &.{"hook"});
+            // After the model's commands, each checked.
+            const bad: []const []const u8 = &.{ "hook", "/x" };
+            m.post_start = try std.mem.concat(a, []const []const u8, &.{ m.post_start, &.{bad} });
             want = "spec: post-start's program is not an absolute path: 'hook'";
         },
         .bwrap_not_allowed, .bwrap_no_keep_fd, .bwrap_setenv_name, .bwrap_hostname_empty, .bwrap_perms_alone, .bwrap_short => {
@@ -903,9 +921,8 @@ fn mutate(g: Gen, rule: Rule, m: *Model) !struct { words: []const []const u8, wa
                 try item(a, "state", &.{"/s"}),    try item(a, "cache", &.{"/c"}),
                 try item(a, "closure", &.{store}), try item(a, "user", &.{ "0", "0", "/h" }),
                 try item(a, "chdir", &.{"/"}),     try item(a, "nested-userns", &.{"1"}),
-                try item(a, "holder", &.{"h"}),    try item(a, "post-stop", &.{"/nix/store/x"}),
-                try item(a, "network", &.{}),      try item(a, "pasta-wait", &.{}),
-                try item(a, "trace", &.{}),
+                try item(a, "holder", &.{"h"}),    try item(a, "network", &.{}),
+                try item(a, "pasta-wait", &.{}),   try item(a, "trace", &.{}),
             };
             const it = onces[g.below(onces.len)];
             try its.append(a, it);
@@ -930,6 +947,8 @@ fn mutate(g: Gen, rule: Rule, m: *Model) !struct { words: []const []const u8, wa
                 .{ "limit", &.{"pids.max"}, "spec: limit: 2 fields expected" },
                 .{ "machine", &.{}, "spec: machine: 1 field expected" },
                 .{ "keep-fd", &.{}, "spec: keep-fd: 1 field expected" },
+                .{ "post-start", &.{}, "spec: post-start: the word count is missing" },
+                .{ "post-stop", &.{ "3", "/nix/store/x", "--" }, "spec: post-stop: 4 fields expected" },
             };
             const s: Short = switch (rule) {
                 .mount_kind_missing => .{ "mount", &.{}, "spec: mount: the kind is missing" },
@@ -947,6 +966,24 @@ fn mutate(g: Gen, rule: Rule, m: *Model) !struct { words: []const []const u8, wa
             try all.append(a, s[0]);
             try all.appendSlice(a, s[1]);
             return .{ .words = all.items, .want = want };
+        },
+        .command_count_bad => {
+            const kw = if (g.r.boolean()) "post-start" else "post-stop";
+            const Bad = struct { []const []const u8, []const u8 };
+            const bads = [_]Bad{
+                .{ &.{ "0", "/nix/store/x" }, "'s word count is 0" },
+                .{ &.{"000"}, "'s word count is 0" },
+                .{ &.{ "x", "/nix/store/x" }, "'s word count is not a decimal number: 'x'" },
+                .{ &.{ "+1", "/nix/store/x" }, "'s word count is not a decimal number: '+1'" },
+                .{ &.{ "", "/nix/store/x" }, "'s word count is empty" },
+                // A program where the count goes, as the grammar before
+                // the list had it.
+                .{ &.{"/nix/store/x"}, "'s word count is not a decimal number: '/nix/store/x'" },
+                .{ &.{ "2147483648", "/nix/store/x" }, "'s word count is larger than 2147483647: '2147483648'" },
+            };
+            const bad = bads[g.below(bads.len)];
+            try its.append(a, try item(a, kw, bad[0]));
+            want = try std.fmt.allocPrint(a, "spec: {s}{s}", .{ kw, bad[1] });
         },
         .mount_kind_unknown => {
             try its.append(a, try item(a, "mount", &.{ "bind", "/a", "/b" }));
@@ -1139,10 +1176,12 @@ fn mutate(g: Gen, rule: Rule, m: *Model) !struct { words: []const []const u8, wa
             want = try std.fmt.allocPrint(a, "spec: limit {s} has an empty value", .{file});
         },
         .post_stop_outside => {
-            if (m.post_stop != null) {
-                try setField(a, its.items, "post-stop", 0, "/usr/bin/stop");
+            // The first command's program, or a command after the model's:
+            // each is checked.
+            if (m.post_stop.len > 0 and g.r.boolean()) {
+                try setField(a, its.items, "post-stop", 1, "/usr/bin/stop");
             } else {
-                try its.append(a, try item(a, "post-stop", &.{"/usr/bin/stop"}));
+                try its.append(a, try item(a, "post-stop", &.{ "2", "/usr/bin/stop", "x" }));
             }
             want = "spec: post-stop is not under /nix/store/: '/usr/bin/stop'";
         },

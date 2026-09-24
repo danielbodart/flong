@@ -27,7 +27,7 @@
 //!       cgroup.sessionCreate under the holder HOLDER with those limits:
 //!       its path, each leaf's limit files as written, then closed and
 //!       left
-//!   record STATE HOLDER CONTAINER MACHINE [POSTSTOP]
+//!   record STATE HOLDER CONTAINER MACHINE [POSTSTOP-WORD...]
 //!       as a launch lays it down: record.create in STATE's sessions/, the
 //!       session's cgroup, leader= this process; the record's bytes; then
 //!       closed without its unlink, as a killed launcher leaves it
@@ -291,12 +291,16 @@ fn run(gpa: std.mem.Allocator, args: []const [*:0]const u8) !void {
         }
         s.closeAll();
     } else if (std.mem.eql(u8, cmd, "record")) {
-        if (a.len != 4 and a.len != 5) return error.Usage;
+        if (a.len < 4) return error.Usage;
         const h = try cgroup.holderAt(cgroup.Path.of(&.{std.mem.span(a[1])}) orelse return error.Usage);
         const state = try record.stateOpen(std.mem.span(a[0]));
         const machine = std.mem.span(a[3]);
         const path = try cgroup.sessionPath(&h, std.mem.span(a[2]), machine);
-        var rec = try record.create(state.sessions, &h, machine, if (a.len == 5) std.mem.span(a[4]) else null, path.slice());
+        // The words after MACHINE, if any, are postStop's one command.
+        const words = try gpa.alloc([:0]const u8, a.len - 4);
+        for (words, a[4..]) |*w, x| w.* = std.mem.span(x);
+        const one = [_]spec.Command{words};
+        var rec = try record.create(state.sessions, &h, machine, if (words.len > 0) one[0..] else one[0..0], path.slice());
         var s = try cgroup.sessionCreate(&h, std.mem.span(a[2]), machine, &[_]spec.Limit{});
         s.closeAll();
         try rec.setLeader(linux.getpid());

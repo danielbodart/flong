@@ -3,11 +3,13 @@
 //! ordering checkpoint 10):
 //!
 //!   - the writer's bytes are tests/golden/records/'s, with and without
-//!     postStop, leader= appended at the offset, while the record is
-//!     unnamed-then-linked, locked, mode 0600; removed, it is gone
+//!     postStop, one command or a list of them, leader= appended at the
+//!     offset, while the record is unnamed-then-linked, locked, mode 0600;
+//!     removed, it is gone
 //!   - a name taken: by a live record (refused), a malformed one (quirk 5,
 //!     refused, and dropped), an ended one (released, and the name taken),
-//!     not a regular file (refused); a newline in a value, a record too long;
+//!     not a regular file (refused); a newline in a value, a separator in a
+//!     postStop word, a postStop list or a record too long;
 //!     taken again during the lock wait (the loop has no count)
 //!   - the cache lock: absent, without the prepared root, locked, not a
 //!     directory
@@ -29,6 +31,9 @@ const cgroup = @import("cgroup");
 const record = @import("record");
 const options = @import("options");
 const testing = std.testing;
+
+/// No postStop.
+const none: []const []const [:0]const u8 = &.{};
 
 // ---- the fixture ----
 
@@ -142,13 +147,25 @@ test "the record's bytes are tests/golden/records/, locked, linked, removed" {
     defer testing.allocator.free(start_text);
     try testing.expect(proc.starttime(pid) != 0);
 
-    for ([_]struct { name: []const u8, machine: [:0]const u8, poststop: ?[]const u8 }{
-        .{ .name = "poststop", .machine = "demo-1", .poststop = "/nix/store/aaaa-flong-poststop/bin/poststop" },
-        .{ .name = "no-poststop", .machine = "m", .poststop = null },
+    // poststop='s value for each: the words 0x1F-separated, the commands
+    // 0x1E-separated; one command of one word is its path, as before the
+    // list.
+    for ([_]struct { name: []const u8, machine: [:0]const u8, commands: []const []const [:0]const u8, poststop: ?[]const u8 }{
+        .{ .name = "poststop", .machine = "demo-1", .commands = &.{&.{"/nix/store/aaaa-flong-poststop/bin/poststop"}}, .poststop = "/nix/store/aaaa-flong-poststop/bin/poststop" },
+        .{
+            .name = "poststop",
+            .machine = "list",
+            .commands = &.{ &.{ "/nix/store/aaaa-a/bin/a", "x y", "", "--" }, &.{"/nix/store/bbbb-b/bin/b"}, &.{ "/nix/store/cccc-c/bin/c", "=" } },
+            .poststop = "/nix/store/aaaa-a/bin/a\x1fx y\x1f\x1f--\x1e/nix/store/bbbb-b/bin/b\x1e/nix/store/cccc-c/bin/c\x1f=",
+        },
+        .{ .name = "no-poststop", .machine = "m", .commands = none, .poststop = null },
     }) |c| {
         const cg = try std.fmt.allocPrint(testing.allocator, "/sys/fs/cgroup/h/c/{s}", .{c.machine});
         defer testing.allocator.free(cg);
-        var rec = try record.create(fx.state.sessions, &fx.holder, c.machine, c.poststop, cg);
+        var rec = try record.create(fx.state.sessions, &fx.holder, c.machine, c.commands, cg);
+        // What the teardown runs is what was written.
+        try testing.expectEqual(c.poststop == null, rec.poststopList() == null);
+        if (c.poststop) |p| try testing.expectEqualStrings(p, rec.poststopList().?);
         var dir = fx.sessions();
         defer dir.close();
 
@@ -179,6 +196,8 @@ test "the record's bytes are tests/golden/records/, locked, linked, removed" {
         var f: record.Fields = .{};
         try testing.expectEqual(@as(?[]const u8, null), record.parse(got, &f));
         try testing.expectEqual(pid, f.leader);
+        try testing.expectEqual(c.poststop == null, f.poststopList() == null);
+        if (c.poststop) |p| try testing.expectEqualStrings(p, f.poststopList().?);
 
         // postStop done: the line blanked, the rest as it was.
         if (c.poststop != null) {
@@ -201,7 +220,7 @@ test "the record's bytes are tests/golden/records/, locked, linked, removed" {
 test "a record closed without its unlink stays, and its lock is free" {
     var fx = try Fixture.init("/sys/fs/cgroup/h");
     defer fx.deinit();
-    var rec = try record.create(fx.state.sessions, &fx.holder, "kept", null, "/sys/fs/cgroup/h/c/kept");
+    var rec = try record.create(fx.state.sessions, &fx.holder, "kept", none, "/sys/fs/cgroup/h/c/kept");
     rec.closeKeeping();
     var dir = fx.sessions();
     defer dir.close();
@@ -213,7 +232,7 @@ test "a record closed without its unlink stays, and its lock is free" {
 // ---- a name taken ----
 
 /// record.create's refusal, said and returned.
-fn refused(fx: *Fixture, machine: [:0]const u8, post_stop: ?[]const u8, cg: []const u8) ![]u8 {
+fn refused(fx: *Fixture, machine: [:0]const u8, post_stop: []const []const [:0]const u8, cg: []const u8) ![]u8 {
     var said = Said.start();
     const r = record.create(fx.state.sessions, &fx.holder, machine, post_stop, cg);
     const text = said.stop();
@@ -225,7 +244,7 @@ fn refused(fx: *Fixture, machine: [:0]const u8, post_stop: ?[]const u8, cg: []co
     return testing.allocator.dupe(u8, text);
 }
 
-test "a name taken: running, malformed, ended, not a file; a newline; too long" {
+test "a name taken: running, malformed, ended, not a file; a newline, a separator; too long" {
     msg.prog = "flong launch";
     var fx = try Fixture.init("/sys/fs/cgroup/h");
     defer fx.deinit();
@@ -234,9 +253,9 @@ test "a name taken: running, malformed, ended, not a file; a newline; too long" 
     defer dir.close();
 
     // A live launcher's record, no leader= yet: refused, and left.
-    var live = try record.create(fx.state.sessions, &fx.holder, "m", null, "/sys/fs/cgroup/h/c/m");
+    var live = try record.create(fx.state.sessions, &fx.holder, "m", none, "/sys/fs/cgroup/h/c/m");
     {
-        const said = try refused(&fx, "m", null, "/sys/fs/cgroup/h/c/m");
+        const said = try refused(&fx, "m", none, "/sys/fs/cgroup/h/c/m");
         defer testing.allocator.free(said);
         try testing.expectEqualStrings("flong launch: a session named m is already running\n", said);
     }
@@ -246,7 +265,7 @@ test "a name taken: running, malformed, ended, not a file; a newline; too long" 
     // launch is refused though the name is then free (quirk 5, kept).
     try dir.writeFile(.{ .sub_path = "m", .data = "x=1\n" });
     {
-        const said = try refused(&fx, "m", null, "/sys/fs/cgroup/h/c/m");
+        const said = try refused(&fx, "m", none, "/sys/fs/cgroup/h/c/m");
         defer testing.allocator.free(said);
         try testing.expectEqualStrings("flong launch: the record of m is removed: it has an unknown, repeated or misplaced line\n" ++
             "flong launch: a session named m has ended but cannot be released yet\n", said);
@@ -256,7 +275,7 @@ test "a name taken: running, malformed, ended, not a file; a newline; too long" 
     // An ended session's record, unlocked, its cgroup gone and its leader
     // not the recorded process: released, and the name taken.
     try dir.writeFile(.{ .sub_path = "m", .data = "cgroup=/sys/fs/cgroup/h/c/m\nleader=1:1\n" });
-    var taken = try record.create(fx.state.sessions, &fx.holder, "m", null, "/sys/fs/cgroup/h/c/m");
+    var taken = try record.create(fx.state.sessions, &fx.holder, "m", none, "/sys/fs/cgroup/h/c/m");
     {
         const got = try readFile(dir, "m");
         defer testing.allocator.free(got);
@@ -267,19 +286,46 @@ test "a name taken: running, malformed, ended, not a file; a newline; too long" 
     // Not a regular file under the name: left, refused.
     try dir.makeDir("d");
     {
-        const said = try refused(&fx, "d", null, "/sys/fs/cgroup/h/c/d");
+        const said = try refused(&fx, "d", none, "/sys/fs/cgroup/h/c/d");
         defer testing.allocator.free(said);
         try testing.expectEqualStrings("flong launch: a session named d has ended but cannot be released yet\n", said);
     }
 
     // A newline in either value, and a record past REC_MAX.
     {
-        const said = try refused(&fx, "n", "/nix/store/x\nleader=1:1", "/sys/fs/cgroup/h/c/n");
+        const said = try refused(&fx, "n", &.{&.{"/nix/store/x\nleader=1:1"}}, "/sys/fs/cgroup/h/c/n");
         defer testing.allocator.free(said);
         try testing.expectEqualStrings("flong launch: a newline is in the postStop path or the cgroup path of n\n", said);
     }
     {
-        const said = try refused(&fx, "n", null, "/sys/fs/cgroup/h/c/n\n");
+        // In any word of any command.
+        const said = try refused(&fx, "n", &.{ &.{"/nix/store/x"}, &.{ "/nix/store/y", "a", "b\nc" } }, "/sys/fs/cgroup/h/c/n");
+        defer testing.allocator.free(said);
+        try testing.expectEqualStrings("flong launch: a newline is in the postStop path or the cgroup path of n\n", said);
+    }
+    for ([_][:0]const u8{ "a\x1eb", "\x1f", "/nix/store/x\x1f" }) |w| {
+        // A separator in a word would make a command or a word of its own.
+        const said = try refused(&fx, "n", &.{ &.{"/nix/store/x"}, &.{ "/nix/store/y", w } }, "/sys/fs/cgroup/h/c/n");
+        defer testing.allocator.free(said);
+        try testing.expectEqualStrings("flong launch: a 0x1E or 0x1F byte is in a postStop word of n\n", said);
+    }
+    {
+        // poststop= is at most PATH_MAX - 1 bytes, as the sweep reads it:
+        // two commands of 2047 bytes and their separator are PATH_MAX - 1,
+        // one byte more is refused.
+        const w = try testing.allocator.allocSentinel(u8, 2047, 0);
+        defer testing.allocator.free(w);
+        @memset(w, 'a');
+        @memcpy(w[0.."/nix/store/".len], "/nix/store/");
+        const said = try refused(&fx, "n", &.{ &.{w}, &.{ w, "" } }, "/sys/fs/cgroup/h/c/n");
+        defer testing.allocator.free(said);
+        try testing.expectEqualStrings("flong launch: the record of n is too long\n", said);
+        var fits = try record.create(fx.state.sessions, &fx.holder, "n", &.{ &.{w}, &.{w} }, "/sys/fs/cgroup/h/c/n");
+        try testing.expectEqual(@as(usize, sys.path_max - 1), fits.poststopList().?.len);
+        fits.remove();
+    }
+    {
+        const said = try refused(&fx, "n", none, "/sys/fs/cgroup/h/c/n\n");
         defer testing.allocator.free(said);
         try testing.expectEqualStrings("flong launch: a newline is in the postStop path or the cgroup path of n\n", said);
     }
@@ -289,10 +335,10 @@ test "a name taken: running, malformed, ended, not a file; a newline; too long" 
         const long = try testing.allocator.alloc(u8, record.rec_max - "cgroup=\n".len);
         defer testing.allocator.free(long);
         @memset(long, 'a');
-        const said = try refused(&fx, "n", null, long);
+        const said = try refused(&fx, "n", none, long);
         defer testing.allocator.free(said);
         try testing.expectEqualStrings("flong launch: the record of n is too long\n", said);
-        var fits = try record.create(fx.state.sessions, &fx.holder, "n", null, long[1..]);
+        var fits = try record.create(fx.state.sessions, &fx.holder, "n", none, long[1..]);
         fits.remove();
     }
     try testing.expectEqual(live_count, fd.liveCount());
@@ -368,7 +414,7 @@ test "a name taken again during the wait: another turn, the loop uncounted" {
     try held.lock(.exclusive);
     var swap: Swap = .{ .dir = dir, .held = held, .parent = linux.getpid() };
     const t = try std.Thread.spawn(.{}, Swap.run, .{&swap});
-    const r = record.create(fx.state.sessions, &fx.holder, "m", null, "/sys/fs/cgroup/h/c/m");
+    const r = record.create(fx.state.sessions, &fx.holder, "m", none, "/sys/fs/cgroup/h/c/m");
     t.join();
     var rec = try r;
     try testing.expect(swap.swapped);

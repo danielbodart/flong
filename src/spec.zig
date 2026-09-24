@@ -48,6 +48,10 @@ pub const IdMap = struct { inside: u64, outside: u64, count: u64 };
 /// (flong-spec.h:46-51).
 pub const Limit = struct { file: [:0]const u8, value: [:0]const u8 };
 
+/// A command: its argv, the program first, never empty. Nothing searches
+/// PATH, so the program is an absolute path.
+pub const Command = []const [:0]const u8;
+
 /// struct fl_spec (flong-spec.h:58-113). An argument vector is its words,
 /// empty when the keyword was not given.
 pub const Spec = struct {
@@ -99,10 +103,12 @@ pub const Spec = struct {
     limits: []const Limit = &.{},
 
     // hooks and network
-    /// empty: no hook
-    post_start: []const [:0]const u8 = &.{},
-    /// a /nix/store program, or null
-    post_stop: ?[:0]const u8 = null,
+    /// postStart's commands, run in order, the first failure ending the
+    /// launch; empty: no hook
+    post_start: []const Command = &.{},
+    /// postStop's commands, in order, each's program under /nix/store/;
+    /// recorded for the sweep (record.zig); empty: none
+    post_stop: []const Command = &.{},
     /// start pasta
     network: bool = false,
     /// ports, --dns-forward, --no-map-gw ...
@@ -158,7 +164,8 @@ const required = 2; // at least once
 
 /// The keywords and how many fields follow each (flong-spec.c:44-75).
 /// mount's count depends on its kind, the first field, and is read from
-/// `mount_kinds`.
+/// `mount_kinds`; post-start's and post-stop's is their first field
+/// (`arity`).
 const keywords = [kw_n]struct { name: []const u8, nfields: usize, flags: u2 }{
     .{ .name = "machine", .nfields = 1, .flags = required | once },
     .{ .name = "container", .nfields = 1, .flags = required | once },
@@ -178,8 +185,8 @@ const keywords = [kw_n]struct { name: []const u8, nfields: usize, flags: u2 }{
     .{ .name = "holder", .nfields = 1, .flags = required | once },
     .{ .name = "holder-start", .nfields = 1, .flags = 0 },
     .{ .name = "limit", .nfields = 2, .flags = 0 },
-    .{ .name = "post-start", .nfields = 1, .flags = 0 },
-    .{ .name = "post-stop", .nfields = 1, .flags = once },
+    .{ .name = "post-start", .nfields = 0, .flags = 0 },
+    .{ .name = "post-stop", .nfields = 0, .flags = 0 },
     .{ .name = "network", .nfields = 0, .flags = once },
     .{ .name = "pasta-arg", .nfields = 1, .flags = 0 },
     .{ .name = "pasta-wait", .nfields = 0, .flags = once },
@@ -237,10 +244,23 @@ fn mountKind(word: []const u8) ?usize {
 }
 
 /// How many fields follow keyword `k` at argv[i], or the refusal when they
-/// run out or a mount's kind is unknown. Both passes use it, so they agree
-/// on every arity (flong-spec.c:122-144).
+/// run out, a mount's kind is unknown or a command's word count is not one.
+/// Both passes use it, so they agree on every arity (flong-spec.c:122-144).
+/// post-start and post-stop are one command each, `COUNT WORD...`: the
+/// count, a decimal number of at least 1, then that many words, the program
+/// first. A field is positional, so a word may be "--" or empty.
 fn arity(argv: []const [*:0]const u8, i: usize, k: Kw) Error!usize {
     var n = keywords[@intFromEnum(k)].nfields;
+    if (k == .post_start or k == .post_stop) {
+        const kw = keywords[@intFromEnum(k)].name;
+        if (i + 1 >= argv.len) return msg.refuse("spec: {s}: the word count is missing", .{kw});
+        // Either keyword's name is 10 bytes.
+        var what_buf: [64]u8 = undefined;
+        const what = std.fmt.bufPrint(&what_buf, "{s}'s word count", .{kw}) catch unreachable; // proven: 10 + 13 bytes fit 64
+        const count = try number(what, std.mem.span(argv[i + 1]), int_max);
+        if (count == 0) return msg.refuse("spec: {s}'s word count is 0", .{kw});
+        n = 1 + @as(usize, @intCast(count));
+    }
     if (k == .mount) {
         if (i + 1 >= argv.len) return msg.refuse("spec: mount: the kind is missing", .{});
         const m = mountKind(std.mem.span(argv[i + 1])) orelse
@@ -490,7 +510,7 @@ const F_GETFD = 1;
 /// run as root first (:423); then an unknown keyword, a missing field, a
 /// singleton keyword given twice, a missing required keyword, a relative
 /// path, a bad name, a limit file not in the list, a map that reaches host
-/// id 0, a post-stop outside /nix/store/, a keep-fd that is not open and a
+/// id 0, a post-stop program outside /nix/store/, a keep-fd that is not open and a
 /// bwrap-arg outside the allowed options, each said once and returned as
 /// `error.Reported` (flong-spec.h:115-120). Nothing is in the descriptor
 /// table yet (ordering checkpoint 1): the keep-fds are checked by number,
@@ -529,6 +549,7 @@ pub fn parse(arena: Allocator, argv: []const [*:0]const u8) Error!Spec {
     var n_holder_start: usize = 0;
     var n_limits: usize = 0;
     var n_post_start: usize = 0;
+    var n_post_stop: usize = 0;
     var n_pasta_args: usize = 0;
     var n_bwrap_args: usize = 0;
     var n_keep_fds: usize = 0;
@@ -552,6 +573,7 @@ pub fn parse(arena: Allocator, argv: []const [*:0]const u8) Error!Spec {
         .holder_start = t.holder_start,
         .limits = t.limits,
         .post_start = t.post_start,
+        .post_stop = t.post_stop,
         .pasta_args = t.pasta_args,
         .bwrap_args = t.bwrap_args,
         .keep_fds = t.keep_fds,
@@ -700,18 +722,24 @@ pub fn parse(arena: Allocator, argv: []const [*:0]const u8) Error!Spec {
                 t.limits[n_limits] = .{ .file = f0, .value = value };
                 n_limits += 1;
             },
-            .post_start => {
-                t.post_start[n_post_start] = f0;
-                n_post_start += 1;
-            },
-            .post_stop => {
-                // The sweep runs it as the caller from a record the caller
-                // can edit, so only a store path, spelled without a '..'
-                // that could climb back out. Where a symlink leads is
-                // checked when it runs (record.poststop), since the sweep
-                // reads the path from the record.
-                try storePath("post-stop", f0);
-                s.post_stop = f0;
+            .post_start, .post_stop => {
+                // fields[0] is the count, arity's; the words follow.
+                const cmd = arena.alloc([:0]const u8, n - 1) catch return msg.fail(.NOMEM, "spec", .{});
+                for (cmd, fields[1..]) |*w, f| w.* = std.mem.span(f);
+                if (k == .post_start) {
+                    t.post_start[n_post_start] = cmd;
+                    n_post_start += 1;
+                } else {
+                    // The sweep runs each as the caller from a record the
+                    // caller can edit, so only a store path, spelled
+                    // without a '..' that could climb back out. Where a
+                    // symlink leads is checked when it runs
+                    // (record.poststop), since the sweep reads the path
+                    // from the record.
+                    try storePath("post-stop", cmd[0]);
+                    t.post_stop[n_post_stop] = cmd;
+                    n_post_stop += 1;
+                }
             },
             .network => s.network = true,
             .pasta_arg => {
@@ -754,8 +782,10 @@ pub fn parse(arena: Allocator, argv: []const [*:0]const u8) Error!Spec {
     // lock, ordering checkpoint 1).
     if (s.holder_start.len > 0 and s.holder_start[0][0] != '/')
         return msg.refuse("spec: holder-start's program is not an absolute path: '{s}'", .{s.holder_start[0]});
-    if (s.post_start.len > 0 and s.post_start[0][0] != '/')
-        return msg.refuse("spec: post-start's program is not an absolute path: '{s}'", .{s.post_start[0]});
+    for (s.post_start) |cmd| {
+        if (cmd[0].len == 0 or cmd[0][0] != '/')
+            return msg.refuse("spec: post-start's program is not an absolute path: '{s}'", .{cmd[0]});
+    }
     if (!s.network and (s.pasta_args.len > 0 or s.pasta_wait))
         return msg.refuse("spec: pasta-arg or pasta-wait without network", .{});
     // used[j] is set when a --ro-bind-data names keep-fd j.
@@ -782,7 +812,8 @@ const Tables = struct {
     seccomp: [][:0]const u8,
     holder_start: [][:0]const u8,
     limits: []Limit,
-    post_start: [][:0]const u8,
+    post_start: []Command,
+    post_stop: []Command,
     pasta_args: [][:0]const u8,
     bwrap_args: [][:0]const u8,
     keep_fds: []sys.fd_t,
@@ -804,7 +835,8 @@ fn tables(arena: Allocator, count: *const [kw_n]usize) Allocator.Error!Tables {
         .seccomp = try arena.alloc([:0]const u8, c(count, .seccomp)),
         .holder_start = try arena.alloc([:0]const u8, c(count, .holder_start)),
         .limits = try arena.alloc(Limit, c(count, .limit)),
-        .post_start = try arena.alloc([:0]const u8, c(count, .post_start)),
+        .post_start = try arena.alloc(Command, c(count, .post_start)),
+        .post_stop = try arena.alloc(Command, c(count, .post_stop)),
         .pasta_args = try arena.alloc([:0]const u8, c(count, .pasta_arg)),
         .bwrap_args = try arena.alloc([:0]const u8, c(count, .bwrap_arg)),
         .keep_fds = try arena.alloc(sys.fd_t, c(count, .keep_fd)),

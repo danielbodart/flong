@@ -49,6 +49,26 @@ const path_max = sys.path_max;
 /// anything longer is not one of ours.
 pub const rec_max = 2 * path_max + 64;
 
+// ---- poststop='s list ----
+//
+// poststop= holds postStop's commands, in order: the commands separated by
+// 0x1E (ASCII's record separator), each command's words by 0x1F (its unit
+// separator). A record is lines of text with no escaping: a value is its
+// bytes up to the newline, and holds neither a newline nor a NUL. The two
+// separators are bytes no store path, and no word the module writes, holds,
+// so the list needs no escaping either: `create` refuses a word holding a
+// newline or either separator, and the value is then unambiguous. A value
+// is at most PATH_MAX - 1 bytes, as every value in a record is.
+//
+// There is no compatibility layer: a record written before the list, one
+// path and no separator, reads as a list of one command of one word, the
+// same program run the same way, since that is how the format falls out.
+
+/// Between two commands of poststop=.
+pub const command_sep: u8 = 0x1e;
+/// Between two words of one command of poststop=.
+pub const word_sep: u8 = 0x1f;
+
 // ---- the state directory (flong-record.c:41-89) ----
 
 /// The state directory and its sessions/, kept until the process exits.
@@ -169,7 +189,7 @@ pub fn readRecord(f: anytype, buf: *[rec_max + 1]u8) sys.Result(usize) {
 }
 
 /// What a record says, once it has been checked to be well formed
-/// (struct rec_fields, flong-record.c:219-225): each path NUL-terminated
+/// (struct rec_fields, flong-record.c:219-225): each value NUL-terminated
 /// in a PATH_MAX buffer, as the C copies them.
 pub const Fields = struct {
     poststop: [path_max]u8 = undefined,
@@ -180,9 +200,9 @@ pub const Fields = struct {
     leader: sys.pid_t = 0,
     starttime: u64 = 0,
 
-    /// poststop=, or null when absent (or blanked).
-    pub fn poststopPath(self: *const Fields) ?[:0]const u8 {
-        return if (self.poststop_len == 0) null else self.poststop[0..self.poststop_len :0];
+    /// poststop='s list, or null when absent (or blanked).
+    pub fn poststopList(self: *const Fields) ?[]const u8 {
+        return if (self.poststop_len == 0) null else self.poststop[0..self.poststop_len];
     }
 
     pub fn cgroupPath(self: *const Fields) [:0]const u8 {
@@ -225,7 +245,8 @@ fn takeLeader(f: *Fields, v: []const u8) bool {
 /// lines, poststop= then cgroup= then leader=, each at most once, cgroup=
 /// required, and nothing else but empty lines (a blanked poststop=). Null
 /// with `f` filled, or why it is refused. What the values name is checked
-/// by the sweep. Any bytes are read without a panic.
+/// by the sweep, poststop='s commands as `poststop` runs them. Any bytes
+/// are read without a panic.
 pub fn parse(buf: []const u8, f: *Fields) ?[]const u8 {
     const keys = [_][]const u8{ "poststop=", "cgroup=", "leader=" };
     f.* = .{};
@@ -288,6 +309,14 @@ pub const Record = struct {
     name: [:0]const u8,
     /// once it is in the directory
     linked: bool,
+    /// poststop='s list as written, for the teardown's `poststop`
+    poststop: [path_max]u8 = undefined,
+    poststop_len: usize = 0,
+
+    /// The list the record was made with, or null when it has none.
+    pub fn poststopList(self: *const Record) ?[]const u8 {
+        return if (self.poststop_len == 0) null else self.poststop[0..self.poststop_len];
+    }
 
     /// rec_set_leader (flong-record.c:391-398): appends
     /// leader=<pid>:<starttime>, once, at child-pid, at the descriptor's
@@ -340,6 +369,27 @@ fn writeRecord(rec: fdt.Fd(.record), bytes: []const u8, name: []const u8) Error!
     if (n != bytes.len) return msg.fail(.IO, "write the record of {s}", .{name});
 }
 
+/// poststop='s value for `commands` into `out`: the words joined by
+/// word_sep, the commands by command_sep. What `create` refuses is said
+/// there.
+fn encode(commands: []const []const [:0]const u8, out: *[path_max]u8) union(enum) { ok: []const u8, newline, separator, too_long } {
+    var n: usize = 0;
+    for (commands, 0..) |cmd, i| {
+        for (cmd, 0..) |w, j| {
+            if (std.mem.indexOfScalar(u8, w, '\n') != null) return .newline;
+            if (std.mem.indexOfAny(u8, w, &.{ command_sep, word_sep }) != null) return .separator;
+            const sep: []const u8 = if (j > 0) &.{word_sep} else if (i > 0) &.{command_sep} else "";
+            // Every value in a record is at most PATH_MAX - 1 bytes.
+            if (sep.len + w.len >= out.len - n) return .too_long;
+            @memcpy(out[n..][0..sep.len], sep);
+            n += sep.len;
+            @memcpy(out[n..][0..w.len], w);
+            n += w.len;
+        }
+    }
+    return .{ .ok = out[0..n] };
+}
+
 /// rec_create (flong-record.c:324-389; flong-record.h:51-63): the record,
 /// already locked. Ordering checkpoint 10, in this one function: made
 /// unnamed with O_TMPFILE in sessions/, locked, written (poststop= when
@@ -352,16 +402,25 @@ fn writeRecord(rec: fdt.Fd(.record), bytes: []const u8, name: []const u8) Error!
 /// lock, releases the session itself if it is still there (with `h`, as
 /// the sweep does), and links the name then. error.Aborted when a
 /// terminating signal ended that wait.
-pub fn create(sessions: fdt.Held(.dir), h: *const cgroup.Holder, machine: [:0]const u8, post_stop: ?[]const u8, cgroup_path: []const u8) sig.Error!Record {
+/// `post_stop` is postStop's commands, in order (spec.Spec's), each at
+/// least a word; none, no poststop=.
+pub fn create(sessions: fdt.Held(.dir), h: *const cgroup.Holder, machine: [:0]const u8, post_stop: []const []const [:0]const u8, cgroup_path: []const u8) sig.Error!Record {
     // 1. The text. A newline in a value would be a line of its own
-    // choosing (:333-341).
-    if ((post_stop != null and std.mem.indexOfScalar(u8, post_stop.?, '\n') != null) or
-        std.mem.indexOfScalar(u8, cgroup_path, '\n') != null)
+    // choosing (:333-341), and a separator in a word a command or a word of
+    // its own.
+    var list_buf: [path_max]u8 = undefined;
+    const list: []const u8 = switch (encode(post_stop, &list_buf)) {
+        .ok => |l| l,
+        .newline => return msg.refuse("a newline is in the postStop path or the cgroup path of {s}", .{machine}),
+        .separator => return msg.refuse("a 0x1E or 0x1F byte is in a postStop word of {s}", .{machine}),
+        .too_long => return msg.refuse("the record of {s} is too long", .{machine}),
+    };
+    if (std.mem.indexOfScalar(u8, cgroup_path, '\n') != null)
         return msg.refuse("a newline is in the postStop path or the cgroup path of {s}", .{machine});
     var buf: [rec_max]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     const fits = blk: {
-        if (post_stop) |ps| w.print("poststop={s}\n", .{ps}) catch break :blk false;
+        if (list.len > 0) w.print("poststop={s}\n", .{list}) catch break :blk false;
         w.print("cgroup={s}\n", .{cgroup_path}) catch break :blk false;
         // snprintf into REC_MAX: the text and its NUL must fit.
         break :blk w.end < buf.len;
@@ -407,7 +466,9 @@ pub fn create(sessions: fdt.Held(.dir), h: *const cgroup.Holder, machine: [:0]co
         rec.close();
         return e;
     };
-    return .{ .dir = sessions, .rec = rec, .name = machine, .linked = true };
+    var r: Record = .{ .dir = sessions, .rec = rec, .name = machine, .linked = true, .poststop_len = list.len };
+    @memcpy(r.poststop[0..list.len], list);
+    return r;
 }
 
 // ---- postStop (flong-record.c:425-484) ----
@@ -444,18 +505,76 @@ fn realPath(path: [:0]const u8, buf: *[path_max]u8) ?[:0]const u8 {
     return buf[0..n :0];
 }
 
-/// fl_poststop (flong-record.c:436-484): runs a postStop program for
-/// `machine` and waits for it: only when `path` starts with /nix/store/,
-/// holds no ".." component and is executable, its target checked the same
-/// way (a symlink in the store may point anywhere); argv {target,
-/// machine}; environment exactly {"machine=<machine>"}; stdin /dev/null,
-/// stdout and stderr inherited; working directory /; in the caller's
-/// cgroup. A failure prints "postStop failed for <machine>" and counts as
-/// run; so does any reap error but an abort (quirk 6). error.Aborted when
-/// a terminating signal ended the wait: postStop is then killed and reaped,
-/// has not finished, and the caller keeps poststop= so the sweep runs it
-/// again (postStop is idempotent).
-pub fn poststop(path: [:0]const u8, machine: []const u8) error{Aborted}!void {
+/// fl_poststop (flong-record.c:436-484), over a list: runs poststop='s
+/// commands for `machine` in order, each waited for, and stops at the
+/// first that fails. A command runs only when its program starts with
+/// /nix/store/, holds no ".." component and is executable, its target
+/// checked the same way (a symlink in the store may point anywhere); argv
+/// {target, its other words..., machine}; environment exactly
+/// {"machine=<machine>"}; stdin /dev/null, stdout and stderr inherited;
+/// working directory /; in the caller's cgroup. A failure prints
+/// "postStop failed for <machine>", and the list, as a whole, counts as
+/// run; so does any reap error but an abort (quirk 6). error.Aborted when a
+/// terminating signal ended a wait: that command is then killed and
+/// reaped, the list has not finished, and the caller keeps poststop= so
+/// the sweep runs the whole list again (postStop is idempotent). `list` is
+/// at most PATH_MAX - 1 bytes (Fields', Record's); any bytes are run
+/// without a panic.
+pub fn poststop(list: []const u8, machine: []const u8) error{Aborted}!void {
+    var it = std.mem.splitScalar(u8, list, command_sep);
+    while (it.next()) |cmd| {
+        if (!try poststopOne(cmd, machine)) return;
+    }
+}
+
+/// One command of poststop='s list as its words, each NUL-terminated in
+/// place of its word_sep, in a buffer of the caller's.
+pub const Words = struct {
+    /// the command's bytes, each word_sep a NUL, and a NUL after the last
+    buf: [:0]const u8,
+    /// how many words: one more than the separators, so never 0
+    n: usize,
+    /// where `next` reads from; past buf.len once every word is read
+    at: usize = 0,
+
+    /// The next word, the program first; null after the last.
+    pub fn next(self: *Words) ?[:0]const u8 {
+        if (self.at > self.buf.len) return null;
+        const w = std.mem.sliceTo(self.buf[self.at..], 0);
+        self.at += w.len + 1;
+        return w;
+    }
+};
+
+/// `cmd`'s words (Words) in `buf`, or null when it does not fit with its
+/// NUL: a command of a record's value always does. Any bytes are taken
+/// without a panic; a NUL in `cmd`, which no record holds, separates words
+/// as word_sep does, so `n` is what `next` yields.
+pub fn words(cmd: []const u8, buf: *[path_max]u8) ?Words {
+    if (cmd.len >= buf.len) return null;
+    @memcpy(buf[0..cmd.len], cmd);
+    buf[cmd.len] = 0;
+    var n: usize = 1;
+    for (buf[0..cmd.len]) |*c| {
+        if (c.* == word_sep or c.* == 0) {
+            c.* = 0;
+            n += 1;
+        }
+    }
+    return .{ .buf = buf[0..cmd.len :0], .n = n };
+}
+
+/// One command of poststop's list, its words word_sep-separated: true when
+/// it ran and exited 0, so the next may run.
+fn poststopOne(cmd: []const u8, machine: []const u8) error{Aborted}!bool {
+    var words_buf: [path_max]u8 = undefined;
+    var ws = words(cmd, &words_buf) orelse {
+        msg.say("postStop failed for {s}: a command is longer than PATH_MAX", .{machine});
+        return false;
+    };
+    const nwords = ws.n;
+    const path = ws.next().?; // proven: a command has at least one word
+
     var real_buf: [path_max]u8 = undefined;
     const checked: ?[:0]const u8 = blk: {
         if (!std.mem.startsWith(u8, path, "/nix/store/") or hasDotdot(path)) break :blk null;
@@ -465,7 +584,7 @@ pub fn poststop(path: [:0]const u8, machine: []const u8) error{Aborted}!void {
     };
     const real = checked orelse {
         msg.say("postStop failed for {s}: {s} is not a program in /nix/store", .{ machine, path });
-        return;
+        return false;
     };
     // machine is a name (names.isName), so it fits.
     var env_buf: ["machine=".len + names.name_max + 1]u8 = undefined;
@@ -473,15 +592,20 @@ pub fn poststop(path: [:0]const u8, machine: []const u8) error{Aborted}!void {
     var machine_buf: [names.name_max + 1]u8 = undefined;
     const machine_z = std.fmt.bufPrintZ(&machine_buf, "{s}", .{machine}) catch unreachable; // proven: as env
 
-    const dev_null = msg.check(fdt.openFile(fdt.cwd, "/dev/null", .{}, 0), "postStop failed for {s}: open /dev/null", .{machine}) catch return;
+    const dev_null = msg.check(fdt.openFile(fdt.cwd, "/dev/null", .{}, 0), "postStop failed for {s}: open /dev/null", .{machine}) catch return false;
     const envp = [_:null]?[*:0]const u8{env.ptr};
-    // Spawn's argv, kept list and number texts, in a buffer of its own: no
-    // allocator (DESIGN.md, "Conventions").
-    var spawn_mem: [256]u8 = undefined;
+    // Spawn's argv, in a buffer of its own: no allocator (DESIGN.md,
+    // "Conventions"). A command of fewer than PATH_MAX bytes has at most
+    // PATH_MAX words; with the machine and the null, init's two slots and
+    // the one growth to all of them fit, whether or not the growth is in
+    // place.
+    var spawn_mem: [(path_max + 4) * 2 * @sizeOf(?[*:0]const u8)]u8 align(@alignOf(?[*:0]const u8)) = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&spawn_mem);
     const child = blk: {
-        var s = proc.Spawn.init(fba.allocator(), real.ptr) catch unreachable; // proven: 2 slots in 256 bytes
-        s.arg(machine_z.ptr) catch unreachable; // proven: 3 slots in 256 bytes
+        var s = proc.Spawn.init(fba.allocator(), real.ptr) catch unreachable; // proven: 2 slots fit spawn_mem
+        s.argv.ensureTotalCapacityPrecise(fba.allocator(), nwords + 2) catch unreachable; // proven: path_max + 2 more slots fit spawn_mem
+        while (ws.next()) |w| s.arg(w.ptr) catch unreachable; // proven: within the capacity reserved above
+        s.arg(machine_z.ptr) catch unreachable; // proven: within the capacity reserved above
         s.envp = &envp;
         s.stdio[0] = dev_null.any();
         s.dir = "/";
@@ -489,16 +613,20 @@ pub fn poststop(path: [:0]const u8, machine: []const u8) error{Aborted}!void {
         break :blk s.start();
     };
     dev_null.close();
-    const c = child catch return;
+    const c = child catch return false;
     const rc = c.await() catch |err| {
         // An aborted postStop has not finished, so the caller must leave
         // the record able to run it again, and it is killed now, not left
         // behind to overlap that rerun (:471-478).
         c.reapNow(.kill);
         if (err == error.Aborted) return error.Aborted;
-        return;
+        return false;
     };
-    if (rc != 0) msg.say("postStop failed for {s} (status {d})", .{ machine, rc });
+    if (rc != 0) {
+        msg.say("postStop failed for {s} (status {d})", .{ machine, rc });
+        return false;
+    }
+    return true;
 }
 
 // ---- the sweep (flong-record.c:486-734) ----
@@ -617,7 +745,7 @@ fn act(name: [:0]const u8, rec: fdt.File, h: *const cgroup.Holder, buf: *[rec_ma
     }
     waitLeader(f) catch return .left;
 
-    if (f.poststopPath()) |ps| {
+    if (f.poststopList()) |ps| {
         // An aborted postStop keeps poststop=, for the next sweep.
         poststop(ps, name) catch return .left;
         // postStop runs once, even if the sweep dies before the unlink:
@@ -868,12 +996,12 @@ fn parsed(text: []const u8) !Fields {
 
 test "parse: the writer's records, and a blanked poststop=" {
     var f = try parsed("poststop=/nix/store/x-stop\ncgroup=/sys/fs/cgroup/h/c/m\nleader=12:345\n");
-    try testing.expectEqualStrings("/nix/store/x-stop", f.poststopPath().?);
+    try testing.expectEqualStrings("/nix/store/x-stop", f.poststopList().?);
     try testing.expectEqualStrings("/sys/fs/cgroup/h/c/m", f.cgroupPath());
     try testing.expectEqual(@as(sys.pid_t, 12), f.leader);
     try testing.expectEqual(@as(u64, 345), f.starttime);
     f = try parsed("\n\n\ncgroup=/c\n");
-    try testing.expectEqual(@as(?[:0]const u8, null), f.poststopPath());
+    try testing.expectEqual(@as(?[]const u8, null), f.poststopList());
     try testing.expectEqual(@as(sys.pid_t, 0), f.leader);
     f = try parsed("cgroup=/c\nleader=2147483647:0\n");
     try testing.expectEqual(@as(sys.pid_t, std.math.maxInt(i32)), f.leader);
@@ -966,4 +1094,51 @@ test "poststopLineLen" {
     try testing.expectEqual(@as(usize, 14), poststopLineLen("poststop=/a/b\ncgroup=/c\n"));
     try testing.expectEqual(@as(usize, 0), poststopLineLen("cgroup=/c\n"));
     try testing.expectEqual(@as(usize, 12), poststopLineLen("poststop=/a"));
+}
+
+test "encode, then words: a list round-trips, command by command and word by word" {
+    var out: [path_max]u8 = undefined;
+    const list: []const []const [:0]const u8 = &.{ &.{ "/nix/store/a", "x y", "", "--" }, &.{"/nix/store/b"}, &.{ "/nix/store/c", "" } };
+    const v = encode(list, &out).ok;
+    try testing.expectEqualStrings("/nix/store/a\x1fx y\x1f\x1f--\x1e/nix/store/b\x1e/nix/store/c\x1f", v);
+    var it = std.mem.splitScalar(u8, v, command_sep);
+    var buf: [path_max]u8 = undefined;
+    for (list) |cmd| {
+        var ws = words(it.next().?, &buf).?;
+        try testing.expectEqual(cmd.len, ws.n);
+        for (cmd) |w| try testing.expectEqualStrings(w, ws.next().?);
+        try testing.expectEqual(@as(?[:0]const u8, null), ws.next());
+    }
+    try testing.expectEqual(@as(?[]const u8, null), it.next());
+    // None: no poststop=.
+    try testing.expectEqualStrings("", encode(&.{}, &out).ok);
+    try testing.expect(encode(&.{&.{"/a\nb"}}, &out) == .newline);
+    try testing.expect(encode(&.{ &.{"/a"}, &.{ "/b", "\x1e" } }, &out) == .separator);
+    try testing.expect(encode(&.{&.{ "/a", "x\x1fy" }}, &out) == .separator);
+}
+
+test "words: a record written before the list is one command of one word" {
+    const f = try parsed("poststop=/nix/store/x-stop/bin/stop\ncgroup=/c\n");
+    var it = std.mem.splitScalar(u8, f.poststopList().?, command_sep);
+    var buf: [path_max]u8 = undefined;
+    var ws = words(it.next().?, &buf).?;
+    try testing.expectEqual(@as(usize, 1), ws.n);
+    try testing.expectEqualStrings("/nix/store/x-stop/bin/stop", ws.next().?);
+    try testing.expectEqual(@as(?[:0]const u8, null), ws.next());
+    try testing.expectEqual(@as(?[]const u8, null), it.next());
+}
+
+test "words: an empty command is one empty word, a NUL a separator, and too long is null" {
+    var buf: [path_max]u8 = undefined;
+    var ws = words("", &buf).?;
+    try testing.expectEqual(@as(usize, 1), ws.n);
+    try testing.expectEqualStrings("", ws.next().?);
+    try testing.expectEqual(@as(?[:0]const u8, null), ws.next());
+    ws = words("a\x00b\x1f", &buf).?;
+    try testing.expectEqual(@as(usize, 3), ws.n);
+    for ([_][]const u8{ "a", "b", "" }) |w| try testing.expectEqualStrings(w, ws.next().?);
+    try testing.expectEqual(@as(?[:0]const u8, null), ws.next());
+    const long = [_]u8{'a'} ** path_max;
+    try testing.expect(words(&long, &buf) == null);
+    try testing.expect(words(long[1..], &buf) != null);
 }

@@ -1,0 +1,3 @@
+poststop=/nix/store/aaaa-a/bin/ax y--/nix/store/bbbb-b/bin/b
+cgroup=/sys/fs/cgroup/h/c/m
+leader=12:345

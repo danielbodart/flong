@@ -94,11 +94,12 @@ generates a header of quoted assignments in front of `rootless-wrapper.bash`,
 and the header is the only place a declaration reaches bash: a name, a path or
 a command's word is data there, and the body decides what runs. A list of
 commands is one flat array, each command's length and then its words. The
-launcher's spec takes one `post-start` and one `post-stop` program, so
-module.nix composes each list into one program that runs its commands in
-order and stops at the first that fails, until S3 moves the list into
-`flong launch`. Every name the
-header assigns is un-exported, since an assignment to a name the caller's
+launcher's spec takes one `post-start` or `post-stop` per command, and runs
+them in order, stopping at the first that fails; module.nix puts each command
+behind its declaration's hook program, `flong-poststart-<name>` or
+`flong-poststop-<name>`, which puts `path` on `PATH`, drops the machine name
+the record appends to a `postStop` command, and execs the command. Every name
+the header assigns is un-exported, since an assignment to a name the caller's
 environment exports keeps it exported, into the launcher and the hooks.
 
 ## `command` is exec'd through the container's environment
@@ -331,10 +332,10 @@ launches of one checkout at once would each apply the other's approval. See
 Every hook runs under `set -euo pipefail` with `path` on `PATH`, and every
 one but `postStop` sees the launcher's arguments in `"$@"`. `postStop` runs
 from `/` with `$machine` and nothing else, since on the sweeper's path that is
-all that survives. `postStart` and `postStop` are programs of their own in the
-store, because the launcher and the sweeper run them with the
-environment they give them, and the sweeper may run a superseded
-generation's `postStop`.
+all that survives. `postStart` and `postStop` commands are run through
+programs of their own in the store, which give them `path` and exec them,
+because the launcher and the sweeper run them with the environment they give
+them, and the sweeper may run a superseded generation's `postStop`.
 
 ## Every bind is one record, filled in by two parties
 
@@ -861,10 +862,20 @@ session, in one directory per caller, so any launch can sweep any dead
 session of the caller's:
 
 ```
-poststop=<store path>       the session's own postStop program, if any
+poststop=<commands>         the session's own postStop commands, if any
 cgroup=<path>               its session cgroup
 leader=<pid>:<starttime>    appended once bwrap reports its child
 ```
+
+- **`poststop=` is a list of commands**, run in order: the commands
+  separated by 0x1E, each command's words by 0x1F, its program first. A
+  record is lines with no escaping, a value its bytes up to the newline,
+  and neither separator is a byte a store path or the module's words hold,
+  so the launcher refuses a word holding either (or a newline) rather than
+  escaping it, and the value, at most `PATH_MAX - 1` bytes like every
+  other, reads one way only. There is no compatibility layer: a record
+  written before the list, one store path, reads as one command of one
+  word, which is how it ran.
 
 - **It is made unnamed and locked.** The launcher opens it with `O_TMPFILE`,
   takes an exclusive `flock`, fills it, and only then links it into place
@@ -923,8 +934,8 @@ that could write one would get the sweep to run a program of its choice, or
 kill any of the caller's cgroups; no session can reach the state directory
 (condition 4), and the sweep is the second line. It `chdir`s to `/`, gives
 `postStop` `/dev/null` for stdin and exactly `machine=<name>` for its
-environment, runs only an executable `/nix/store` path whose target is also in
-the store, requires `cgroup=` to spell exactly
+environment, runs a command only when its program is an executable
+`/nix/store` path whose target is also in the store, requires `cgroup=` to spell exactly
 `<holder>/<container>/<machine>` for the record's own machine before anything
 is killed, and requires `leader=` to match its starttime. A record that is not
 well formed, or does not name a session's cgroup, is unlinked and nothing it
@@ -934,8 +945,11 @@ left for that holder's sweep: its cgroup is not this sweep's to kill, and its
 `postStop` must still run. A cgroup that cannot be opened for a transient
 reason (`EMFILE`, `ENOMEM`) keeps the record, the only trace of what is left.
 
-A failing `postStop` is reported and counts as run. A signal while it runs
-kills it and leaves `poststop=` in place, so the next sweep runs it again.
+`postStop`'s commands run in order, each with its own words, then
+`$machine` as its last argument. A failing command (a non-zero status, or a
+program the checks refuse) is reported, ends the list, and the list counts
+as run. A signal while one runs kills it and leaves `poststop=` in place, so
+the next sweep runs the whole list again.
 
 ### The sweeper
 
@@ -980,7 +994,8 @@ One function, run whatever stage the launch reached, in this order:
    included.
 4. Reap what is ours: bwrap, the mount helper, the hook, the spawned pasta.
 5. Wait for the sandbox leaf, then the hooks leaf, to empty.
-6. Run `postStop`, if the record has one, then blank it in the record.
+6. Run `postStop`'s commands in order, if the record has any, stopping at
+   the first failure, then blank `poststop=` in the record.
 7. With fixed `forwardPorts`, wait for the pasta leaf to empty.
 8. Remove the session cgroup, then unlink the record. When pasta is still
    exiting and the cgroup cannot go yet, the record is closed, not removed,
@@ -1901,10 +1916,10 @@ behaviour wait for [Open decisions](#open-decisions).
 |---|---|---|---|
 | 1 | the ready byte written after the helper died gives flong init EPIPE, not SIGPIPE's death: it is its namespace's pid 1, which a default-action signal never kills; it says `telling the launcher the root is built: Broken pipe`, or not, by timing | `init.zig` | Keep; SIGPIPE stays default for the payload |
 | 2 | a relaunch execs the wrapper before inherited descriptors are closed, restoring SIGPIPE and the mask first | `launch/prologue.zig` | Keep |
-| 3 | pasta gets `$leader`, `$userns`, `$netns`, `$machine` only when a hook ran | `launch/hook.zig`, `pasta.zig` | Keep: the environment is built only when a hook runs, and pasta gets it then |
+| 3 | pasta gets `$leader`, `$userns`, `$netns`, `$machine` only when a hook ran | `launch/hook.zig`, `pasta.zig` | Keep: the environment is built once, only when `postStart` has a command, every command gets it, and pasta gets it then |
 | 4 | pasta's `--netns` names the leader by pid, the hook's `$netns` the launcher's descriptor | `launch/pasta.zig` | Keep |
 | 5 | a malformed record under the wanted name is dropped, release returns 0, and the launch refuses `has ended but cannot be released yet` though the name is free | `record.zig` | Keep; open decision 1 |
-| 6 | `postStop` counts any reap error but an abort as run | `record.zig` | Keep |
+| 6 | `postStop` counts any reap error but an abort as run | `record.zig` | Keep, for the list as a whole: a failing command ends it, and it counts as run |
 | 7 | teardown's reaps short-circuit on the first failure, the rest zombies until exit | `launch.zig` | Keep |
 | 8 | holder-start's pidfd is closed unreaped on an abort | `cgroup.zig` | Keep, `Child.release()` |
 | 9 | the C closed the watchdog's pidfd at once and reaped it by pid | `tty.zig` | Mechanism: the pidfd is kept, `reapNow(.wait)` in `finish`, same order |
@@ -1965,8 +1980,8 @@ behaviour wait for [Open decisions](#open-decisions).
 ### The input contract
 
 The wrapper runs `flong launch` with the whole spec as its arguments: keywords,
-each followed by a fixed number of fields, then `--` and the payload's
-command. An argument is already NUL-terminated, so a path may hold a tab or a
+each followed by a fixed number of fields (a `mount`'s set by its kind, a
+command's by its word count), then `--` and the payload's command. An argument is already NUL-terminated, so a path may hold a tab or a
 newline, and bash builds and passes the list with builtins alone; bash cannot
 hold a NUL in a string, so a spec file or a pipe would cost a fork or a
 temporary file per launch. Keywords come in any order; repeatable ones
@@ -1997,8 +2012,8 @@ accumulate in order. `R` required, `1` at most once, `*` repeatable.
 | `holder REL` | R | the holder's cgroup below `user@UID.service`: `app.slice/flong-sessions.service` |
 | `holder-start ARG` | * | argv run when the holder is absent; the first an absolute path, since nothing searches `PATH` |
 | `limit FILE VALUE` | * | an opt-in limit, `FILE` one of `memory.max`, `memory.high`, `memory.swap.max`, `memory.oom.group`, `pids.max`, `cpu.max`, `cpu.weight`, `io.weight` |
-| `post-start ARG` | * | the `postStart` program and its arguments; none, no hook |
-| `post-stop PATH` | 1 | the `postStop` program, under `/nix/store/`, recorded for the sweep |
+| `post-start N WORD…` | * | one `postStart` command, `N` (decimal, at least 1) words, the first an absolute path; in order, the first failure ending the launch; none, no hook |
+| `post-stop N WORD…` | * | one `postStop` command, the same way, its program under `/nix/store/`; in order, recorded for the sweep |
 | `network` | 1 | start pasta |
 | `pasta-arg ARG` | * | pasta's port and DNS flags |
 | `pasta-wait` | 1 | fixed `forwardPorts`: the teardown waits for pasta's exit |
@@ -2062,7 +2077,7 @@ they are made. The call is what that step calls.
 | 12 | the protected paths made canonical; open the seccomp files; the info, ready and gate pipes; bwrap in the sandbox leaf | `prologue.protectPaths`, `bwrap.spawn` | |
 | 13 | read `--info-fd` until `child-pid`; hold the leader's pidfd and network namespace; append `leader=` | `childpid.wait`, `fd.pidfdOpen`, `fd.openNetns`, `Record.setLeader` | `bwrap-child` |
 | 14 | fork the mount helper, which prepares sources, waits for the ready byte, then mounts `/sys`, the declared mounts and `/run` read-only; wait for it or bwrap | `proc.fork` with `mount.run`, `sig.awaitFdOrExit`, `Child.await` | `sandbox-ready`, `mounts-done` |
-| 15 | `postStart` in the hooks leaf, waited for | `hook.build`, `Spawn.start`, `Child.await`, `hook.done` | `hook-done` |
+| 15 | `postStart`'s commands in the hooks leaf, in order, each waited for, the first failure ending the launch; one environment, built once | `hook.build`, `Spawn.start`, `Child.await`, `hook.done` | `hook-done`, per command |
 | 16 | pasta in the pasta leaf, ready when the spawned pasta exits 0 | `pasta.build`, `Pasta.start`, `Child.await`, `pasta.done` | `pasta-up` |
 | 17 | save modes, start the watchdog, then raw (relay); take queued signals; copy the window size; write the gate byte | `tty.start`, `sig.take`, `tty.resize` | `gate-open` |
 | 18 | wait for bwrap | `tty.wait` | `bwrap-exited` |

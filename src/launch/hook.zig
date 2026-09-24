@@ -1,7 +1,9 @@
 //! hook.zig: step 15 of a launch, the postStart hook, as far as building
 //! what it runs (launcher/flong-launch.c:579-620 of a7919be, run_hook).
-//! The launcher's root starts the Spawn this returns, awaits it and judges
-//! its status with `done`; this module starts nothing.
+//! postStart is a list of commands (spec.Spec's post_start), run in order:
+//! the launcher's root starts each Spawn this returns, awaits it and
+//! judges its status with `done`, the first failure ending the launch as
+//! the C's one hook's did; this module starts nothing.
 //!
 //! One module per piece of flong launch under src/launch/ (hook, pasta,
 //! ...), each a set of functions with explicit parameters, where the port's
@@ -15,9 +17,9 @@
 //! with setenv (:597-599), after the early return for a spec without a
 //! hook, so every later child spawned with the default environment gets
 //! them too, and the only such child is pasta (quirk 3, kept): `env` builds
-//! that environment as a value, only when a hook runs, and the root hands
-//! the same value to pasta.build, or null (the environment as it came)
-//! when there is no hook.
+//! that environment as a value, once, only when the list has a command,
+//! every command gets it, and the root hands the same value to
+//! pasta.build, or null (the environment as it came) when there is no hook.
 
 const std = @import("std");
 const sys = @import("sys");
@@ -31,14 +33,14 @@ const Allocator = std.mem.Allocator;
 /// An environment for execve: its strings, then a null.
 pub const Envp = [*:null]const ?[*:0]const u8;
 
-/// The postStart hook, ready to start, and the environment pasta gets
-/// after it (quirk 3).
+/// The postStart hook's commands, ready to start in order, and the
+/// environment pasta gets after them (quirk 3).
 pub const Hook = struct {
-    /// argv the spec's post-start words; the environment `envp`; stdio,
-    /// the working directory and the kept descriptors the launcher's own
-    /// (none kept: every descriptor of the launcher is close-on-exec); in
-    /// the hooks leaf (flong-launch.c:600-609).
-    spawn: proc.Spawn,
+    /// one per command, in the spec's order: argv the command's words; the
+    /// environment `envp`; stdio, the working directory and the kept
+    /// descriptors the launcher's own (none kept: every descriptor of the
+    /// launcher is close-on-exec); in the hooks leaf (flong-launch.c:600-609)
+    spawns: []proc.Spawn,
     /// what `env` built: pasta.build's `envp`
     envp: Envp,
 };
@@ -114,21 +116,25 @@ fn named(entries: []const ?[*:0]const u8, name: []const u8) ?usize {
 
 /// run_hook up to fl_spawn (flong-launch.c:586-609): null when the spec
 /// has no hook (:588-589), and then no environment is built and pasta
-/// gets the launcher's own. Otherwise the environment (`env`) and the
-/// hook's Spawn, which the root starts, awaits and judges with `done`.
-/// `hooks_leaf` is the session's hooks cgroup.
+/// gets the launcher's own. Otherwise the environment (`env`), built once,
+/// and a Spawn per command, which the root starts, awaits and judges with
+/// `done` in order. `hooks_leaf` is the session's hooks cgroup.
 pub fn build(gpa: Allocator, s: *const spec.Spec, environ: []const [*:0]const u8, v: Vars, userns: anytype, netns: anytype, hooks_leaf: fd.Fd(.cgroup)) msg.Error!?Hook {
     if (s.post_start.len == 0) return null;
     const envp = try env(gpa, environ, v, userns, netns);
-    var sp = proc.Spawn.init(gpa, s.post_start[0].ptr) catch return oom();
-    for (s.post_start[1..]) |w| sp.arg(w.ptr) catch return oom();
-    sp.envp = envp;
-    sp.cgroup = hooks_leaf;
-    return .{ .spawn = sp, .envp = envp };
+    const spawns = gpa.alloc(proc.Spawn, s.post_start.len) catch return oom();
+    for (spawns, s.post_start) |*sp, cmd| {
+        sp.* = proc.Spawn.init(gpa, cmd[0].ptr) catch return oom();
+        for (cmd[1..]) |w| sp.arg(w.ptr) catch return oom();
+        sp.envp = envp;
+        sp.cgroup = hooks_leaf;
+    }
+    return .{ .spawns = spawns, .envp = envp };
 }
 
-/// After the hook is reaped (flong-launch.c:613-619): a failure's refusal,
-/// which rootless.nix asserts, or the trace stage.
+/// After one command is reaped (flong-launch.c:613-619): a failure's
+/// refusal, which rootless.nix asserts and which ends the launch before
+/// the next command, or the trace stage, once per command.
 pub fn done(status: u8) msg.Error!void {
     if (status != 0) return msg.refuse("postStart failed (status {d}); the payload does not run", .{status});
     msg.trace("hook-done");

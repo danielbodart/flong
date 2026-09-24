@@ -1,17 +1,17 @@
 # The launcher's body. module.nix puts a header of assignments in
 # front of it (name, container, user, closure, cuid, cgid, closure8, steps8,
 # static, declared_dests, declared_binds, masks, mask_hosts, launcher,
-# cache_tool, flock, mkdir, payload, post_start, network, dns_forward4,
-# dns_forward6, the seccomp filters and tool, and the caller's commands) and
+# cache_tool, flock, mkdir, payload, network, dns_forward4, dns_forward6, the
+# seccomp filters and tool, the caller's commands and postStart's) and
 # writeShellApplication runs it under errexit, nounset and pipefail. It works
 # out what only the launch can know -- the caller, the workspace and binds,
 # the project's seccomp policy, the maps, the prepared root and the payload's
 # identity -- and execs flong launch with the spec.
 #
 # The caller's commands are arrays: workspace_command one command, or empty
-# for none; binds_commands, guard_commands and seccomp_policy_commands a
-# list of them, flat, as module.nix's flatCommands writes one -- each
-# command's length, then its words.
+# for none; binds_commands, guard_commands, seccomp_policy_commands and
+# post_start_commands a list of them, flat, as module.nix's flatCommands
+# writes one -- each command's length, then its words.
 #
 # The warm path of a default declaration runs bash builtins only: every fork
 # is on the cold path or in a command the declaration chose. So there is no
@@ -411,10 +411,14 @@ for i in "${!bind_paths[@]}"; do
 done
 if ((home_tmp)); then spec+=(mount tmpfs "$home/tmp" 0700 '' user); fi
 # postStart keeps trunk's positional parameters: the launcher's arguments.
-if [[ -n $post_start ]]; then
-	spec+=(post-start "$post_start")
-	for a in "${launcher_args[@]}"; do spec+=(post-start "$a"); done
-fi
+# One post-start per command, in order: its word count, then its words (the
+# hook program first, as module.nix put it) and the launcher's arguments.
+i=0
+while ((i < ${#post_start_commands[@]})); do
+	n=${post_start_commands[i]}
+	spec+=(post-start $((n + ${#launcher_args[@]})) "${post_start_commands[@]:i+1:n}" "${launcher_args[@]}")
+	i=$((i + 1 + n))
+done
 
 if ((network)); then
 	# A networked session's resolver is pasta. One synthetic nameserver per

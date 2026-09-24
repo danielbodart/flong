@@ -192,6 +192,14 @@ let
     rec ps-deep "poststop=$(find ${deep} -type f)\ncgroup=$H/c/ps-deep\n"
     rec ps-missing "poststop=/nix/store/nothing-here\ncgroup=$H/c/ps-missing\n"
     rec ps-long "poststop=/tmp/$long\ncgroup=$H/c/ps-long\n"
+    # poststop='s list (record.zig): the commands 0x1E-separated, the words
+    # 0x1F; each run in order, its words after its program and the machine
+    # last, the first failure ending the list; an empty command, or word,
+    # is one.
+    rec ps-list "poststop=${psLog}\x1fa\x1fb c\x1e${psLog}\x1fsecond\ncgroup=$H/c/ps-list\n"
+    rec ps-list-fail "poststop=${psFail}\x1e${psLog}\ncgroup=$H/c/ps-list-fail\n"
+    rec ps-list-bad "poststop=${psLog}\x1f\x1e/tmp/ps-outside\x1e${psLog}\ncgroup=$H/c/ps-list-bad\n"
+    rec ps-list-empty "poststop=\x1e${psLog}\ncgroup=$H/c/ps-list-empty\n"
     # Not a record's form (:264-308).
     rec bad-nul "cgroup=/x\0\n"
     rec bad-nonl "cgroup=$H/c/bad-nonl"
@@ -634,7 +642,9 @@ in
     with subtest("sweeper: the records swept as the C swept them"):
         # sweep-diff (above) as alice. Until phase 5 (b) it ran the C
         # sweeper too, and every line was the same; what the C said is kept
-        # in tests/golden/sweep-diff.said (c9571be, store paths as @VAR@).
+        # in tests/golden/sweep-diff.said (c9571be, store paths as @VAR@),
+        # with the ps-list records' lines added since (S3: poststop= a list
+        # of commands), which the C never read.
         # The first sweep's lines come in sessions/'s readdir order, and
         # the later sweeps' count in how inotify batches their events, so
         # the first sweep is compared as a multiset and the rest as a set,
@@ -647,7 +657,7 @@ in
         for var, path in (("@PSNOEXEC@", "${psNoexec}"), ("@PSOUT@", "${psOut}"), ("@PSDIR@", "${psDir}")):
             golden = golden.replace(var, path)
         def sweeps(said):
-            first, rest = said.split("flong sweeper: released 14 dead sessions\n")
+            first, rest = said.split("flong sweeper: released 18 dead sessions\n")
             return sorted(first.splitlines()), set(rest.splitlines()), rest.splitlines()[-1]
         said = out.split("== said\n")[1].split("== left\n")[0]
         assert sweeps(said) == sweeps(golden), said
@@ -667,12 +677,26 @@ in
                      "flong sweeper: open the record of unreadable: Permission denied",
                      "${psLog} argc=1 1=s-full machine=s-full pwd=/ stdin-rc=1",
                      "${psLog} argc=1 1=ps-symin machine=ps-symin pwd=/ stdin-rc=1",
+                     "flong sweeper: postStop failed for ps-list-fail (status 3)",
+                     "flong sweeper: postStop failed for ps-list-bad: /tmp/ps-outside is not a program in /nix/store",
+                     "flong sweeper: postStop failed for ps-list-empty:  is not a program in /nix/store",
                      "\ns-other regular file", "\nlocked regular file", "\nlinkrec symbolic link",
                      "\n== cgroups\nc\nsupervisor\n== poststop"):
             assert want in out, want
         # Cut at 1023 bytes, newline included (quirk 22).
         assert max(len(l) for l in out.split("\n")) == 1022, out
         assert "outside" not in out.split("== poststop")[1], out
+        # The lists: ps-list's two commands in order, each with its words;
+        # ps-list-bad's first alone; ps-list-fail's and ps-list-empty's
+        # none, their first command having failed.
+        ran = out.split("== poststop\n")[1]
+        first = ran.find("${psLog} argc=3 1=a machine=ps-list pwd=/ stdin-rc=1")
+        second = ran.find("${psLog} argc=2 1=second machine=ps-list pwd=/ stdin-rc=1")
+        assert 0 <= first < second, out
+        assert ran.count("machine=ps-list pwd") == 2, out
+        assert ran.count("${psLog} argc=2 1= machine=ps-list-bad pwd=/ stdin-rc=1") == 1, out
+        assert ran.count("machine=ps-list-bad pwd") == 1, out
+        assert "machine=ps-list-fail " not in ran and "machine=ps-list-empty " not in ran, out
 
     with subtest("sweeper: postStop once across a failed removal, and the watch before the first sweep"):
         # sweep-order (above) as alice; the C sweeper, until phase 5 (b),

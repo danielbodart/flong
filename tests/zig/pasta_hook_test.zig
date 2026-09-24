@@ -92,7 +92,7 @@ const Capture = struct {
 
 /// A spec with only what the two pieces read set to anything but its
 /// default; the rest as a caller's usual one.
-fn specWith(post_start: []const [:0]const u8, network: bool, pasta_args: []const [:0]const u8, pasta_wait: bool) spec.Spec {
+fn specWith(post_start: []const spec.Command, network: bool, pasta_args: []const [:0]const u8, pasta_wait: bool) spec.Spec {
     return .{
         .machine = "m-1",
         .container = "c",
@@ -247,18 +247,47 @@ test "hook.build: the spec's words, the four variables, the launcher's stdio and
     const h = try Handles.open();
     defer h.close();
     const vars = try vars3(arena, h);
-    const s = specWith(&.{ hook_program, "a b", "", "--" }, false, &.{}, false);
+    const s = specWith(&.{&.{ hook_program, "a b", "", "--" }}, false, &.{}, false);
     const live = fd.liveCount();
     const hk = (try hook.build(arena, &s, &.{"PATH=/bin"}, .{ .leader = leader, .self_pid = sys.getpid(), .machine = s.machine }, h.userns, h.netns, h.leaf)).?;
-    try expectWords(arena, &.{ hook_program, "a b", "", "--" }, words(&hk.spawn), &vars);
+    try testing.expectEqual(@as(usize, 1), hk.spawns.len);
+    const sp = &hk.spawns[0];
+    try expectWords(arena, &.{ hook_program, "a b", "", "--" }, words(sp), &vars);
+    try testing.expectEqual(@as(usize, 4), words(sp).len);
     try expectWords(arena, &.{ "PATH=/bin", "leader=4242", "userns=/proc/@SELF@/fd/@U1@", "netns=/proc/@SELF@/fd/@NETNS@", "machine=m-1" }, envWords(hk.envp), &vars);
-    try testing.expectEqual(hk.envp, hk.spawn.envp.?);
-    try testing.expectEqual([3]?fd.AnyFd{ null, null, null }, hk.spawn.stdio);
-    try testing.expectEqual(@as(usize, 0), hk.spawn.keep.items.len);
-    try testing.expectEqual(@as(?[*:0]const u8, null), hk.spawn.dir);
-    try testing.expectEqual(h.leaf, hk.spawn.cgroup.?);
+    try testing.expectEqual(hk.envp, sp.envp.?);
+    try testing.expectEqual([3]?fd.AnyFd{ null, null, null }, sp.stdio);
+    try testing.expectEqual(@as(usize, 0), sp.keep.items.len);
+    try testing.expectEqual(@as(?[*:0]const u8, null), sp.dir);
+    try testing.expectEqual(h.leaf, sp.cgroup.?);
     // Building opened nothing.
     try testing.expectEqual(live, fd.liveCount());
+}
+
+test "hook.build: a list of commands, in order, each with the one environment built once" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const h = try Handles.open();
+    defer h.close();
+    const vars = try vars3(arena, h);
+    const second: [:0]const u8 = "/nix/store/y-second/bin/second";
+    const s = specWith(&.{ &.{hook_program}, &.{ second, "x" }, &.{ hook_program, "" } }, true, &.{}, false);
+    const hk = (try hook.build(arena, &s, &.{ "machine=outer", "PATH=/bin" }, .{ .leader = leader, .self_pid = sys.getpid(), .machine = s.machine }, h.userns, h.netns, h.leaf)).?;
+    const want = [_][]const []const u8{ &.{hook_program}, &.{ second, "x" }, &.{ hook_program, "" } };
+    try testing.expectEqual(want.len, hk.spawns.len);
+    for (want, hk.spawns) |w, *sp| {
+        try testing.expectEqual(w.len, words(sp).len);
+        try expectWords(arena, w, words(sp), &vars);
+        // The same value, not a copy per command: pasta gets it too.
+        try testing.expectEqual(hk.envp, sp.envp.?);
+        try testing.expectEqual(h.leaf, sp.cgroup.?);
+        try testing.expectEqual(@as(usize, 0), sp.keep.items.len);
+    }
+    try expectWords(arena, &.{ "machine=m-1", "PATH=/bin", "leader=4242", "userns=/proc/@SELF@/fd/@U1@", "netns=/proc/@SELF@/fd/@NETNS@" }, envWords(hk.envp), &vars);
+    var p = (try pasta.build(arena, &s, pasta_program, sys.getpid(), h.userns, leader, hk.envp, h.leaf)).?;
+    defer p.dev_null.close();
+    try testing.expectEqual(hk.envp, p.spawn.envp.?);
 }
 
 // ---- pasta ----
@@ -373,7 +402,7 @@ test "pasta.build: no network, nothing built, no pid file" {
     defer arena_state.deinit();
     const h = try Handles.open();
     defer h.close();
-    const s = specWith(&.{hook_program}, false, &.{}, false);
+    const s = specWith(&.{&.{hook_program}}, false, &.{}, false);
     const live = fd.liveCount();
     try testing.expect(try pasta.build(arena_state.allocator(), &s, pasta_program, sys.getpid(), h.userns, leader, null, h.leaf) == null);
     try testing.expectEqual(live, fd.liveCount());
@@ -387,7 +416,7 @@ test "pasta gets the hook's environment when a hook ran, the launcher's otherwis
     defer h.close();
     const environ = [_][*:0]const u8{"PATH=/bin"};
     for ([_]bool{ true, false }) |with_hook| {
-        const s = specWith(if (with_hook) &.{hook_program} else &.{}, true, &.{"--no-map-gw"}, false);
+        const s = specWith(if (with_hook) &.{&.{hook_program}} else &.{}, true, &.{"--no-map-gw"}, false);
         // The root's composition: the hook's envp, or null.
         const hk = try hook.build(arena, &s, &environ, .{ .leader = leader, .self_pid = sys.getpid(), .machine = s.machine }, h.userns, h.netns, h.leaf);
         var p = (try pasta.build(arena, &s, pasta_program, sys.getpid(), h.userns, leader, if (hk) |x| x.envp else null, h.leaf)).?;
@@ -409,7 +438,7 @@ test "quirk 4: pasta's --netns is the leader's by pid, the hook's $netns the lau
     const arena = arena_state.allocator();
     const h = try Handles.open();
     defer h.close();
-    const s = specWith(&.{hook_program}, true, &.{}, false);
+    const s = specWith(&.{&.{hook_program}}, true, &.{}, false);
     const hk = (try hook.build(arena, &s, &.{}, .{ .leader = leader, .self_pid = sys.getpid(), .machine = s.machine }, h.userns, h.netns, h.leaf)).?;
     var p = (try pasta.build(arena, &s, pasta_program, sys.getpid(), h.userns, leader, hk.envp, h.leaf)).?;
     defer p.dev_null.close();

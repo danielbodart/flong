@@ -23,8 +23,11 @@ user
 holder
 flong.slice/s
 post-stop
+1
 /nix/store/a
 post-stop
-/nix/store/a
+2
+/bin/sh
+-c
 --
 /bin/true

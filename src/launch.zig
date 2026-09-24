@@ -359,18 +359,20 @@ fn run(l: *Launch) sig.Error!u8 {
     if (mounted != 0) return msg.refuse("the session's mounts failed; the payload does not run", .{});
     msg.trace("mounts-done");
 
-    // 15. postStart in the hooks leaf, waited for, with $leader, $userns,
-    // $netns and $machine; its environment is pasta's too (quirk 3)
+    // 15. postStart's commands in the hooks leaf, in order, each waited
+    // for, the first failure ending the launch, all with one environment:
+    // $leader, $userns, $netns and $machine; it is pasta's too (quirk 3)
     // (:579-620).
     var envp: ?hook.Envp = null;
     const self_pid = sys.getpid();
     if (try hook.build(l.arena, s, l.environ, .{ .leader = pid, .self_pid = self_pid, .machine = s.machine }, outer, netns, cg.leaf[hooks].?)) |built| {
-        var h = built;
-        envp = h.envp;
-        l.hook = try h.spawn.start();
-        const st = try l.hook.?.await();
-        l.hook = null;
-        try hook.done(st);
+        envp = built.envp;
+        for (built.spawns) |*sp| {
+            l.hook = try sp.start();
+            const st = try l.hook.?.await();
+            l.hook = null;
+            try hook.done(st);
+        }
     }
 
     // 16. pasta in the pasta leaf, ready when the spawned pasta exits 0
@@ -469,12 +471,13 @@ fn teardown(l: *Launch, result: sig.Error!u8) u8 {
         }
     }
 
-    // 4. postStop. A failing one is reported and does not change the status
+    // 4. postStop's commands, in order, as the record lists them. A
+    // failing one is reported, ends the list and does not change the status
     // (quirk 6); an aborted one keeps poststop= in the record, which is
-    // closed, so the sweeper runs it again.
+    // closed, so the sweeper runs the list again.
     if (l.rec) |*rec| {
-        if (settled and l.s.post_stop != null) {
-            if (record.poststop(l.s.post_stop.?, l.s.machine)) |_| {
+        if (settled and rec.poststopList() != null) {
+            if (record.poststop(rec.poststopList().?, l.s.machine)) |_| {
                 if (rec.poststopDone()) |_| {
                     msg.trace("poststop-done");
                 } else |_| settled = false;
