@@ -1,0 +1,687 @@
+[
+  {
+    "path": "user",
+    "type": {
+      "type": "string"
+    },
+    "default": null,
+    "required": true,
+    "doc": "User inside the container, which everything in the session runs\nas.\n\nIts uid and the gid of its primary group must be declared in the\ncontainer's `config`, and the container cannot be declared by\n`path`: they name the prepared root's cache and the caller's id\nmaps, which are needed before anything is prepared. The home is\nread at launch from the prepared root's `/etc/passwd`, and a\nlaunch refuses one whose ids disagree. The uid need not be the\ncaller's: the session's user is mapped onto the caller whatever\nits uid.",
+    "merge": "single",
+    "nixOption": true
+  },
+  {
+    "path": "command",
+    "type": {
+      "type": "command"
+    },
+    "default": null,
+    "required": true,
+    "doc": "The payload, as an argument list: the program, then its fixed\narguments. The launcher's own arguments are appended, and it is\nexec'd as `user` in the workspace. No element of either list is\nread by a shell, so a space, a `;` or a `$` in one is passed as it\nis.\n\nIt is exec'd after the container's `/etc/set-environment` has been\nsourced, so a bare name is looked up on the container's `PATH` --\nits `environment.systemPackages`, the user's `packages` -- and\nthe payload inherits every variable the container exports. An\nabsolute path, such as `lib.getExe` of a package, is run as it\nis. Anything that needs a script is a package of its own, named\nhere by `lib.getExe`.",
+    "merge": "ordered",
+    "nixOption": true
+  },
+  {
+    "path": "workspace",
+    "type": {
+      "type": "command",
+      "nullable": true
+    },
+    "default": null,
+    "required": false,
+    "doc": "A command printing the directory to bind into the container at its\nown path and start in: `PATH`, bound read-write, or `PATH:ro`,\nbound read-only. `null`, the default, runs nothing and takes the\ndirectory the launcher was started in; a consumer that wants a\nrepository's root asks git for it, with a script printing\n`git -C \"$PWD\" rev-parse --show-toplevel`. Runs on the host\nbefore launch, with the launcher's arguments after its own; a\nnon-zero exit aborts.\n\nRuns *before* `guard`, so that the gate can judge the directory\nthis resolves to rather than re-deriving one of its own.\n\nRuns as the caller, as every hook does.\n\nWhat it prints is resolved with `realpath`, must be a directory,\nand is refused if it names a `:` or a newline: a caller's path\ntravels as `PATH:MODE` lines, which either would make ambiguous.\nLater hooks see the path as `$workspace` and the mode as\n`$workspace_mode` (`ro` or `rw`). Deciding *which* directory is\nallowed is `guard`'s job, not this one's.",
+    "merge": "ordered",
+    "nixOption": true
+  },
+  {
+    "path": "binds",
+    "type": {
+      "type": "list",
+      "of": {
+        "type": "command"
+      }
+    },
+    "default": [],
+    "required": false,
+    "doc": "Commands printing more of the caller's directories to bind, one\nper line, each at its own path inside the container: `PATH`, bound\nread-only, or `PATH:rw`, bound read-write. Their outputs are\nconcatenated, in order. Empty output binds nothing, and so does\nthe default, no command.\n\nRuns after `workspace`, with `$workspace` and `$workspace_mode`\nin the environment, so it can answer \"what travels with THIS\ndirectory\" rather than having to name a fixed set. Runs as the\ncaller and gets the launcher's arguments after its own, exactly as\n`workspace` does; a non-zero exit aborts.\n\nEvery path is resolved with `realpath`, must be a directory, and is\nrefused if it names a `:` or a newline, as the workspace is.\nDeciding *which* directories are allowed is `guard`'s job: it sees\nthem as `$binds`, one `PATH:ro` or `PATH:rw` per line, with the\nmode always spelt out. The payload sees the same list as\n`$FLONG_BINDS`, to pass on to an agent's `--add-dir`.\n\nRead-only is not a boundary on its own -- it stops writes, not\nexecution -- so it is for directories a session should read rather\nthan edit, not for making an untrusted one safe.",
+    "merge": "ordered",
+    "nixOption": true
+  },
+  {
+    "path": "guard",
+    "type": {
+      "type": "list",
+      "of": {
+        "type": "command"
+      }
+    },
+    "default": [],
+    "required": false,
+    "doc": "Commands run as the caller before launch, in order, to check that\nthe launch is one this declaration means to make. A consistency\ncheck, not a gate: the session grants nothing the caller did not\nalready have, and the caller can run `flong launch` directly with\nany declaration. Setting it warns, to say so.\n\nRuns *after* `workspace` and `binds`, with their answers in its\nenvironment: `$workspace`, absolute and symlink-resolved,\n`$workspace_mode`, and `$binds`, one `PATH:ro` or `PATH:rw` per\nline. Judge those rather than re-deriving a directory from `$PWD`\n-- they are exactly what will be bound, where anything a guard\nworks out for itself agrees with the mounts only by coincidence.\n\nEach is a process of its own, with the launcher's arguments after\nits own: every one must exit 0 for the launch to go on, the first\nthat does not refuses it, and nothing a guard sets reaches the\nlauncher: it judges `$workspace` and cannot change it.\n\nIt runs again when the launcher relaunches itself, which it does\nwhen the prepared root it found was swept before it could lock\nit, so a guard that asks a question can ask it twice.",
+    "merge": "ordered",
+    "nixOption": true
+  },
+  {
+    "path": "postStart",
+    "type": {
+      "type": "list",
+      "of": {
+        "type": "command"
+      }
+    },
+    "default": [],
+    "required": false,
+    "doc": "Commands run by the launcher as the caller, in order, once per\nsession, as soon as the session's namespaces exist -- **before**\n`network` is attached and **before** the payload starts. The\npayload waits for them. `path` is on `PATH`, and each gets the\nlauncher's arguments after its own.\n\n`$leader` is the session's pid 1 as seen from the host, `$userns`\nthe session's user namespace and `$netns` its network namespace,\neach a `/proc/<launcher>/fd/<n>` descriptor the launcher holds.\n`$machine`, `$uid`, `$gid`, `$home`, `$workspace`,\n`$workspace_mode` and `$binds` are in the environment too. The\nsession's root exists only in its own mount namespace, reached as\n`/proc/$leader/root`. The hook enters the session as its root,\nwith every capability over it and none over the host:\n`nsenter --user=\"$userns\" --net=\"$netns\" nft -f ruleset.nft`.\n\n**The ordering is the contract, and it is the security property.**\nWhatever this installs into the namespace is in place before\nanything gives it egress: a session's namespace starts with `lo`\nup and an empty route table, so until egress exists the workload\nhas nowhere to go and there is no window to race. flong attaches\n`network` only after these return. A consumer that provisions\negress of its own first -- from `guard`, or from the first of\nthese -- has given the property away without any error.\n\nA non-zero exit ends the session, and the launcher exits\nnon-zero.\n\nUnlike systemd's `ExecStartPost`, the main process is not yet\nrunning: it is held until these and any `network` have finished.",
+    "merge": "ordered",
+    "nixOption": true
+  },
+  {
+    "path": "postStop",
+    "type": {
+      "type": "list",
+      "of": {
+        "type": "command"
+      }
+    },
+    "default": [],
+    "required": false,
+    "doc": "Commands run as the caller after a session ends, in order, to\nrelease whatever `postStart` made outside it. `$machine` is in the\nenvironment, and nothing else is.\n\nThey run on two paths: from the launcher once the session has\nstopped, and -- for a session whose launcher was SIGKILLed --\nfrom the sweeper in the caller's holder unit, within moments,\nwhere the machine name is all that survives. Each session records\nits own `postStop`, so the one belonging to the session is run,\neven after a rebuild.\n\nSo each must depend on `$machine` alone and succeed when what it\nreleases is already gone. `path` is on `PATH`; a non-zero exit is\nreported and otherwise ignored, because flong's own release\nfollows it.",
+    "merge": "ordered",
+    "nixOption": true
+  },
+  {
+    "path": "network",
+    "type": {
+      "type": "struct",
+      "fields": [
+        {
+          "path": "network.forwardPorts",
+          "type": {
+            "type": "either",
+            "options": [
+              {
+                "tag": "auto",
+                "type": "enum",
+                "tags": [
+                  "auto"
+                ]
+              },
+              {
+                "tag": "ports",
+                "type": "list",
+                "of": {
+                  "type": "struct",
+                  "fields": [
+                    {
+                      "path": "network.forwardPorts.*.protocol",
+                      "type": {
+                        "type": "enum",
+                        "tags": [
+                          "tcp",
+                          "udp"
+                        ]
+                      },
+                      "default": "tcp",
+                      "required": false,
+                      "doc": "The protocol forwarded.",
+                      "merge": "single",
+                      "nixOption": true
+                    },
+                    {
+                      "path": "network.forwardPorts.*.hostPort",
+                      "type": {
+                        "type": "port"
+                      },
+                      "default": null,
+                      "required": true,
+                      "doc": "Port on the host, on every address.",
+                      "merge": "single",
+                      "nixOption": true
+                    },
+                    {
+                      "path": "network.forwardPorts.*.containerPort",
+                      "type": {
+                        "type": "port",
+                        "nullable": true
+                      },
+                      "default": null,
+                      "required": false,
+                      "doc": "Port in the session; `hostPort` if null.",
+                      "merge": "single",
+                      "nixOption": true
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "default": [],
+          "required": false,
+          "doc": "Ports on the host forwarded into the session, shaped exactly\nlike `containers.<name>.forwardPorts`, bound on every host\naddress -- the host's firewall still decides who reaches them.\npasta binds them as the caller, so a port below the host's\n`net.ipv4.ip_unprivileged_port_start` is refused.\n\nA host port is one session's at a time. A second concurrent\nsession asking for the same one fails to attach its network,\nand is ended rather than left running without it.\n\n`\"auto\"`: whatever TCP port the session listens on is\npublished on the host at the same port, while it listens --\na dev server started inside is reached from the host's\nbrowser. A port another session already publishes is not,\nand that session is not ended for it.",
+          "merge": "single",
+          "nixOption": true
+        },
+        {
+          "path": "network.hostLoopbackToSession",
+          "type": {
+            "type": "bool"
+          },
+          "default": false,
+          "required": false,
+          "doc": "A forwarded connection from the host's loopback arrives on\nthe session's loopback, rather than from the session's own\naddress -- pasta's --host-lo-to-ns-lo. A dev server\nlistening on 127.0.0.1 inside is then reached at\nlocalhost on the host. It also reaches anything else the\nsession listens on only on its loopback, which is why pasta\nno longer does it by default; a connection from anywhere\nbut the host's loopback is unaffected.",
+          "merge": "single",
+          "nixOption": true
+        },
+        {
+          "path": "network.hostPorts",
+          "type": {
+            "type": "list",
+            "of": {
+              "type": "port"
+            }
+          },
+          "default": [],
+          "required": false,
+          "doc": "Ports on the host's loopback the session may reach, at the\nsame port on its own loopback: the database the host is\nrunning, say. TCP and UDP both. Nothing else on the host's\nloopback is reachable, the gateway address included.",
+          "merge": "ordered",
+          "nixOption": true
+        }
+      ],
+      "nullable": true
+    },
+    "default": null,
+    "required": false,
+    "doc": "A real network for a `privateNetwork` session, provided by\n[pasta](https://passt.top): present or absent, with no `enable` --\n`network = { };` is a session that can reach the outside world and\nno port on the host.\n\npasta rather than a veth, because flong runs many concurrent\nsessions from one declaration: a veth needs an address per session,\nforwarding, NAT and host firewall rules, and gives the sandbox\npacket-level access to spoof with. pasta needs no host interface\nand no host configuration, and hands the sandbox sockets rather than\npackets.\n\nAttached after `postStart` returns, never before, which is what\nmakes the hook's ordering hold. pasta runs as the caller, in the\nsession's cgroup, and goes with the session.\n\nAlways passed, and not options: `--no-map-gw`, because otherwise\nthe gateway address reaches the host's loopback; an explicit\n`none` for every port class not listed here, because each defaults\nto `auto`, which forwards every bound port on the other side; and\n`--config-net`.\n\nDNS goes through pasta as well, and is not an option either. The\nsession's /etc/resolv.conf is written at launch naming\n169.254.1.1 -- and 100::1, where the host names an IPv6\nnameserver -- with the host's `search`, `domain` and `options`\ncarried over. pasta catches a query sent there and re-sends it\nfrom the host to the host's own first nameserver, so a stub\nresolver on the host's loopback answers it. Both read the host's\nfile once, at launch: a host that moves networks keeps a live\nsession on the old resolver.",
+    "merge": "single",
+    "nixOption": true
+  },
+  {
+    "path": "overlays",
+    "type": {
+      "type": "pathAttrs",
+      "name": "target",
+      "value": "lower"
+    },
+    "default": {},
+    "required": false,
+    "doc": "Paths mounted as an overlay of `{ target = lower; }`: the lower\ndirectory is readable and every write goes to an upper layer that\ndies with the container.\n\noverlayfs reports changing device and inode numbers as a file is\nwritten, so this must not cover a path holding a sqlite database.\n\nAn overlay below a bind, at any depth, is allowed: a session that\nrenames its parent on the host only moves where its own writes\nland.",
+    "merge": "single",
+    "nixOption": true
+  },
+  {
+    "path": "masks",
+    "type": {
+      "type": "list",
+      "of": {
+        "type": "strMatching",
+        "pattern": "/.*"
+      }
+    },
+    "default": [],
+    "required": false,
+    "doc": "Paths in the session replaced by an empty node of the same kind\nthat nobody can read. For carving one file out of a directory a\nbind brings in whole.\n\nUSE WITH CARE. Prefer binding only what the session needs to\nbinding everything and masking the rest:\n\n- A mask is a denylist. Whatever it does not name is in, so a file\n  the host's tool starts keeping beside the masked one next\n  release -- a second token, a refresh token -- is visible from\n  the day it appears.\n- The path must exist when the session starts, or the launch\n  fails. A file that is written later, on the host, into a\n  directory that is bound through is not masked.\n- It masks the file, not the name. A host program that replaces\n  the file by renaming a new one over it -- as many write a\n  credential -- detaches the mask in every running session, and\n  the new file shows through.\n\nA mask may lie at most one level below the root of a writable\nbind: deeper, a session that can write the host directory renames\nthe masked file's parent, leaves a decoy for the mask, and reads\nthe file at the new name. A declared writable bind is checked when\nthe declaration is, and the workspace and `binds` at launch. A\nmask below a read-only bind, and a declared `tmpfs` or an overlay\nat any depth, is not checked.",
+    "merge": "ordered",
+    "nixOption": true
+  },
+  {
+    "path": "protect",
+    "type": {
+      "type": "list",
+      "of": {
+        "type": "strMatching",
+        "pattern": "/.*"
+      }
+    },
+    "default": [],
+    "required": false,
+    "doc": "Host paths no mount of a session may reach: no source may equal,\nlie inside or contain one. For a directory whose contents steer\nsessions from outside, such as a daemon's control socket.\n\nThe launch protects `/proc`, `/sys/fs/cgroup` and the user\nmanager's `bus` and `systemd` sockets as well, and the launcher its\nown state and the holder's cgroup.",
+    "merge": "ordered",
+    "nixOption": true
+  },
+  {
+    "path": "limits",
+    "type": {
+      "type": "struct",
+      "fields": [
+        {
+          "path": "limits.MemoryMax",
+          "type": {
+            "type": "either",
+            "options": [
+              {
+                "tag": "infinity",
+                "type": "enum",
+                "tags": [
+                  "infinity"
+                ]
+              },
+              {
+                "tag": "bytes",
+                "type": "int",
+                "min": 0,
+                "max": 9223372036854775807
+              },
+              {
+                "tag": "size",
+                "type": "strMatching",
+                "pattern": "[0-9]+[KMGT]"
+              }
+            ],
+            "nullable": true
+          },
+          "default": null,
+          "required": false,
+          "doc": "`memory.max`: the hard limit.",
+          "merge": "single",
+          "nixOption": true
+        },
+        {
+          "path": "limits.MemoryHigh",
+          "type": {
+            "type": "either",
+            "options": [
+              {
+                "tag": "infinity",
+                "type": "enum",
+                "tags": [
+                  "infinity"
+                ]
+              },
+              {
+                "tag": "bytes",
+                "type": "int",
+                "min": 0,
+                "max": 9223372036854775807
+              },
+              {
+                "tag": "size",
+                "type": "strMatching",
+                "pattern": "[0-9]+[KMGT]"
+              }
+            ],
+            "nullable": true
+          },
+          "default": null,
+          "required": false,
+          "doc": "`memory.high`: the throttling limit.",
+          "merge": "single",
+          "nixOption": true
+        },
+        {
+          "path": "limits.MemorySwapMax",
+          "type": {
+            "type": "either",
+            "options": [
+              {
+                "tag": "infinity",
+                "type": "enum",
+                "tags": [
+                  "infinity"
+                ]
+              },
+              {
+                "tag": "bytes",
+                "type": "int",
+                "min": 0,
+                "max": 9223372036854775807
+              },
+              {
+                "tag": "size",
+                "type": "strMatching",
+                "pattern": "[0-9]+[KMGT]"
+              }
+            ],
+            "nullable": true
+          },
+          "default": null,
+          "required": false,
+          "doc": "`memory.swap.max`.",
+          "merge": "single",
+          "nixOption": true
+        },
+        {
+          "path": "limits.TasksMax",
+          "type": {
+            "type": "either",
+            "options": [
+              {
+                "tag": "infinity",
+                "type": "enum",
+                "tags": [
+                  "infinity"
+                ]
+              },
+              {
+                "tag": "count",
+                "type": "int",
+                "min": 1,
+                "max": 9223372036854775807
+              }
+            ],
+            "nullable": true
+          },
+          "default": null,
+          "required": false,
+          "doc": "`pids.max`: processes and threads together.",
+          "merge": "single",
+          "nixOption": true
+        },
+        {
+          "path": "limits.CPUQuota",
+          "type": {
+            "type": "strMatching",
+            "pattern": "[1-9][0-9]*%",
+            "nullable": true
+          },
+          "default": null,
+          "required": false,
+          "doc": "`cpu.max`: a share of one CPU, as `N%`; `200%` is two.",
+          "merge": "single",
+          "nixOption": true
+        },
+        {
+          "path": "limits.CPUWeight",
+          "type": {
+            "type": "int",
+            "min": 1,
+            "max": 10000,
+            "nullable": true
+          },
+          "default": null,
+          "required": false,
+          "doc": "`cpu.weight`, against the caller's other processes.",
+          "merge": "single",
+          "nixOption": true
+        },
+        {
+          "path": "limits.oomGroup",
+          "type": {
+            "type": "bool"
+          },
+          "default": false,
+          "required": false,
+          "doc": "`memory.oom.group`: an OOM kill takes the whole session\nrather than one process of it.",
+          "merge": "single",
+          "nixOption": true
+        }
+      ]
+    },
+    "default": {},
+    "required": false,
+    "doc": "Opt-in resource limits for a session, written into its own\ncgroup, which the caller's user manager delegates to the\nholder unit. Named and spelt as systemd's, and unset means\nunlimited, as it does there.\n\nOnly the controllers a user manager is delegated are offered --\nmemory, pids and cpu -- so there is no `IOWeight`: with no io\ncontroller below `user@.service`, it would have nothing to write\nto.\n\nA session's root, its TMPDIR and every overlay upper layer are\ntmpfs, which is RAM: `MemoryMax` makes a payload that fills\nthem the session's problem rather than the host's.",
+    "merge": "single",
+    "nixOption": true
+  },
+  {
+    "path": "seccomp",
+    "type": {
+      "type": "struct",
+      "fields": [
+        {
+          "path": "seccomp.tier",
+          "type": {
+            "type": "enum",
+            "tags": [
+              "parity",
+              "strict"
+            ],
+            "nullable": true
+          },
+          "default": "strict",
+          "required": false,
+          "doc": "`parity` is exactly the allow-list systemd-nspawn installs\nfor a container. `strict` is parity without `@keyring`,\n`userfaultfd`, `@mount`, `io_uring_*`, `ptrace` and\n`process_vm_*`, which ordinary tools do without; strace\nand gdb need `debug`. `null` installs no allow-list, only\nthe fixed filters, and warns.",
+          "merge": "single",
+          "nixOption": true
+        },
+        {
+          "path": "seccomp.debug",
+          "type": {
+            "type": "bool"
+          },
+          "default": false,
+          "required": false,
+          "doc": "Adds `ptrace`, for strace and gdb. Its reach is the\nsession's own pid namespace.",
+          "merge": "single",
+          "nixOption": true
+        },
+        {
+          "path": "seccomp.nestedSandbox",
+          "type": {
+            "type": "bool"
+          },
+          "default": false,
+          "required": false,
+          "doc": "For a payload that sandboxes its own children, such as\nChromium's sandbox, `codex sandbox` or a nested bwrap: the\nsession may make user namespaces of its own, the namespace\nmask goes and `@mount` is allowed. All three are needed\ntogether. The payload still cannot reach the session's\nnetwork namespace.",
+          "merge": "single",
+          "nixOption": true
+        },
+        {
+          "path": "seccomp.allow",
+          "type": {
+            "type": "list",
+            "of": {
+              "type": "strMatching",
+              "pattern": "@?[a-z0-9_-]+"
+            }
+          },
+          "default": [],
+          "required": false,
+          "doc": "Syscall names or `@groups` added to the tier.",
+          "merge": "ordered",
+          "nixOption": true
+        },
+        {
+          "path": "seccomp.deny",
+          "type": {
+            "type": "list",
+            "of": {
+              "type": "strMatching",
+              "pattern": "@?[a-z0-9_-]+"
+            }
+          },
+          "default": [],
+          "required": false,
+          "doc": "Syscall names or `@groups` removed, after the tier, the\nloosenings and `allow`, which it overrides.",
+          "merge": "ordered",
+          "nixOption": true
+        },
+        {
+          "path": "seccomp.errno",
+          "type": {
+            "type": "enum",
+            "tags": [
+              "EPERM",
+              "EACCES",
+              "ENOSYS"
+            ]
+          },
+          "default": "EPERM",
+          "required": false,
+          "doc": "What a call in `@known` that the filter does not allow\nreturns. ENOSYS makes a program fall back as it would on\nan older kernel.",
+          "merge": "single",
+          "nixOption": true
+        },
+        {
+          "path": "seccomp.log",
+          "type": {
+            "type": "bool"
+          },
+          "default": false,
+          "required": false,
+          "doc": "Allows the calls `errno` would refuse and has the kernel\nlog each (audit `type=1326`, with `syscall=NR`), to learn\na policy. `scmp_sys_resolver -a x86_64 NR` names a number;\nthe names become `allow` entries or `seccompPolicy` lines.\nNot for untrusted payloads, and it warns.",
+          "merge": "single",
+          "nixOption": true
+        }
+      ]
+    },
+    "default": {},
+    "required": false,
+    "doc": "The session's syscall filter. A tier is an allow-list: the calls\nit names are allowed, the rest of systemd's `@known` get\n`errno`, and a call outside `@known` gets ENOSYS. It applies on\nx86_64, i386 and x32 alike.\n\nThree fixed filters are stacked behind it and are not options:\nthe audit mask (`socket(AF_NETLINK, ..., NETLINK_AUDIT)` gets\nEAFNOSUPPORT), the tty filter (`ioctl` TIOCSTI, TIOCLINUX,\nTIOCSETD and TIOCCONS get EPERM, in every tier and under any\nproject policy) and, unless `nestedSandbox`, the namespace mask\n(clone and unshare with a `CLONE_NEW*` flag, and setns, get\nEPERM, and clone3 ENOSYS).",
+    "merge": "single",
+    "nixOption": true
+  },
+  {
+    "path": "seccompPolicy",
+    "type": {
+      "type": "list",
+      "of": {
+        "type": "command"
+      }
+    },
+    "default": [],
+    "required": false,
+    "doc": "Commands printing a project's own changes to the `seccomp` filter,\nfor a policy that is only known at launch. Run as the caller after\n`guard`, in order, with the launcher's arguments after their own,\nthe caller's stdin and stderr, and `$workspace`,\n`$workspace_mode`, `$binds` and `$machine` in the environment.\nTheir outputs are concatenated, and read as lines of `allow X...`\nor `deny X...`, where each X is a syscall name or an `@group`.\n`#` comments and blank lines are skipped. A non-zero exit refuses\nthe launch, and so does a line that cannot be read or a name\nsystemd does not list.\n\n`$machine` is the session's name, the one `postStart` and\n`postStop` see, so anything it approves for them can be staged\nper launch rather than per checkout.\n\nThe project's lines apply to the declaration's allow-list: its\nallows are added and then its denies removed. The fixed filters\nstay, the tty filter included. The result is compiled at launch\nand cached under `$XDG_RUNTIME_DIR/flong/seccomp` by the hash of\nwhat is compiled, so a policy already seen costs a hash. Printing\nnothing compiles nothing. A relaunch runs them again.\n\nIt needs a tier to act on, and it is a consistency check in the\nway `guard` is: the caller can launch with any filter.",
+    "merge": "ordered",
+    "nixOption": true
+  },
+  {
+    "path": "container",
+    "type": {
+      "type": "string"
+    },
+    "default": null,
+    "required": true,
+    "doc": "The `containers.<name>` declaration this runs: its closure,\n`bindMounts`, `tmpfs` and `allowedDevices`, read as option values.\nIt must set `privateNetwork = true`. Under NixOS it is an option of\nits own, written by hand, whose default is the declaration's name;\nit also names the cgroup level between the holder and the\nsessions.",
+    "merge": "single",
+    "nixOption": false
+  },
+  {
+    "path": "closure",
+    "type": {
+      "type": "string"
+    },
+    "default": null,
+    "required": true,
+    "doc": "The container's system closure, the store path the session's root\nis prepared from: `containers.<name>.path`.",
+    "merge": "single",
+    "nixOption": false
+  },
+  {
+    "path": "cuid",
+    "type": {
+      "type": "int",
+      "min": 0,
+      "max": 4294967295
+    },
+    "default": null,
+    "required": true,
+    "doc": "The uid `user` has in the container's configuration, which the\ncaller's id maps and the prepared root's cache are made for. At\nmost 65535, the container's ids.",
+    "merge": "single",
+    "nixOption": false
+  },
+  {
+    "path": "cgid",
+    "type": {
+      "type": "int",
+      "min": 0,
+      "max": 4294967295
+    },
+    "default": null,
+    "required": true,
+    "doc": "The gid of `user`'s primary group in the container's\nconfiguration. At most 65535, as `cuid`.",
+    "merge": "single",
+    "nixOption": false
+  },
+  {
+    "path": "steps8",
+    "type": {
+      "type": "string"
+    },
+    "default": null,
+    "required": true,
+    "doc": "The first eight hex digits of the sha256 of the cache tool's store\npath, which references the prepare program: a change to either is\na different root, so it names a different cache.",
+    "merge": "single",
+    "nixOption": false
+  },
+  {
+    "path": "containerMounts",
+    "type": {
+      "type": "list",
+      "of": {
+        "type": "struct",
+        "fields": [
+          {
+            "path": "containerMounts.*.kind",
+            "type": {
+              "type": "enum",
+              "tags": [
+                "bind_ro",
+                "bind_rw",
+                "dev",
+                "tmpfs"
+              ]
+            },
+            "default": null,
+            "required": true,
+            "doc": "`bind_ro` and `bind_rw` are a `bindMounts` entry, `tmpfs` a\n`tmpfs` one and `dev` an `allowedDevices` node.",
+            "merge": "single",
+            "nixOption": false
+          },
+          {
+            "path": "containerMounts.*.dest",
+            "type": {
+              "type": "string"
+            },
+            "default": null,
+            "required": true,
+            "doc": "Where it is mounted in the session: the bind's `mountPoint`, the\ntmpfs's path, the device's node.",
+            "merge": "single",
+            "nixOption": false
+          },
+          {
+            "path": "containerMounts.*.src",
+            "type": {
+              "type": "string",
+              "nullable": true
+            },
+            "default": null,
+            "required": false,
+            "doc": "What is mounted, for a bind (its `hostPath`, or `mountPoint` when\nthat is null) and a device (its node); null for a tmpfs.",
+            "merge": "single",
+            "nixOption": false
+          },
+          {
+            "path": "containerMounts.*.mode",
+            "type": {
+              "type": "string",
+              "nullable": true
+            },
+            "default": null,
+            "required": false,
+            "doc": "A tmpfs's octal mode (`0755` when its options give none), or a\ndevice's modifier (`rw`, `rwm`); null for a bind.",
+            "merge": "single",
+            "nixOption": false
+          },
+          {
+            "path": "containerMounts.*.size",
+            "type": {
+              "type": "string",
+              "nullable": true
+            },
+            "default": null,
+            "required": false,
+            "doc": "A tmpfs's `size=`, as its options give it; null for none, and for\nanything but a tmpfs.",
+            "merge": "single",
+            "nixOption": false
+          },
+          {
+            "path": "containerMounts.*.ownerUser",
+            "type": {
+              "type": "bool"
+            },
+            "default": false,
+            "required": false,
+            "doc": "A tmpfs owned by the session's user, rather than root: one with no\noptions, or with `uid=` and `gid=` naming the user's.",
+            "merge": "single",
+            "nixOption": false
+          }
+        ]
+      }
+    },
+    "default": [],
+    "required": false,
+    "doc": "What the container mounts, from its `bindMounts`, `tmpfs` and\n`allowedDevices`, one entry each, in the launcher's words. The\nlaunch sorts them, parents first, so their order does not matter.",
+    "merge": "ordered",
+    "nixOption": false
+  }
+]

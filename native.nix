@@ -230,12 +230,14 @@ let
   };
 
   # The unit and property tests, and test-libc against this nixpkgs' glibc,
-  # in Debug and in ReleaseSafe.
+  # in Debug and in ReleaseSafe. build/ holds the doc harvest decl_docs.zig's
+  # tests are compiled with.
   test =
     name: optimizeFlag:
     zigSet {
       pname = "native-test-${name}";
       files = [
+        ./build
         ./src
         ./tests/zig
       ];
@@ -252,10 +254,12 @@ let
     native-test-release = test "release" "-Drelease=true";
 
     # fdlint over src/ and tests/zig/ and on its planted files, what must
-    # not compile, and zig fmt: no dependency, no -Ddev.
+    # not compile (the doc harvest's case among them), and zig fmt: no
+    # dependency, no -Ddev.
     native-lint = zigSet {
       pname = "native-lint";
       files = [
+        ./build
         ./src
         ./tests/zig
         ./tools

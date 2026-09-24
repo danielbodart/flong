@@ -32,6 +32,8 @@
 //!                 abi's aarch64 half
 //!   integration   the drivers checks.native runs (bin/flong-walker,
 //!                 bin/flong-proc), built only by tests/integration.nix
+//!   schema        decl-options.json at the package root, rewritten from
+//!                 src/decl.zig's fields and their doc comments
 //!
 //! Every path a step reads is a lazy b.path, so an install set's derivation,
 //! which holds build.zig, build.zig.zon and its own sources only, configures
@@ -203,6 +205,13 @@ pub fn build(b: *std.Build) void {
             const t = b.addTest(.{ .name = "sweeper", .root_module = Launcher.subcommands(b, target, optimize, false, LaunchPaths.dummy("/nix/store/test-only")).sweeper });
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
+        {
+            // The declaration: decl.zig's parse and load, and the schema
+            // decl_docs.zig walks out of it.
+            const d = declModules(b, modules(b, target, optimize), target, optimize, b.path("src/decl.zig"));
+            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "decl", .root_module = d.decl })).step);
+            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "decl_docs", .root_module = d.docs })).step);
+        }
         const m = modules(b, target, optimize);
         const props = b.addTest(.{
             .name = "props",
@@ -338,6 +347,20 @@ pub fn build(b: *std.Build) void {
         run.addCheck(.{ .expect_term = .{ .Exited = 1 } });
         cf_step.dependOn(&run.step);
     }
+    {
+        // A declaration field without a doc comment: the harvest of a
+        // planted decl.zig, walked by the real decl_docs.zig.
+        const planted = b.path("tests/zig/compile_fail/decl_undocumented/decl.zig");
+        const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build-obj", "-fno-emit-bin", "--dep", "decl_docs" });
+        run.addPrefixedFileArg("-Mroot=", b.path("tests/zig/compile_fail/decl_undocumented.zig"));
+        run.addArgs(&.{ "--dep", "decl", "--dep", "decl_field_docs" });
+        run.addPrefixedFileArg("-Mdecl_docs=", b.path("src/decl_docs.zig"));
+        run.addPrefixedFileArg("-Mdecl=", planted);
+        run.addPrefixedFileArg("-Mdecl_field_docs=", declFieldDocs(b, planted));
+        run.addCheck(.{ .expect_stderr_match = "declaration field 'shell' has no doc comment. Every field needs one: it is the option's only description." });
+        run.addCheck(.{ .expect_term = .{ .Exited = 1 } });
+        cf_step.dependOn(&run.step);
+    }
 
     // ---- lint: the rules the compiler and zwanzig cannot express ----
     const lint_step = b.step("lint", "Run fdlint over src/ and tests/zig/, and check it on its planted files");
@@ -412,7 +435,7 @@ pub fn build(b: *std.Build) void {
     // With no paths, addFmt runs a bare `zig fmt --check`, which exits 1
     // (Build/Step/Fmt.zig:16).
     const fmt_step = b.step("fmt", "Check the formatting of the package's Zig");
-    fmt_step.dependOn(&b.addFmt(.{ .check = true, .paths = &.{ "build.zig", "build.zig.zon", "src", "tests/zig", "tools" } }).step);
+    fmt_step.dependOn(&b.addFmt(.{ .check = true, .paths = &.{ "build.zig", "build.zig.zon", "build", "src", "tests/zig", "tools" } }).step);
 
     // ---- analyze: zwanzig ----
     // Resource models match on method name alone: receiver_type and fqn do
@@ -471,6 +494,26 @@ pub fn build(b: *std.Build) void {
             run.addCheck(.{ .expect_term = .{ .Exited = 1 } });
             analyze_step.dependOn(&run.step);
         }
+    }
+
+    // ---- schema: decl-options.json ----
+    // build/schema.zig, for the host, prints decl_docs.writeSchema, and its
+    // output replaces the checked-in file.
+    const schema_step = b.step("schema", "Write decl-options.json from src/decl.zig");
+    {
+        const d = declModules(b, modules(b, b.graph.host, .Debug), b.graph.host, .Debug, b.path("src/decl.zig"));
+        const exe = b.addExecutable(.{
+            .name = "flong-schema",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("build/schema.zig"),
+                .target = b.graph.host,
+                .optimize = .Debug,
+                .imports = &.{.{ .name = "decl_docs", .module = d.docs }},
+            }),
+        });
+        const update = b.addUpdateSourceFiles();
+        update.addCopyFileToSource(b.addRunArtifact(exe).captureStdOut(), "decl-options.json");
+        schema_step.dependOn(&update.step);
     }
 
     // ---- integration: the drivers checks.native runs ----
@@ -1428,6 +1471,45 @@ fn modules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .cgroup = cgroup,
         .record = record,
     };
+}
+
+/// The declaration's modules: `decl`, src/decl.zig or a planted one in its
+/// place, and `docs`, src/decl_docs.zig over it with its harvested doc
+/// comments.
+const Decl = struct { decl: *std.Build.Module, docs: *std.Build.Module };
+
+fn declModules(b: *std.Build, m: Modules, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, src: std.Build.LazyPath) Decl {
+    const decl = b.createModule(.{
+        .root_source_file = src,
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "fd", .module = m.fd }, .{ .name = "msg", .module = m.msg } },
+    });
+    const docs = b.createModule(.{
+        .root_source_file = b.path("src/decl_docs.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "decl", .module = decl }},
+    });
+    docs.addAnonymousImport("decl_field_docs", .{ .root_source_file = declFieldDocs(b, src) });
+    return .{ .decl = decl, .docs = docs };
+}
+
+/// build/gen_decl_docs.zig, for the host, over `src`: each field's doc
+/// comment, as decl_field_docs.zig. `@typeInfo` cannot see a doc comment,
+/// so this parses the source (build/gen_decl_docs.zig says why).
+fn declFieldDocs(b: *std.Build, src: std.Build.LazyPath) std.Build.LazyPath {
+    const gen = b.addExecutable(.{
+        .name = "gen-decl-docs",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("build/gen_decl_docs.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run = b.addRunArtifact(gen);
+    run.addFileArg(src);
+    return run.addOutputFileArg("decl_field_docs.zig");
 }
 
 /// flong-walker (tests/zig/walker.zig): the mount helper's walk, masks and
