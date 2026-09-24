@@ -599,6 +599,16 @@ pub fn openUserns(pid: sys.pid_t) Error!sys.Result(Fd(.userns)) {
     return adopted(.userns, sys.openat(sys.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0));
 }
 
+/// /proc/<pid>/ns/net, O_RDONLY|O_CLOEXEC (flong-launch.c:517-521): the
+/// network namespace of the session's pid 1, opened by its number as the C
+/// opens it, right after its pidfd.
+pub fn openNetns(pid: sys.pid_t) Error!sys.Result(Fd(.netns)) {
+    var buf: [32]u8 = undefined;
+    // "/proc/" and an i32 and "/ns/net" are at most 24 bytes.
+    const path = std.fmt.bufPrintZ(&buf, "/proc/{d}/ns/net", .{pid}) catch unreachable; // proven: 24 < 32
+    return adopted(.netns, sys.openat(sys.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0));
+}
+
 /// memfd_create(name, MFD_CLOEXEC) (flong-launch.c:616): a file with
 /// nothing on disk, as pasta's pid file is.
 pub fn memfd(name: [*:0]const u8) Error!sys.Result(File) {

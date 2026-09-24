@@ -1,9 +1,8 @@
 //! tty.zig: the caller's terminal, and the launcher's wait for bwrap
 //! (ZIG.md, "Phase 7", L3): a port of launcher/flong-tty.c, as far as the
-//! launcher uses it (flong-launch.c:386, 394, 686-692, 713, 762, 790). It
-//! is not yet built into the launcher: the installed flong-launch is still
-//! the C, and this module runs only in its tests and in flong-tty
-//! (tests/zig/ttydriver.zig), checks.native's pty driver.
+//! launcher uses it (flong-launch.c:386, 394, 686-692, 713, 762, 790).
+//! src/launch.zig makes those calls since L4; flong-tty
+//! (tests/zig/ttydriver.zig), checks.native's pty driver, makes them too.
 //!
 //! Two modes, chosen once in `prepare`. In a relay the payload has a pty of
 //! its own, the caller's terminal is raw while the payload runs, and the

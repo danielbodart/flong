@@ -4,8 +4,9 @@
 //!
 //!   install       -Dset=seccomp (flong-seccomp and its subcommands; needs
 //!                 -Dself, the project key's compiler path), launcher
-//!                 (flong-init and flong-sweeper; needs -Dtini, the tini
-//!                 flong-init execs; the C beside them is native.nix's) or
+//!                 (flong-launch, flong-init and flong-sweeper; needs
+//!                 -Dtini, the tini flong-init execs, and flong-launch's
+//!                 -Dbwrap, -Dinit, -Dpasta, -Dnewuidmap and -Dnewgidmap) or
 //!                 fixtures (the tests' programs, src/fixtures/: bpfdump,
 //!                 linked with libc and libseccomp; syscall-probe, swapper
 //!                 and ioctl-probe, static and without libc)
@@ -28,7 +29,8 @@
 //!   cross         flong-seccomp and bpfdump compiled for aarch64-linux,
 //!                 not linked, flong-init (with a dummy tini),
 //!                 flong-sweeper, syscall-probe, swapper and ioctl-probe
-//!                 built for it (in cross/),
+//!                 built for it (in cross/), flong-launch (with dummy
+//!                 paths) too,
 //!                 the mount library for it (cross/libflong-mount.a), and
 //!                 abi's aarch64 half
 //!   mountlib      lib/libflong-mount.a, the Zig mount helper the C launcher
@@ -61,6 +63,9 @@ pub fn build(b: *std.Build) void {
     // that needs it, as flong-init.c:52-54's #error does.
     const self = b.option([]const u8, "self", "flong-seccomp's own store path, the seccomp derivation's $out");
     const tini = b.option([]const u8, "tini", "tini's store path, which flong-init execs");
+    // flong-launch's compiled-in programs (FLONG_BWRAP and the rest in the
+    // C launcher): all five, or the launcher set's install fails.
+    const launch_paths = LaunchPaths.read(b);
     const abi_plant = b.option(AbiPlant, "abi-plant", "Plant a mismatch in tests/zig/abi.zig: arch, offset") orelse .none;
 
     // ---- install ----
@@ -542,6 +547,11 @@ pub fn build(b: *std.Build) void {
             .dest_dir = .{ .override = .{ .custom = "cross" } },
         });
         cross_step.dependOn(&arm_sweeper.step);
+        // And flong-launch, with dummy paths.
+        const arm_launch = b.addInstallArtifact(launchExe(b, arm, optimize, LaunchPaths.dummy("/nix/store/cross-check-only")), .{
+            .dest_dir = .{ .override = .{ .custom = "cross" } },
+        });
+        cross_step.dependOn(&arm_launch.step);
         // The mount library for aarch64: native.nix's cross-aarch64 reads
         // its symbols; the aarch64 C link is unchecked (ZIG.md, "The
         // mount-helper shim").
@@ -603,28 +613,37 @@ pub fn build(b: *std.Build) void {
     }
 
     // ---- launcher (phase 7) ----
-    // Phase 7's milestones, on trunk (ZIG.md, "How it runs"): until L4 the
-    // Zig launcher's code is built and tested from this block only.
-    // L1, the spec: src/spec.zig and a first src/launch.zig, not yet built
-    // into the launcher.
+    // Phase 7's milestones, on trunk (ZIG.md, "How it runs"). L4 builds the
+    // Zig flong-launch into the launcher set (src/launch.zig composing
+    // src/launch/'s pieces, spec, ns, cgroup, record, tty and mount; the
+    // modules are file-scope `Launcher` and `Terminal`, below); the C
+    // launcher is built only by tests/integration.nix, as flong-launch-c,
+    // until L5 deletes it. The steps of this block:
     //
-    //   test        (-Ddev=true) spec.zig's and launch.zig's own tests, and
-    //               tests/zig/spec_test.zig: bwrapArgv's golden argv per
-    //               branch, the model property, each single-rule mutation
-    //   spec-probe  bin/spec-probe: src/launch.zig as far as L1 goes (root
-    //               refused, the spec parsed, the launcher's exit), built
-    //               only by tests/integration.nix, for golden's spec set
-    //   test-paths  tests/golden/paths.txt against the launcher's functions
-    //               (tests/zig/paths.zig), run only by tests/integration.nix
-    //
-    // L2, namespaces, cgroups, records, passwd: src/ns.zig, src/passwd.zig
-    // and the launch's halves of src/cgroup.zig and src/record.zig, which
-    // import more than trunk's `modules` gives cgroup (proc, passwd): the
-    // launch's graph is `Launcher.launchModules`'s, not yet built into the
-    // launcher.
-    //
-    //   test           (-Ddev=true) ns.zig's and passwd.zig's own tests,
+    //   install        (-Dset=launcher) bin/flong-launch
+    //   test           (-Ddev=true) spec.zig's and launch.zig's own tests,
+    //                  and tests/zig/spec_test.zig: bwrapArgv's golden argv
+    //                  per branch, the model property, each single-rule
+    //                  mutation; ns.zig's and passwd.zig's own tests,
     //                  cgroup.zig's and record.zig's in the launch's graph
+    //                  (`Launcher.launchModules`, whose cgroup imports proc
+    //                  and passwd); src/launch/childpid.zig's own tests and
+    //                  tests/zig/childpid_test.zig (the info loop over any
+    //                  chunking, the 4095-byte bound, each refusal, the fuzz
+    //                  and its corpus, tests/zig/corpus/launch-childpid/);
+    //                  tests/zig/prologue_test.zig, against the spawn probe
+    //                  (flong-proc) for relaunch's exec;
+    //                  tests/zig/bwrap_test.zig (bwrap.spawn against
+    //                  flong-fake-bwrap, tests/zig/fakebwrap.zig: its argv
+    //                  per branch, what it holds, checkpoint 2's list;
+    //                  sig.awaitFdOrExit); tests/zig/pasta_hook_test.zig
+    //                  (the hook's and pasta's Spawns against golden tables
+    //                  read from flong-launch.c:586-675)
+    //   analyze        (-Ddev=true) B27 and B28 in tests/zig/analyze/
+    //                  bugs.zig, bwrap.spawn's planted bugs
+    //   test-paths     tests/golden/paths.txt against the launcher's
+    //                  functions (tests/zig/paths.zig), run only by
+    //                  tests/integration.nix
     //   test-launch    tests/zig/launch_test.zig: the record writer against
     //                  tests/golden/records/, the name taken, the cache
     //                  lock, the session made and undone; run only by
@@ -633,278 +652,18 @@ pub fn build(b: *std.Build) void {
     //   test-libc      tests/zig/libc_launch.zig: cgroup.mountinfo against
     //                  cg_check_nsdelegate over the same text
     //                  (tests/zig/mountinfo_c.c), sys.O_TMPFILE against
-    //                  glibc's fcntl.h
+    //                  glibc's fcntl.h; tests/zig/libc_hookenv.zig:
+    //                  hook.env against glibc's setenv
     //   launch-driver  bin/flong-launch-driver (tests/zig/launchdriver.zig),
     //                  built only by tests/integration.nix, for checks.native
-    //
-    // L4's pieces, each a module under src/launch/ with explicit
-    // parameters, built ahead of the launch and not yet imported by it:
-    //
-    //   test        (-Ddev=true) src/launch/childpid.zig's own tests, and
-    //               tests/zig/childpid_test.zig: the info loop over any
-    //               chunking, the 4095-byte bound, each refusal's message,
-    //               and the fuzz with its corpus
-    //               (tests/zig/corpus/launch-childpid/)
-    //
-    // L4, the prologue's pieces: src/launch/prologue.zig (relaunch,
-    // cacheLock, closeUntracked, canonical and protectPaths), not yet built
-    // into the launcher.
-    //
-    //   test        (-Ddev=true) tests/zig/prologue_test.zig, against the
-    //               spawn probe (flong-proc) for relaunch's exec
-    //
-    // L4's pieces, written ahead of the launch, each a module under
-    // src/launch/ with its own test, not yet built into the launcher:
-    //
-    //   test        (-Ddev=true) tests/zig/bwrap_test.zig: launch/bwrap.zig's
-    //               spawn against flong-fake-bwrap (tests/zig/fakebwrap.zig),
-    //               its argv per branch and what it holds, checkpoint 2's
-    //               list; sig.awaitFdOrExit
-    //   analyze     (-Ddev=true) B27 and B28 in tests/zig/analyze/bugs.zig,
-    //               bwrap.spawn's planted bugs (the `spawn` model)
-    //
-    // L4's pieces, each a module under src/launch/ the root composes, not
-    // yet built into the launcher:
-    //
-    //   test        (-Ddev=true) tests/zig/pasta_hook_test.zig: the hook's
-    //               and pasta's Spawns, argv and envp against golden tables
-    //               read from flong-launch.c:586-675
-    //   test-libc   tests/zig/libc_hookenv.zig: hook.env against glibc's
-    //               setenv over random environments
+    if (set == .launcher) {
+        if (launch_paths) |lp| {
+            b.installArtifact(launchExe(b, target, optimize, lp));
+        } else {
+            install.dependOn(&b.addFail("-Dset=launcher needs -Dbwrap, -Dinit, -Dpasta, -Dnewuidmap and -Dnewgidmap, flong-launch's programs").step);
+        }
+    }
     {
-        const Launcher = struct {
-            /// src/spec.zig over `m`'s modules.
-            fn specModule(bb: *std.Build, m: Modules, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
-                return bb.createModule(.{
-                    .root_source_file = bb.path("src/spec.zig"),
-                    .target = t,
-                    .optimize = o,
-                    .imports = &.{
-                        .{ .name = "sys", .module = m.sys },
-                        .{ .name = "fd", .module = m.fd },
-                        .{ .name = "msg", .module = m.msg },
-                        .{ .name = "proc", .module = m.proc },
-                        .{ .name = "names", .module = m.names },
-                        .{ .name = "mount", .module = m.mount },
-                    },
-                });
-            }
-
-            /// flong-launch's root module (src/launch.zig; ZIG.md, "Per
-            /// binary"), no libc: static. Stripped for an installed
-            /// artifact; a test's is not (a stripped module in an
-            /// unstripped Debug test crashes the compiler).
-            fn launchModule(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, strip: bool) *std.Build.Module {
-                const m = modules(bb, t, o);
-                return bb.createModule(.{
-                    .root_source_file = bb.path("src/launch.zig"),
-                    .target = t,
-                    .optimize = o,
-                    .strip = strip,
-                    .single_threaded = true,
-                    .imports = &.{
-                        .{ .name = "sys", .module = m.sys },
-                        .{ .name = "msg", .module = m.msg },
-                        .{ .name = "sig", .module = m.sig },
-                        .{ .name = "proc", .module = m.proc },
-                        .{ .name = "spec", .module = specModule(bb, m, t, o) },
-                    },
-                });
-            }
-
-            /// The launch's modules: trunk's `modules`, and passwd, cgroup
-            /// and record again with the launch's imports (cgroup's launch
-            /// half needs proc and passwd), spec and ns. A compilation
-            /// takes cgroup and record from here only, never from `m`.
-            const Launch = struct {
-                m: Modules,
-                passwd: *std.Build.Module,
-                cgroup: *std.Build.Module,
-                record: *std.Build.Module,
-                spec: *std.Build.Module,
-                ns: *std.Build.Module,
-            };
-
-            fn launchModules(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) Launch {
-                const m = modules(bb, t, o);
-                const passwd = bb.createModule(.{
-                    .root_source_file = bb.path("src/passwd.zig"),
-                    .target = t,
-                    .optimize = o,
-                    .imports = &.{.{ .name = "fd", .module = m.fd }},
-                });
-                const cgroup = bb.createModule(.{
-                    .root_source_file = bb.path("src/cgroup.zig"),
-                    .target = t,
-                    .optimize = o,
-                    .imports = &.{
-                        .{ .name = "sys", .module = m.sys },
-                        .{ .name = "fd", .module = m.fd },
-                        .{ .name = "msg", .module = m.msg },
-                        .{ .name = "sig", .module = m.sig },
-                        .{ .name = "names", .module = m.names },
-                        .{ .name = "proc", .module = m.proc },
-                        .{ .name = "passwd", .module = passwd },
-                    },
-                });
-                const record = bb.createModule(.{
-                    .root_source_file = bb.path("src/record.zig"),
-                    .target = t,
-                    .optimize = o,
-                    .imports = &.{
-                        .{ .name = "sys", .module = m.sys },
-                        .{ .name = "fd", .module = m.fd },
-                        .{ .name = "msg", .module = m.msg },
-                        .{ .name = "sig", .module = m.sig },
-                        .{ .name = "num", .module = m.num },
-                        .{ .name = "proc", .module = m.proc },
-                        .{ .name = "names", .module = m.names },
-                        .{ .name = "cgroup", .module = cgroup },
-                    },
-                });
-                const spec = specModule(bb, m, t, o);
-                const ns = bb.createModule(.{
-                    .root_source_file = bb.path("src/ns.zig"),
-                    .target = t,
-                    .optimize = o,
-                    .imports = &.{
-                        .{ .name = "sys", .module = m.sys },
-                        .{ .name = "fd", .module = m.fd },
-                        .{ .name = "msg", .module = m.msg },
-                        .{ .name = "sig", .module = m.sig },
-                        .{ .name = "proc", .module = m.proc },
-                        .{ .name = "spec", .module = spec },
-                    },
-                });
-                return .{ .m = m, .passwd = passwd, .cgroup = cgroup, .record = record, .spec = spec, .ns = ns };
-            }
-
-            /// flong-launch-driver (tests/zig/launchdriver.zig): the
-            /// launch's halves driven from a shell in checks.native. Static,
-            /// no libc, stripped, no stack size, as an installed artifact.
-            fn launchDriver(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Step.Compile {
-                const l = launchModules(bb, t, o);
-                const exe = bb.addExecutable(.{
-                    .name = "flong-launch-driver",
-                    .root_module = bb.createModule(.{
-                        .root_source_file = bb.path("tests/zig/launchdriver.zig"),
-                        .target = t,
-                        .optimize = o,
-                        .strip = true,
-                        .single_threaded = true,
-                        .imports = &.{
-                            .{ .name = "sys", .module = l.m.sys },
-                            .{ .name = "fd", .module = l.m.fd },
-                            .{ .name = "msg", .module = l.m.msg },
-                            .{ .name = "sig", .module = l.m.sig },
-                            .{ .name = "proc", .module = l.m.proc },
-                            .{ .name = "spec", .module = l.spec },
-                            .{ .name = "ns", .module = l.ns },
-                            .{ .name = "cgroup", .module = l.cgroup },
-                            .{ .name = "record", .module = l.record },
-                            .{ .name = "passwd", .module = l.passwd },
-                        },
-                    }),
-                });
-                exe.stack_size = 0;
-                return exe;
-            }
-
-            /// src/launch/childpid.zig (step 13, bwrap's child-pid) over
-            /// `m`'s modules.
-            fn childpidModule(bb: *std.Build, m: Modules, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
-                return bb.createModule(.{
-                    .root_source_file = bb.path("src/launch/childpid.zig"),
-                    .target = t,
-                    .optimize = o,
-                    .imports = &.{
-                        .{ .name = "sys", .module = m.sys },
-                        .{ .name = "msg", .module = m.msg },
-                        .{ .name = "sig", .module = m.sig },
-                    },
-                });
-            }
-
-            /// src/launch/prologue.zig over the launch's modules (record
-            /// from `l`, as launchModules requires): checkpoint 1's pieces
-            /// (L4).
-            fn prologueModule(bb: *std.Build, l: Launch, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
-                const m = l.m;
-                return bb.createModule(.{
-                    .root_source_file = bb.path("src/launch/prologue.zig"),
-                    .target = t,
-                    .optimize = o,
-                    .imports = &.{
-                        .{ .name = "sys", .module = m.sys },
-                        .{ .name = "fd", .module = m.fd },
-                        .{ .name = "msg", .module = m.msg },
-                        .{ .name = "sig", .module = m.sig },
-                        .{ .name = "proc", .module = m.proc },
-                        .{ .name = "record", .module = l.record },
-                    },
-                });
-            }
-
-            /// src/launch/bwrap.zig over `m`'s modules and `spec`.
-            fn bwrapModule(bb: *std.Build, m: Modules, spec: *std.Build.Module, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
-                return bb.createModule(.{
-                    .root_source_file = bb.path("src/launch/bwrap.zig"),
-                    .target = t,
-                    .optimize = o,
-                    .imports = &.{
-                        .{ .name = "fd", .module = m.fd },
-                        .{ .name = "msg", .module = m.msg },
-                        .{ .name = "proc", .module = m.proc },
-                        .{ .name = "spec", .module = spec },
-                    },
-                });
-            }
-
-            /// flong-fake-bwrap (tests/zig/fakebwrap.zig): bwrap's stand-in
-            /// for bwrap_test. Static, no libc, stripped.
-            fn fakeBwrap(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Step.Compile {
-                const exe = bb.addExecutable(.{
-                    .name = "flong-fake-bwrap",
-                    .root_module = bb.createModule(.{
-                        .root_source_file = bb.path("tests/zig/fakebwrap.zig"),
-                        .target = t,
-                        .optimize = o,
-                        .strip = true,
-                        .single_threaded = true,
-                    }),
-                });
-                exe.stack_size = 0;
-                return exe;
-            }
-
-            /// One of L4's pieces, src/launch/<name>.zig, over `m`'s
-            /// modules and `spec`.
-            fn pieceModule(bb: *std.Build, m: Modules, spec: *std.Build.Module, name: []const u8, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
-                return bb.createModule(.{
-                    .root_source_file = bb.path(bb.fmt("src/launch/{s}.zig", .{name})),
-                    .target = t,
-                    .optimize = o,
-                    .imports = &.{
-                        .{ .name = "sys", .module = m.sys },
-                        .{ .name = "fd", .module = m.fd },
-                        .{ .name = "msg", .module = m.msg },
-                        .{ .name = "proc", .module = m.proc },
-                        .{ .name = "spec", .module = spec },
-                    },
-                });
-            }
-
-            /// A directory in the store that exists wherever this builds:
-            /// the one holding the zig that runs it. Null outside a store.
-            fn storeDir(bb: *std.Build) ?[]const u8 {
-                const exe = std.fs.realpathAlloc(bb.allocator, bb.graph.zig_exe) catch return null;
-                const prefix = "/nix/store/";
-                if (!std.mem.startsWith(u8, exe, prefix)) return null;
-                const end = std.mem.indexOfScalarPos(u8, exe, prefix.len, '/') orelse exe.len;
-                return exe[0..end];
-            }
-        };
-
         if (dev) {
             const m = modules(b, target, optimize);
             const sm = Launcher.specModule(b, m, target, optimize);
@@ -981,7 +740,7 @@ pub fn build(b: *std.Build) void {
                     test_step.dependOn(&b.addRunArtifact(t).step);
                 }
                 {
-                    const t = b.addTest(.{ .name = "launch", .root_module = Launcher.launchModule(b, target, optimize, false) });
+                    const t = b.addTest(.{ .name = "launch", .root_module = Launcher.launchModule(b, target, optimize, false, LaunchPaths.dummy("/nix/store/test-only")) });
                     test_step.dependOn(&b.addRunArtifact(t).step);
                 }
                 {
@@ -1129,12 +888,6 @@ pub fn build(b: *std.Build) void {
         const driver_step = b.step("launch-driver", "Build bin/flong-launch-driver, the launch's halves for checks.native");
         driver_step.dependOn(&b.addInstallArtifact(Launcher.launchDriver(b, target, optimize), .{}).step);
 
-        const probe_step = b.step("spec-probe", "Build bin/spec-probe, src/launch.zig as far as L1 goes, for golden's spec set");
-        const probe = b.addExecutable(.{ .name = "spec-probe", .root_module = Launcher.launchModule(b, target, optimize, true) });
-        // No stack size in PT_GNU_STACK, as every installed artifact.
-        probe.stack_size = 0;
-        probe_step.dependOn(&b.addInstallArtifact(probe, .{}).step);
-
         const paths_step = b.step("test-paths", "Check tests/golden/paths.txt against the launcher's functions");
         {
             const m = modules(b, target, optimize);
@@ -1151,7 +904,7 @@ pub fn build(b: *std.Build) void {
             paths_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "paths", .root_module = root })).step);
         }
     }
-    // L3, the terminal: src/tty.zig, not yet built into the launcher.
+    // L3, the terminal: src/tty.zig (built into the launcher since L4).
     //
     //   test         (-Ddev=true) tty.zig's own tests, and
     //                tests/zig/tty_test.zig: the pty path, the ^] detector's
@@ -1162,24 +915,6 @@ pub fn build(b: *std.Build) void {
     // The terminal's minting functions' planted bugs are B24-B26 in
     // tests/zig/analyze/bugs.zig, checked by analyze above.
     {
-        const Terminal = struct {
-            /// src/tty.zig over `m`'s modules.
-            fn module(bb: *std.Build, m: Modules, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
-                return bb.createModule(.{
-                    .root_source_file = bb.path("src/tty.zig"),
-                    .target = t,
-                    .optimize = o,
-                    .imports = &.{
-                        .{ .name = "sys", .module = m.sys },
-                        .{ .name = "fd", .module = m.fd },
-                        .{ .name = "msg", .module = m.msg },
-                        .{ .name = "sig", .module = m.sig },
-                        .{ .name = "proc", .module = m.proc },
-                    },
-                });
-            }
-        };
-
         if (dev) {
             if (b.lazyDependency("minish", .{ .target = target, .optimize = optimize })) |minish| {
                 {
@@ -1266,6 +1001,326 @@ pub fn build(b: *std.Build) void {
         }
     }
     // ---- end of launcher (phase 7) ----
+}
+
+// ---- launcher (phase 7): the modules of flong-launch's graph ----
+
+const Launcher = struct {
+    /// src/spec.zig over `m`'s modules.
+    fn specModule(bb: *std.Build, m: Modules, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+        return bb.createModule(.{
+            .root_source_file = bb.path("src/spec.zig"),
+            .target = t,
+            .optimize = o,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "fd", .module = m.fd },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "proc", .module = m.proc },
+                .{ .name = "names", .module = m.names },
+                .{ .name = "mount", .module = m.mount },
+            },
+        });
+    }
+
+    /// flong-launch's root module (src/launch.zig; ZIG.md, "Per
+    /// binary"), no libc: static, over one set of modules, so every
+    /// module shares fd's one table: the launch's graph
+    /// (`launchModules`), tty, and src/launch/'s pieces, with the
+    /// compiled-in programs as `config`. Stripped for an installed
+    /// artifact; a test's is not (a stripped module in an unstripped
+    /// Debug test crashes the compiler).
+    fn launchModule(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, strip: bool, lp: LaunchPaths) *std.Build.Module {
+        const l = launchModules(bb, t, o);
+        const m = l.m;
+        const config = bb.addOptions();
+        inline for (@typeInfo(LaunchPaths).@"struct".fields) |f| config.addOption([]const u8, f.name, @field(lp, f.name));
+        return bb.createModule(.{
+            .root_source_file = bb.path("src/launch.zig"),
+            .target = t,
+            .optimize = o,
+            .strip = strip,
+            .single_threaded = true,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "fd", .module = m.fd },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "sig", .module = m.sig },
+                .{ .name = "proc", .module = m.proc },
+                .{ .name = "mount", .module = m.mount },
+                .{ .name = "spec", .module = l.spec },
+                .{ .name = "ns", .module = l.ns },
+                .{ .name = "cgroup", .module = l.cgroup },
+                .{ .name = "record", .module = l.record },
+                .{ .name = "tty", .module = Terminal.module(bb, m, t, o) },
+                .{ .name = "prologue", .module = prologueModule(bb, l, t, o) },
+                .{ .name = "bwrap", .module = bwrapModule(bb, m, l.spec, t, o) },
+                .{ .name = "childpid", .module = childpidModule(bb, m, t, o) },
+                .{ .name = "hook", .module = pieceModule(bb, m, l.spec, "hook", t, o) },
+                .{ .name = "pasta", .module = pieceModule(bb, m, l.spec, "pasta", t, o) },
+                .{ .name = "config", .module = config.createModule() },
+            },
+        });
+    }
+
+    /// The launch's modules: trunk's `modules`, and passwd, cgroup
+    /// and record again with the launch's imports (cgroup's launch
+    /// half needs proc and passwd), spec and ns. A compilation
+    /// takes cgroup and record from here only, never from `m`.
+    const Launch = struct {
+        m: Modules,
+        passwd: *std.Build.Module,
+        cgroup: *std.Build.Module,
+        record: *std.Build.Module,
+        spec: *std.Build.Module,
+        ns: *std.Build.Module,
+    };
+
+    fn launchModules(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) Launch {
+        const m = modules(bb, t, o);
+        const passwd = bb.createModule(.{
+            .root_source_file = bb.path("src/passwd.zig"),
+            .target = t,
+            .optimize = o,
+            .imports = &.{.{ .name = "fd", .module = m.fd }},
+        });
+        const cgroup = bb.createModule(.{
+            .root_source_file = bb.path("src/cgroup.zig"),
+            .target = t,
+            .optimize = o,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "fd", .module = m.fd },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "sig", .module = m.sig },
+                .{ .name = "names", .module = m.names },
+                .{ .name = "proc", .module = m.proc },
+                .{ .name = "passwd", .module = passwd },
+            },
+        });
+        const record = bb.createModule(.{
+            .root_source_file = bb.path("src/record.zig"),
+            .target = t,
+            .optimize = o,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "fd", .module = m.fd },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "sig", .module = m.sig },
+                .{ .name = "num", .module = m.num },
+                .{ .name = "proc", .module = m.proc },
+                .{ .name = "names", .module = m.names },
+                .{ .name = "cgroup", .module = cgroup },
+            },
+        });
+        const spec = specModule(bb, m, t, o);
+        const ns = bb.createModule(.{
+            .root_source_file = bb.path("src/ns.zig"),
+            .target = t,
+            .optimize = o,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "fd", .module = m.fd },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "sig", .module = m.sig },
+                .{ .name = "proc", .module = m.proc },
+                .{ .name = "spec", .module = spec },
+            },
+        });
+        return .{ .m = m, .passwd = passwd, .cgroup = cgroup, .record = record, .spec = spec, .ns = ns };
+    }
+
+    /// flong-launch-driver (tests/zig/launchdriver.zig): the
+    /// launch's halves driven from a shell in checks.native. Static,
+    /// no libc, stripped, no stack size, as an installed artifact.
+    fn launchDriver(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+        const l = launchModules(bb, t, o);
+        const exe = bb.addExecutable(.{
+            .name = "flong-launch-driver",
+            .root_module = bb.createModule(.{
+                .root_source_file = bb.path("tests/zig/launchdriver.zig"),
+                .target = t,
+                .optimize = o,
+                .strip = true,
+                .single_threaded = true,
+                .imports = &.{
+                    .{ .name = "sys", .module = l.m.sys },
+                    .{ .name = "fd", .module = l.m.fd },
+                    .{ .name = "msg", .module = l.m.msg },
+                    .{ .name = "sig", .module = l.m.sig },
+                    .{ .name = "proc", .module = l.m.proc },
+                    .{ .name = "spec", .module = l.spec },
+                    .{ .name = "ns", .module = l.ns },
+                    .{ .name = "cgroup", .module = l.cgroup },
+                    .{ .name = "record", .module = l.record },
+                    .{ .name = "passwd", .module = l.passwd },
+                },
+            }),
+        });
+        exe.stack_size = 0;
+        return exe;
+    }
+
+    /// src/launch/childpid.zig (step 13, bwrap's child-pid) over
+    /// `m`'s modules.
+    fn childpidModule(bb: *std.Build, m: Modules, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+        return bb.createModule(.{
+            .root_source_file = bb.path("src/launch/childpid.zig"),
+            .target = t,
+            .optimize = o,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "sig", .module = m.sig },
+            },
+        });
+    }
+
+    /// src/launch/prologue.zig over the launch's modules (record
+    /// from `l`, as launchModules requires): checkpoint 1's pieces
+    /// (L4).
+    fn prologueModule(bb: *std.Build, l: Launch, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+        const m = l.m;
+        return bb.createModule(.{
+            .root_source_file = bb.path("src/launch/prologue.zig"),
+            .target = t,
+            .optimize = o,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "fd", .module = m.fd },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "sig", .module = m.sig },
+                .{ .name = "proc", .module = m.proc },
+                .{ .name = "record", .module = l.record },
+            },
+        });
+    }
+
+    /// src/launch/bwrap.zig over `m`'s modules and `spec`.
+    fn bwrapModule(bb: *std.Build, m: Modules, spec: *std.Build.Module, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+        return bb.createModule(.{
+            .root_source_file = bb.path("src/launch/bwrap.zig"),
+            .target = t,
+            .optimize = o,
+            .imports = &.{
+                .{ .name = "fd", .module = m.fd },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "proc", .module = m.proc },
+                .{ .name = "spec", .module = spec },
+            },
+        });
+    }
+
+    /// flong-fake-bwrap (tests/zig/fakebwrap.zig): bwrap's stand-in
+    /// for bwrap_test. Static, no libc, stripped.
+    fn fakeBwrap(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+        const exe = bb.addExecutable(.{
+            .name = "flong-fake-bwrap",
+            .root_module = bb.createModule(.{
+                .root_source_file = bb.path("tests/zig/fakebwrap.zig"),
+                .target = t,
+                .optimize = o,
+                .strip = true,
+                .single_threaded = true,
+            }),
+        });
+        exe.stack_size = 0;
+        return exe;
+    }
+
+    /// One of L4's pieces, src/launch/<name>.zig, over `m`'s
+    /// modules and `spec`.
+    fn pieceModule(bb: *std.Build, m: Modules, spec: *std.Build.Module, name: []const u8, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+        return bb.createModule(.{
+            .root_source_file = bb.path(bb.fmt("src/launch/{s}.zig", .{name})),
+            .target = t,
+            .optimize = o,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "fd", .module = m.fd },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "proc", .module = m.proc },
+                .{ .name = "spec", .module = spec },
+            },
+        });
+    }
+
+    /// A directory in the store that exists wherever this builds:
+    /// the one holding the zig that runs it. Null outside a store.
+    fn storeDir(bb: *std.Build) ?[]const u8 {
+        const exe = std.fs.realpathAlloc(bb.allocator, bb.graph.zig_exe) catch return null;
+        const prefix = "/nix/store/";
+        if (!std.mem.startsWith(u8, exe, prefix)) return null;
+        const end = std.mem.indexOfScalarPos(u8, exe, prefix.len, '/') orelse exe.len;
+        return exe[0..end];
+    }
+};
+
+const Terminal = struct {
+    /// src/tty.zig over `m`'s modules.
+    fn module(bb: *std.Build, m: Modules, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+        return bb.createModule(.{
+            .root_source_file = bb.path("src/tty.zig"),
+            .target = t,
+            .optimize = o,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "fd", .module = m.fd },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "sig", .module = m.sig },
+                .{ .name = "proc", .module = m.proc },
+            },
+        });
+    }
+};
+
+/// flong-launch's compiled-in programs (flong-launch.c's FLONG_BWRAP,
+/// FLONG_INIT, FLONG_PASTA, FLONG_NEWUIDMAP and FLONG_NEWGIDMAP): options
+/// with no default, as -Dtini.
+const LaunchPaths = struct {
+    bwrap: []const u8,
+    init: []const u8,
+    pasta: []const u8,
+    newuidmap: []const u8,
+    newgidmap: []const u8,
+
+    /// All five, or null when one is missing.
+    fn read(b: *std.Build) ?LaunchPaths {
+        const bwrap = b.option([]const u8, "bwrap", "bwrap's store path, which flong-launch runs");
+        const init_path = b.option([]const u8, "init", "flong-init's store path, bwrap's payload");
+        const pasta = b.option([]const u8, "pasta", "pasta's store path");
+        const newuidmap = b.option([]const u8, "newuidmap", "newuidmap, NixOS's setuid wrapper");
+        const newgidmap = b.option([]const u8, "newgidmap", "newgidmap, NixOS's setuid wrapper");
+        return .{
+            .bwrap = bwrap orelse return null,
+            .init = init_path orelse return null,
+            .pasta = pasta orelse return null,
+            .newuidmap = newuidmap orelse return null,
+            .newgidmap = newgidmap orelse return null,
+        };
+    }
+
+    /// Paths under `dir` that exist nowhere: for a build no one runs (the
+    /// cross check, the root's own tests).
+    fn dummy(comptime dir: []const u8) LaunchPaths {
+        return .{
+            .bwrap = dir ++ "/bin/bwrap",
+            .init = dir ++ "/bin/flong-init",
+            .pasta = dir ++ "/bin/pasta",
+            .newuidmap = dir ++ "/bin/newuidmap",
+            .newgidmap = dir ++ "/bin/newgidmap",
+        };
+    }
+};
+
+/// flong-launch (src/launch.zig): static, no libc, stripped, and no stack
+/// size in PT_GNU_STACK, so the start code leaves RLIMIT_STACK to bwrap,
+/// flong-init, tini and the payload (quirk 20), as every installed
+/// artifact.
+fn launchExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, lp: LaunchPaths) *std.Build.Step.Compile {
+    const exe = b.addExecutable(.{ .name = "flong-launch", .root_module = Launcher.launchModule(b, target, optimize, true, lp) });
+    exe.stack_size = 0;
+    return exe;
 }
 
 /// The modules of src/ every program shares, each importing its own

@@ -12,10 +12,6 @@
 #                (tests/zig/procdriver.zig, phase 5) and bin/flong-tty
 #                (tests/zig/ttydriver.zig, phase 7's L3: src/tty.zig as the
 #                launcher drives it), for checks.native
-#   spec-probe   `zig build spec-probe`: bin/spec-probe, src/launch.zig as
-#                far as phase 7's L1 goes (root refused, the spec parsed,
-#                the launcher's exit), for golden's spec set
-#                (tests/golden.nix), until L4 builds the launcher itself
 #   spec-paths   `zig build test-paths`: tests/golden/paths.txt against the
 #                launcher's functions (tests/zig/paths.zig); module.nix
 #                asserts its own side
@@ -23,16 +19,16 @@
 #                `zig build launch-driver`: bin/flong-launch-driver
 #                (tests/zig/launchdriver.zig), phase 7's L2 (src/ns.zig,
 #                src/passwd.zig, the launch's halves of src/cgroup.zig and
-#                src/record.zig), for checks.native, until L4 builds the
-#                launcher itself
+#                src/record.zig), for checks.native
 #   launch-test  `zig build test-launch`: tests/zig/launch_test.zig, the
 #                L2 record writer against tests/golden/records/ (outside
 #                native-test's fileset), the name taken, the cache lock,
 #                the session made and undone
 #   flong-launch-c
-#                the C flong-launch as native.nix's launcher set builds it,
-#                with the Zig mount library, for rootless.nix's L4
-#                transition subtest (ZIG.md, phase 7's L4), never an output
+#                the C flong-launch as native.nix's launcher set built it
+#                until phase 7's L4, with the Zig mount library, for
+#                rootless.nix's transition subtest (ZIG.md, phase 7's L4),
+#                never an output; L5 deletes it
 #   vm           every proof's bins, the drivers and launch-driver joined,
 #                for the VM node's PATH, with passthru.vmScripts, the
 #                proofs' testScript fragments in order, then L2's
@@ -127,24 +123,6 @@ let
     ../src/spec.zig
   ];
 
-  # Static, no libc, stripped, and no stack size in PT_GNU_STACK, as the
-  # launcher's Zig will be.
-  spec-probe = zigSet {
-    pname = "flong-spec-probe";
-    steps = "spec-probe";
-    files = specFiles ++ [ ../src/launch.zig ];
-    nativeBuildInputs = [
-      pkgs.file
-      pkgs.binutils
-    ];
-    extra = ''
-      file -b $out/bin/spec-probe | tee /dev/stderr | grep -q 'statically linked'
-      readelf -lW $out/bin/spec-probe > $TMPDIR/phdrs
-      if grep -q INTERP $TMPDIR/phdrs; then echo "spec-probe has an INTERP"; exit 1; fi
-      [[ $(awk '$1 == "GNU_STACK" { print $6 }' $TMPDIR/phdrs) == 0x000000 ]]
-    '';
-  };
-
   # Phase 7's L2 (ZIG.md): the launch's halves, driven from checks.native.
   # Static, no libc, stripped, no stack size, as the launcher will be.
   launch-driver = zigSet {
@@ -200,19 +178,19 @@ let
     ];
   };
 
-  # The C launcher beside the one native.nix ships (ZIG.md, phase 7's L4):
-  # the same sources, flags, link, clash check and shim run (native.nix's
-  # cLaunch), but for the one compiled-in path flong-launch-c owns, FLONG_INIT,
-  # which names the shipped set's flong-init rather than one of its own. So
-  # a session under either launcher runs the same flong-init, and bwrap's
-  # argv names it by the same store path. Only $out/bin/flong-launch: the
-  # mountlib step's install is the archive, which the link has already used.
-  # rootless.nix points copies of the wrappers at it; until L4 it is the C
-  # against the C.
+  # The C launcher beside the Zig one native.nix ships (ZIG.md, phase 7's
+  # L4): the sources, flags, link, clash check and shim run the launcher set
+  # had until L4 (native.nix's cLaunch), and the same compiled-in bwrap and
+  # pasta; its FLONG_INIT names the shipped set's flong-init rather than one
+  # of its own. So a session under either launcher runs the same flong-init,
+  # and bwrap's argv names it by the same store path. Only
+  # $out/bin/flong-launch: the mountlib step's install is the archive, which
+  # the link has already used. rootless.nix points copies of the wrappers at
+  # it, the Zig against the C.
   flong-launch-c = zigSet {
     pname = "flong-launch-c";
     steps = "mountlib";
-    files = native.launcherFiles;
+    files = native.cLaunchFiles;
     nativeBuildInputs = [ pkgs.binutils ];
     extra = ''
       rm -r $out/lib
@@ -253,7 +231,6 @@ in
   inherit
     vm
     drivers
-    spec-probe
     spec-paths
     launch-driver
     launch-test

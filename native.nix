@@ -5,8 +5,8 @@
 #
 # Phase 1 has the seccomp set, which seccomp/default.nix imports; phase 3
 # adds launcher, which launcher/default.nix imports (phase 5 adds
-# flong-sweeper to it); phase 6 fixtures, which tests/parity/default.nix and
-# tests/probes.nix import.
+# flong-sweeper to it, phase 7's L4 the Zig flong-launch); phase 6
+# fixtures, which tests/parity/default.nix and tests/probes.nix import.
 # tests/integration.nix builds phase 0's proofs with the same zigSet.
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:11-20
@@ -178,76 +178,92 @@ let
   };
 
   # The C launcher's compiler flags (launcher/default.nix before phase 3),
-  # a bash array's words: the store paths of the programs it runs are
-  # compiled in, so the wrapper cannot hand it a different bwrap, pasta or
-  # flong-init (tini is the Zig flong-init's -Dtini). newuidmap and
-  # newgidmap are NixOS's setuid wrappers, which have no store path. -Werror
-  # with the cc-wrapper's hardening.
-  # FLONG_INIT names the Zig flong-init installed beside it, in the same
-  # $out, so it is given as a shell word expanding $out. launcherCflagsFor
-  # takes that word: tests/integration.nix's flong-launch-c (ZIG.md, phase
-  # 7's L4) names the shipped set's flong-init instead.
+  # a bash array's words, for tests/integration.nix's flong-launch-c alone
+  # since phase 7's L4 (ZIG.md): the store paths of the programs it runs
+  # are compiled in, so the wrapper cannot hand it a different bwrap, pasta
+  # or flong-init. newuidmap and newgidmap are NixOS's setuid wrappers,
+  # which have no store path. -Werror with the cc-wrapper's hardening.
+  # launcherCflagsFor takes FLONG_INIT's word: flong-launch-c names the
+  # shipped set's flong-init.
   launcherCflagsFor = init: ''
     -std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror
-    -DFLONG_BWRAP='"${pkgs.bubblewrap}/bin/bwrap"'
-    -DFLONG_PASTA='"${pkgs.passt}/bin/pasta"'
-    -DFLONG_NEWUIDMAP='"/run/wrappers/bin/newuidmap"'
-    -DFLONG_NEWGIDMAP='"/run/wrappers/bin/newgidmap"'
+    -DFLONG_BWRAP='"${bwrap}"'
+    -DFLONG_PASTA='"${pasta}"'
+    -DFLONG_NEWUIDMAP='"${newuidmap}"'
+    -DFLONG_NEWGIDMAP='"${newgidmap}"'
     -DFLONG_INIT=${init}
   '';
-  launcherCflags = launcherCflagsFor ''"\"$out/bin/flong-init\""'';
+
+  # The programs flong-launch runs, compiled into both launchers.
+  bwrap = "${pkgs.bubblewrap}/bin/bwrap";
+  pasta = "${pkgs.passt}/bin/pasta";
+  newuidmap = "/run/wrappers/bin/newuidmap";
+  newgidmap = "/run/wrappers/bin/newgidmap";
 
   # flong-launch, flong-sweeper and flong-init side by side in one $out
-  # (tests/rootless.nix:636-641 finds the sweeper beside the launcher):
-  # flong-init and flong-sweeper are Zig (phases 3 and 5), -Dtini
-  # flong-init's compiled-in tini; flong-launch is still C, built by $CC
-  # with launcherCflags (ZIG.md, "Phase 3"), and links the Zig mount
-  # helper, libflong-mount.a, never installed (ZIG.md, "The mount-helper
-  # shim"), whose clash check fails this build. The fileset holds
-  # src/ but for the seccomp set's and the fixtures' own sources, and
-  # launcher/'s C, so neither set's edits move the other (ZIG.md, "The Nix
-  # build").
+  # (tests/rootless.nix:636-641 finds the sweeper beside the launcher), all
+  # three Zig (phases 3, 5 and 7), static and without libc: -Dtini is
+  # flong-init's compiled-in tini, and flong-launch's programs are
+  # -Dbwrap, -Dpasta, -Dnewuidmap, -Dnewgidmap and -Dinit, the flong-init
+  # installed beside it, in the same $out. The fileset holds src/ but for
+  # the seccomp set's, the fixtures' and the mount-helper shim's own
+  # sources (ZIG.md, "The Nix build"), so neither set's edits, nor the C
+  # launcher's, move it.
   launcher = zigSet {
     pname = "flong-launcher";
     set = "launcher";
-    flags = "-Dtini=${pkgs.tini}/bin/tini";
+    flags = "-Dtini=${pkgs.tini}/bin/tini -Dbwrap=${bwrap} -Dpasta=${pasta} -Dnewuidmap=${newuidmap} -Dnewgidmap=${newgidmap} -Dinit=$out/bin/flong-init";
     files = launcherFiles;
     nativeBuildInputs = [
       pkgs.file
       pkgs.binutils
     ];
     extra = ''
-      # flong-init and flong-sweeper: static, no INTERP, and no stack size
-      # in PT_GNU_STACK, so the start code leaves RLIMIT_STACK alone (quirk
-      # 20; ZIG.md, "Measured": P2).
-      for prog in flong-init flong-sweeper; do
+      # The three: static, no INTERP, and no stack size in PT_GNU_STACK, so
+      # the start code leaves RLIMIT_STACK alone (quirk 20; ZIG.md,
+      # "Measured": P2).
+      for prog in flong-launch flong-init flong-sweeper; do
         file -b $out/bin/$prog | tee /dev/stderr | grep -q 'statically linked'
         readelf -lW $out/bin/$prog > $TMPDIR/$prog.phdrs
         if grep -q INTERP $TMPDIR/$prog.phdrs; then echo "$prog has an INTERP"; exit 1; fi
         [[ $(awk '$1 == "GNU_STACK" { print $6 }' $TMPDIR/$prog.phdrs) == 0x000000 ]]
       done
-
-    ''
-    + cLaunch launcherCflags;
+      # Stripped, as build.zig makes every installed artifact: no symbol
+      # table, so nothing names Zig's lib/std (disallowedReferences holds
+      # the rest).
+      readelf -SW $out/bin/flong-launch > $TMPDIR/flong-launch.sections
+      grep -q '\.text' $TMPDIR/flong-launch.sections
+      if grep -q '\.symtab' $TMPDIR/flong-launch.sections; then echo "flong-launch has a symbol table"; exit 1; fi
+      # flong-launch runs the flong-init beside it.
+      grep -qF "$out/bin/flong-init" $out/bin/flong-launch
+      [[ "$(ls $out/bin)" == "$(printf '%s\n' flong-init flong-launch flong-sweeper)" ]]
+    '';
   };
 
-  # The launcher set's fileset: src/ but for the seccomp set's and the
-  # fixtures' own sources, and launcher/'s C.
+  # The launcher set's fileset: src/ but for the seccomp set's, the
+  # fixtures' and the mount-helper shim's own sources.
   launcherFiles = [
     (lib.fileset.difference ./src (
       lib.fileset.unions [
         ./src/seccomp
         (lib.fileset.maybeMissing ./src/fixtures)
+        (lib.fileset.maybeMissing ./src/hybrid)
       ]
     ))
+  ];
+
+  # flong-launch-c's fileset (tests/integration.nix): the launcher set's,
+  # the shim, and launcher/'s C.
+  cLaunchFiles = launcherFiles ++ [
+    ./src/hybrid
     (lib.fileset.fileFilter (f: f.hasExt "c" || f.hasExt "h") ./launcher)
   ];
 
   # The C flong-launch, linked with the Zig mount helper, into
   # $out/bin/flong-launch, then the clash check and the shim run: shell for
-  # a zigSet's `extra`, over the launcher set's files, with CFLAGS a
-  # launcherCflagsFor result. The launcher set's own, and
-  # tests/integration.nix's flong-launch-c (ZIG.md, phase 7's L4).
+  # a zigSet's `extra`, over cLaunchFiles, with CFLAGS a launcherCflagsFor
+  # result: tests/integration.nix's flong-launch-c (ZIG.md, phase 7's L4),
+  # the shipped launcher until L4, deleted with it in L5.
   cLaunch = cflags: ''
     # The mount helper: the archive (src/hybrid/mount_c.zig), then the C
     # launcher linked with it.
@@ -386,9 +402,9 @@ let
     # aarch64 from x86_64 (P6's pieces, ZIG.md "Phase 2"): flong-seccomp
     # and bpfdump compiled and not linked, since the flake has no aarch64
     # libseccomp here; syscall-probe, swapper and ioctl-probe built; tests/zig/abi.zig's aarch64 half, and its controls, each plant
-    # failing the build naming what differs on both arches; flong-init
-    # (with a dummy tini) and flong-sweeper for aarch64, the launcher set's
-    # Zig; and the mount library for aarch64, its symbols checked as the
+    # failing the build naming what differs on both arches; flong-launch
+    # and flong-init (with dummy paths) and flong-sweeper for aarch64, the
+    # launcher set; and the mount library for aarch64, its symbols checked as the
     # launcher's build checks x86_64's (the aarch64 C link is unchecked,
     # ZIG.md "The mount-helper shim").
     cross-aarch64 = pkgs.linkFarm "cross-aarch64" {
@@ -405,6 +421,12 @@ let
           ./src/names.zig
           ./src/proc.zig
           ./src/sig.zig
+          ./src/launch.zig
+          ./src/launch
+          ./src/spec.zig
+          ./src/ns.zig
+          ./src/tty.zig
+          ./src/passwd.zig
           ./src/fixtures
           ./tests/zig/abi.zig
           ./tests/zig/abi.h
@@ -416,10 +438,10 @@ let
           pkgs.binutils
         ];
         extra = ''
-          # flong-init (with a dummy tini) and flong-sweeper for aarch64:
-          # static, no INTERP.
+          # flong-launch and flong-init (with dummy paths) and flong-sweeper
+          # for aarch64: static, no INTERP.
           # And the fixtures but bpfdump, which needs libseccomp.
-          for prog in flong-init flong-sweeper syscall-probe swapper ioctl-probe; do
+          for prog in flong-launch flong-init flong-sweeper syscall-probe swapper ioctl-probe; do
             file -b $out/cross/$prog | tee /dev/stderr | grep -q 'ARM aarch64.*statically linked'
             if file -b $out/cross/$prog | grep -q interpreter; then exit 1; fi
           done
@@ -459,6 +481,7 @@ in
     seccomp
     launcher
     launcherFiles
+    cLaunchFiles
     launcherCflagsFor
     cLaunch
     fixtures

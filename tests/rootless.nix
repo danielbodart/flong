@@ -57,12 +57,11 @@ let
   # ZIG.md phase 7's L4 (a), the transition subtest's two launchers: the
   # reference, flong-launch-c (tests/integration.nix: the C, built only for
   # this check, running the shipped flong-init), and the launcher under
-  # test, the one the module ships. Until L4 builds the Zig launcher the
-  # shipped one is the same C, bit for bit, and the subtest proves its own
-  # harness; L4 sets transitionUnderTest to "zig", which turns that control
-  # into its opposite (the two differ, and the shipped one has none of the
-  # C's format strings).
-  transitionUnderTest = "c";
+  # test, the one the module ships: the Zig since L4. Before L4 the shipped
+  # one was the same C, bit for bit ("c", which proved the harness); "zig"
+  # turns that control into its opposite (the two differ, and the shipped
+  # one has none of the C's format strings).
+  transitionUnderTest = "zig";
   launchC = (import ./integration.nix { pkgs = hostPkgs; }).flong-launch-c;
 
   # l4-dump LAUNCHER-PID MACHINE: every process of a launch, for the
@@ -1271,8 +1270,8 @@ in
         # process of the launch, by its place (cgroup leaf and the chain of
         # executables above it), with its argv, its environment and its
         # descriptors' targets. Pids, descriptor numbers, the session's name
-        # and each side's own paths are normalised; nothing else is. Until
-        # L4 the shipped launcher is the C too, and this proves the harness.
+        # and each side's own paths are normalised; nothing else is. Since
+        # L4 the shipped launcher is the Zig (src/launch.zig).
         import base64
         import difflib
         import re
@@ -1402,7 +1401,11 @@ in
                     out.append(s(k + eq + v))
                 return out
 
+            # An inode number is no one's choice: a pipe's, a namespace's,
+            # and the name an O_TMPFILE record keeps after its linkat
+            # (record.zig's create; /proc says "/dir/#INO (deleted)").
             def target(t):
+                t = re.sub(r"/#\d+ \(deleted\)$", "/#INO (deleted)", t)
                 return s(re.sub(r"^([a-z_]+):\[\d+\]$", r"\1:[]", t))
 
             snap = {}
@@ -1418,9 +1421,6 @@ in
                     "env": env(procs[p].get("environ", [])),
                     "fds": [f"{n} {target(t)}" for n, t in sorted(fds.items()) if n <= 2] + rest,
                 }
-            # The launcher's own descriptors are its business, not its
-            # children's.
-            del snap[role[pid]]["fds"]
             return snap
 
         def launch(side, w, env="", relay=False):
@@ -1517,6 +1517,16 @@ in
         for v, (w, env, relay) in VARIANTS.items():
             runs[v] = {side: launch(side, w, env, relay) for side in SIDES}
             r, t = runs[v]["ref"], runs[v]["test"]
+            # The launcher's own table is compared too: an end of the info,
+            # ready or gate pipe it kept past checkpoint 2 or 3, or a
+            # keep-fd, shows here and nowhere else. It may differ from the
+            # C's by one descriptor, in relay once the gate is open: the
+            # watchdog's pidfd, which tty.finish reaps by (quirk 9), where
+            # the C closed it at once (flong-tty.c:309-313).
+            if v == "relay":
+                fds = t["running"]["caller:LAUNCHER#0"]["fds"]
+                assert "anon_inode:[pidfd]" in fds, fds
+                fds.remove("anon_inode:[pidfd]")
             for when in ("held", "running"):
                 print(f"{v}, {when}: " + ", ".join(sorted(r[when])))
                 diff(f"{v}, {when}", r[when], t[when])
@@ -1570,6 +1580,22 @@ in
                 assert any("vte.container.name=box;" in l for l in r["out"]), r["out"]
             else:
                 assert r["out"] == [], (v, r["out"])
+
+        # A launch refused before the gate, traced, through both: the
+        # refusal, the teardown's stages (poststop-done and released after
+        # a failure) and the status. flong-init's own line races the
+        # teardown's kill, so it is left out; a trace line's clock goes.
+        refused = {}
+        for side in SIDES:
+            out = machine.succeed(as_user(
+                f"FLONG_TRACE=1 FLONG_TEST_HOOK=fail /tmp/l4/{side}/hooked 'echo payload-ran' 2>&1; echo rc=$?"))
+            refused[side] = [
+                "T " + " ".join(l.split()[2:]) if l.split()[:1] == ["T"] else re.sub(r"box-\S+", "MACHINE", l)
+                for l in out.splitlines() if not l.startswith("flong-init:")]
+        assert refused["ref"] == refused["test"], refused
+        for want in ("the hook fails", "T mounts-done", "T poststop-done", "T released", "rc=125"):
+            assert want in refused["ref"], (want, refused["ref"])
+        assert "payload-ran" not in refused["ref"] and "T hook-done" not in refused["ref"], refused["ref"]
 
         # The control that the comparison can fail: variants whose launches
         # differ, sampled the same way, are told apart.

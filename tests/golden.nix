@@ -56,8 +56,7 @@
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:11-20
 # does; seccomp is the program the seccomp sets run against, launcher the
 # output whose flong-init, flong-sweeper and flong-launch the init, sweeper
-# and spec sets do; integration tests/integration.nix, whose spec-probe the
-# spec-probe set runs the spec cases against.
+# and spec sets do.
 {
   pkgs ?
     let
@@ -69,7 +68,6 @@
     }) { },
   seccomp ? import ../seccomp { inherit pkgs; },
   launcher ? import ../launcher { inherit pkgs; },
-  integration ? import ./integration.nix { inherit pkgs; },
 }:
 let
   inherit (pkgs) lib;
@@ -180,30 +178,24 @@ let
     # checks and bwrap_allowed (:359-415, 676-708): cross-order-N breaks
     # the Nth of them and every one after it, so they keep their order,
     # and accepted-all passes every check but the last, every keyword
-    # given, each at an edge that passes. A keep-fd is the
-    # case's own descriptor (NAME.redirect), open or not by F_GETFD
-    # (:656-667). An unknown keyword's message at 1023 bytes whole, one byte
-    # over and cut, and over 1 KiB (ZIG.md quirk 22). The valid spec: machine
-    # m, container c, state /state, cache /cache, closure CLOSURE, uidmap and
-    # gidmap 0 100000 65536, user 1000 100 /home/u, holder flong.slice/s, --
-    # /bin/true. CLOSURE is a store directory, LEADSOUT a store path that is a
-    # symlink to /, which realpath resolves out of the store (:245-256), and
-    # TOSTORE one to /nix/store, which it resolves to the store's directory,
-    # not a path under it: the prefix is checked with its slash.
+    # given, each at an edge that passes. A keep-fd is the case's own
+    # descriptor (NAME.redirect), open or not by F_GETFD (:656-667). An
+    # unknown keyword's message at 1023 bytes whole, one byte over and cut,
+    # and over 1 KiB (ZIG.md quirk 22). state-missing is the valid spec
+    # itself, which passes every check and stops at the next step, the
+    # state directory (flong-launch.c:891-893, flong-record.c:58-63),
+    # recorded from the C launcher of phase 7's L4 (tests/integration.nix's
+    # flong-launch-c). The valid spec: machine m, container c, state
+    # /state, cache /cache, closure CLOSURE, uidmap and gidmap 0 100000
+    # 65536, user 1000 100 /home/u, holder flong.slice/s, -- /bin/true.
+    # CLOSURE is a store directory, LEADSOUT a store path that is a symlink
+    # to /, which realpath resolves out of the store (:245-256), and TOSTORE
+    # one to /nix/store, which it resolves to the store's directory, not a
+    # path under it: the prefix is checked with its slash. Run against the
+    # Zig flong-launch since phase 7's L4 (src/launch.zig); that the shipped
+    # flong-launch is the Zig is native.nix's launcher build's control (it
+    # is static, with no libc).
     spec = specSet "${launcher}/bin/flong-launch";
-
-    # The same cases against src/launch.zig as far as phase 7's L1 goes
-    # (tests/integration.nix's spec-probe: root refused, the spec parsed,
-    # the launcher's exit), beside the C until L4 builds the Zig launcher.
-    spec-probe = specSet probe // {
-      dir = "spec";
-    };
-
-    # What only the probe does: a spec that passes every check exits 0,
-    # where the launcher goes on to open the state directory. The control
-    # that spec-probe's run above is the Zig's, which none of the spec
-    # set's refusals can tell from the C's.
-    spec-accepted = specSet probe;
 
     # The subcommands' usage errors, the one text phase 2 (a) changed
     # (quirk 38): rewritten from the bash's then, and expand's added.
@@ -214,9 +206,6 @@ let
       };
     };
   };
-
-  # src/launch.zig as far as phase 7's L1 goes.
-  probe = "${integration.spec-probe}/bin/spec-probe";
 
   # The spec set against a program: CLOSURE is a store directory, LEADSOUT
   # a store path that is a symlink to /, TOSTORE one to /nix/store.

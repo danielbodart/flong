@@ -23,6 +23,7 @@
     { "kind": "open", "method_name": "adoptInherited" },
     { "kind": "open", "method_name": "openRecord" },
     { "kind": "open", "method_name": "openUserns" },
+    { "kind": "open", "method_name": "openNetns" },
     { "kind": "open", "method_name": "openPtmx" },
     { "kind": "open", "method_name": "openSlave" },
     { "kind": "open", "method_name": "reopenOut" },

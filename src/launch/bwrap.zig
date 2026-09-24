@@ -148,6 +148,9 @@ fn start(
     ends: *const ChildEnds,
 ) msg.Error!proc.Child {
     var sp = proc.Spawn.init(arena, paths.bwrap) catch return msg.fail(.NOMEM, "malloc", .{});
+    // bwrap_argv grows its vector with push, which says "realloc" when it
+    // cannot (flong-launch.c:131-133); its asprintf'd elements are the
+    // rarer failure and share this word.
     spec.bwrapArgv(arena, &sp, s, .{
         .u1 = outer,
         .u2 = ends.u2,
@@ -155,7 +158,7 @@ fn start(
         .seccomp = ends.seccomp,
         .gate_r = ends.gate_r.?,
         .ready_w = ends.ready_w.?,
-    }, relay, paths.init) catch return msg.fail(.NOMEM, "malloc", .{});
+    }, relay, paths.init) catch return msg.fail(.NOMEM, "realloc", .{});
     for (ends.keep) |h| sp.keepInherited(h) catch return msg.fail(.NOMEM, "malloc", .{});
     sp.stdio = stdio;
     sp.cgroup = cgroup;

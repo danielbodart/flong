@@ -1,9 +1,10 @@
 # flong's native launcher: flong-launch, flong-sweeper and flong-init, built
-# by native.nix's `launcher` set (flong-init and flong-sweeper in Zig,
-# src/init.zig and src/sweeper.zig, and flong-launch's mount helper,
-# src/mount.zig, a Zig library it links; the rest C, with the compiler flags
-# and compiled-in store paths there). This file stays so that module.nix,
-# flake.nix and the tests import it as before.
+# by native.nix's `launcher` set, all three Zig (src/launch.zig,
+# src/sweeper.zig, src/init.zig), static and without libc, with the
+# compiled-in store paths there. The C beside this file is built only by
+# tests/integration.nix's flong-launch-c, until phase 7's L5 deletes it
+# (ZIG.md). This file stays so that module.nix, flake.nix and the tests
+# import it as before.
 #
 # pkgs defaults to the flake's locked nixpkgs, whose bubblewrap is 0.12: the
 # launcher needs 0.12's --overlay-src, --tmp-overlay and --add-seccomp-fd, and
