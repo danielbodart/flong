@@ -1,0 +1,1 @@
+flong-launch: spec: closure '@TOSTORE@' leads out of /nix/store/, to '/nix/store'

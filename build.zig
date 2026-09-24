@@ -596,6 +596,135 @@ pub fn build(b: *std.Build) void {
         }
         if (arch == .aarch64) cross_step.dependOn(&tests.step);
     }
+
+    // ---- launcher (branch) ----
+    // Phase 7 on the branch zig-launch (ZIG.md, "How it runs"): trunk owns
+    // the rest of this file, and until L4 the branch edits only this block.
+    // L1, the spec: src/spec.zig and a first src/launch.zig, not yet built
+    // into the launcher.
+    //
+    //   test        (-Ddev=true) spec.zig's and launch.zig's own tests, and
+    //               tests/zig/spec_test.zig: bwrapArgv's golden argv per
+    //               branch, the model property, each single-rule mutation
+    //   spec-probe  bin/spec-probe: src/launch.zig as far as L1 goes (root
+    //               refused, the spec parsed, the launcher's exit), built
+    //               only by tests/integration.nix, for golden's spec set
+    //   test-paths  tests/golden/paths.txt against the launcher's functions
+    //               (tests/zig/paths.zig), run only by tests/integration.nix
+    {
+        const Branch = struct {
+            /// src/spec.zig over `m`'s modules.
+            fn specModule(bb: *std.Build, m: Modules, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+                return bb.createModule(.{
+                    .root_source_file = bb.path("src/spec.zig"),
+                    .target = t,
+                    .optimize = o,
+                    .imports = &.{
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "fd", .module = m.fd },
+                        .{ .name = "msg", .module = m.msg },
+                        .{ .name = "proc", .module = m.proc },
+                        .{ .name = "names", .module = m.names },
+                        .{ .name = "mount", .module = m.mount },
+                    },
+                });
+            }
+
+            /// flong-launch's root module (src/launch.zig; ZIG.md, "Per
+            /// binary"), no libc: static. Stripped for an installed
+            /// artifact; a test's is not (a stripped module in an
+            /// unstripped Debug test crashes the compiler).
+            fn launchModule(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, strip: bool) *std.Build.Module {
+                const m = modules(bb, t, o);
+                return bb.createModule(.{
+                    .root_source_file = bb.path("src/launch.zig"),
+                    .target = t,
+                    .optimize = o,
+                    .strip = strip,
+                    .single_threaded = true,
+                    .imports = &.{
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "msg", .module = m.msg },
+                        .{ .name = "sig", .module = m.sig },
+                        .{ .name = "proc", .module = m.proc },
+                        .{ .name = "spec", .module = specModule(bb, m, t, o) },
+                    },
+                });
+            }
+
+            /// A directory in the store that exists wherever this builds:
+            /// the one holding the zig that runs it. Null outside a store.
+            fn storeDir(bb: *std.Build) ?[]const u8 {
+                const exe = std.fs.realpathAlloc(bb.allocator, bb.graph.zig_exe) catch return null;
+                const prefix = "/nix/store/";
+                if (!std.mem.startsWith(u8, exe, prefix)) return null;
+                const end = std.mem.indexOfScalarPos(u8, exe, prefix.len, '/') orelse exe.len;
+                return exe[0..end];
+            }
+        };
+
+        if (dev) {
+            if (b.lazyDependency("minish", .{ .target = target, .optimize = optimize })) |minish| {
+                {
+                    const m = modules(b, target, optimize);
+                    const t = b.addTest(.{ .name = "spec", .root_module = Branch.specModule(b, m, target, optimize) });
+                    test_step.dependOn(&b.addRunArtifact(t).step);
+                }
+                {
+                    const t = b.addTest(.{ .name = "launch", .root_module = Branch.launchModule(b, target, optimize, false) });
+                    test_step.dependOn(&b.addRunArtifact(t).step);
+                }
+                if (Branch.storeDir(b)) |dir| {
+                    const m = modules(b, target, optimize);
+                    const opts = b.addOptions();
+                    opts.addOption([]const u8, "store", dir);
+                    const t = b.addTest(.{
+                        .name = "spec_test",
+                        .root_module = b.createModule(.{
+                            .root_source_file = b.path("tests/zig/spec_test.zig"),
+                            .target = target,
+                            .optimize = optimize,
+                            .imports = &.{
+                                .{ .name = "minish", .module = minish.module("minish") },
+                                .{ .name = "sys", .module = m.sys },
+                                .{ .name = "fd", .module = m.fd },
+                                .{ .name = "msg", .module = m.msg },
+                                .{ .name = "mount", .module = m.mount },
+                                .{ .name = "spec", .module = Branch.specModule(b, m, target, optimize) },
+                                .{ .name = "options", .module = opts.createModule() },
+                            },
+                        }),
+                    });
+                    test_step.dependOn(&b.addRunArtifact(t).step);
+                } else {
+                    test_step.dependOn(&b.addFail("tests/zig/spec_test.zig needs a zig in /nix/store: its closure is a store path").step);
+                }
+            }
+        }
+
+        const probe_step = b.step("spec-probe", "Build bin/spec-probe, src/launch.zig as far as L1 goes, for golden's spec set");
+        const probe = b.addExecutable(.{ .name = "spec-probe", .root_module = Branch.launchModule(b, target, optimize, true) });
+        // No stack size in PT_GNU_STACK, as every installed artifact.
+        probe.stack_size = 0;
+        probe_step.dependOn(&b.addInstallArtifact(probe, .{}).step);
+
+        const paths_step = b.step("test-paths", "Check tests/golden/paths.txt against the launcher's functions");
+        {
+            const m = modules(b, target, optimize);
+            const root = b.createModule(.{
+                .root_source_file = b.path("tests/zig/paths.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "mount", .module = m.mount },
+                    .{ .name = "spec", .module = Branch.specModule(b, m, target, optimize) },
+                },
+            });
+            root.addAnonymousImport("paths.txt", .{ .root_source_file = b.path("tests/golden/paths.txt") });
+            paths_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "paths", .root_module = root })).step);
+        }
+    }
+    // ---- end of launcher (branch) ----
 }
 
 /// The modules of src/ every program shares, each importing its own

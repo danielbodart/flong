@@ -133,8 +133,8 @@ let
     if q == "/var/run" || lib.hasPrefix "/var/run/" q then "/run" + lib.removePrefix "/var/run" q else q;
 
   # What the launcher's spec parser accepts as a path (clean() in
-  # flong-spec.c): absolute, not /, and every component present, not . or
-  # .., and at most 255 bytes. A path it would refuse at launch is refused
+  # flong-spec.c and src/spec.zig): absolute, not /, and every component
+  # present, not . or .., and at most 255 bytes. A path it would refuse at launch is refused
   # here, where the declaration can still be read.
   clean = p:
     let parts = lib.splitString "/" (lib.removePrefix "/" p); in
@@ -143,6 +143,38 @@ let
 
   # Either path lies inside the other, or they are the same.
   overlaps = a: b: a == b || lib.hasPrefix "${a}/" b || lib.hasPrefix "${b}/" a;
+
+  # The destinations given more than once. The launcher mounts one thing at
+  # each path, and refuses a destination twice (mount.sortRefusingTwice),
+  # so the checks refuse it first.
+  twiceIn = dests: lib.unique (lib.filter (x: lib.count (y: y == x) dests > 1) dests);
+
+  # clean, overlaps and twiceIn mirror the launcher's checks
+  # (src/spec.zig's clean, src/mount.zig's overlaps and duplicate refusal).
+  # tests/golden/paths.txt declares, once, each case's verdict and whether
+  # the mirror is meant to say the same or, lexical where the launcher is
+  # canonical, the opposite; tests/zig/paths.zig holds the launcher to it,
+  # and hostAssertions holds these. The cases that disagree, as lines of it.
+  pathCaseMisses =
+    let
+      cases = lib.filter (l: l != "" && ! lib.hasPrefix "#" l)
+        (lib.splitString "\n" (builtins.readFile ./tests/golden/paths.txt));
+      miss = l:
+        let
+          f = lib.splitString "\t" l;
+          field = builtins.elemAt f;
+          check = field 0;
+          said =
+            if check == "clean" then clean (field 3)
+            else if check == "overlaps" then overlaps (norm (field 3)) (norm (field 4))
+            else if check == "twice" then twiceIn [ (field 3) (field 4) ] != [ ]
+            else throw "tests/golden/paths.txt: unknown check ${check}";
+          launcher = field 1 == "yes";
+          want = if field 2 == "differs" then ! launcher else launcher;
+        in
+        lib.optional (said != want) l;
+    in
+    lib.concatMap miss cases;
 
   # How many components REL has.
   depth = rel: lib.length (lib.filter (x: x != "") (lib.splitString "/" rel));
@@ -682,7 +714,7 @@ let
         ++ d.overlayDests ++ map toString (lib.attrValues c.overlays)
         ++ c.masks ++ map (x: x.node) d.devices ++ c.protect));
 
-      twice = lib.unique (lib.filter (x: lib.count (y: y == x) d.dests > 1) d.dests);
+      twice = twiceIn d.dests;
       deep = deepMasks d c.masks;
       badTmpfs = map (t: t.path) (lib.filter (t: t.bad) d.tmpfs);
       badDevices = map (x: "${x.node} ${x.modifier}")
@@ -975,6 +1007,14 @@ let
   # declarations there are. The kernel's own minimum is documented and
   # not asserted: the launcher fails loudly on an older one.
   hostAssertions = [
+    {
+      assertion = pathCaseMisses == [ ];
+      message = ''
+        flong's path checks in module.nix disagree with
+        tests/golden/paths.txt, which the launcher is held to, at:
+        ${lib.concatStringsSep "\n" pathCaseMisses}
+      '';
+    }
     {
       assertion = config.security.allowUserNamespaces;
       message = ''
