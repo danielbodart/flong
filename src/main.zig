@@ -9,8 +9,15 @@
 //!   flong list
 //!   flong schema
 //!   flong version
-//!   flong help
+//!   flong help [decl [--markdown]]
 //!   NAME [ARGS...]            a declaration's link, NAME -> flong
+//!
+//! `flong help` (and `--help`, `-h`) is the reference for someone with the
+//! binary and without Nix: `help_text`, which describes flong launch as
+//! S3 delivers it, a declaration file or name rather than a spec. `flong
+//! help decl` is the declaration's every field, from decl_docs.zig's walk,
+//! the one decl-options.json comes from; `--markdown` is the same as
+//! docs/declaration.md, which the reference-fresh check holds to it.
 //!
 //! The subcommand is argv[0]'s basename, as busybox reads it, then argv[1]:
 //! a link named `sweeper` runs the sweeper. A subcommand's main is handed
@@ -94,6 +101,8 @@ pub fn dispatch(argv: []const [*:0]const u8) Dispatch {
     if (argv.len < 2) return .usage;
     const word = std.mem.span(argv[1]);
     if (std.meta.stringToEnum(Sub, word)) |s| return .{ .sub = .{ .sub = s, .at = 1 } };
+    // What someone who has never read the help types first.
+    if (std.mem.eql(u8, word, "--help") or std.mem.eql(u8, word, "-h")) return .{ .sub = .{ .sub = .help, .at = 1 } };
     return .{ .unknown = word };
 }
 
@@ -104,15 +113,117 @@ fn basename(path: []const u8) []const u8 {
 }
 
 const usage =
-    \\usage: flong launch DECL.zon|NAME [-- ARGS...]
-    \\       flong init GATE READY GROUPS TTY TRACE DIR -- COMMAND...
-    \\       flong sweeper STATE-DIR
-    \\       flong check DECL.zon
+    \\usage: flong launch DECL.zon [-- ARGUMENT...]
+    \\       flong launch NAME [-- ARGUMENT...]
+    \\       NAME [ARGUMENT...]
     \\       flong list
+    \\       flong check DECL.zon
     \\       flong schema
+    \\       flong help [decl [--markdown]]
     \\       flong version
-    \\       flong help
-    \\       NAME [ARGS...]    (a declaration's link to flong)
+;
+
+/// `flong help`: the usage, then each subcommand, for a reader who has
+/// flong and not its source, nor Nix (STANDALONE.md, "Decided": `--help`
+/// assumes no Nix store). The declaration's fields are `flong help
+/// decl`'s, from decl_docs.zig's walk, never here.
+const help_text = usage ++
+    \\
+    \\
+    \\flong runs a declaration: one sandboxed session per launch, in user
+    \\namespaces the caller owns, as the caller, gone when its command exits.
+    \\A declaration is a ZON file naming the container's root, the user, the
+    \\command, what is bound in, the network, the syscall filter and the
+    \\hooks. `flong help decl` lists every field.
+    \\
+    \\flong launch DECL.zon [-- ARGUMENT...]
+    \\    Start a session from the declaration in the file DECL.zon (a word
+    \\    with a '/' in it, or ending in .zon), run its command inside with
+    \\    the ARGUMENTs after its own, and wait for it. The declaration's
+    \\    workspace, binds, guard, seccompPolicy and postStart commands get
+    \\    the ARGUMENTs after their own too. Run it as yourself: it refuses
+    \\    root, and needs a subordinate id range in /etc/subuid and
+    \\    /etc/subgid, newuidmap and newgidmap, and a systemd user manager.
+    \\    When its prepared root is swept before it holds it, it relaunches
+    \\    itself.
+    \\
+    \\    Exit status: the command's, or 128+N when signal N killed it or
+    \\    reached flong launch before the command ran; 125 when the session
+    \\    did not start (the sandbox refused, postStart failed, the network
+    \\    could not be attached); 1 when the declaration cannot be read or
+    \\    flong check refuses it (`flong launch: ...`), when the launch is
+    \\    refused before the session (`NAME: ...`, NAME the declaration's),
+    \\    or when a workspace, binds, guard or seccompPolicy command fails;
+    \\    2 on a usage error. stderr says which.
+    \\
+    \\flong launch NAME [-- ARGUMENT...]
+    \\    The same, for the declaration called NAME: NAME.zon in the first
+    \\    of these directories that has one:
+    \\        /etc/flong               where the NixOS module writes each one
+    \\        $XDG_CONFIG_HOME/flong   the caller's own, outside Nix; with
+    \\                                 XDG_CONFIG_HOME unset or not an
+    \\                                 absolute path, $HOME/.config/flong
+    \\    so a declaration in /etc/flong shadows the caller's of the same
+    \\    name. When neither has one it exits 2, `flong: no declaration
+    \\    "NAME" (looked for PATH...)`, naming each path looked for.
+    \\
+    \\NAME [ARGUMENT...]
+    \\    A declaration's own command: a symbolic link called NAME, on PATH,
+    \\    to flong. flong reads the name it was run by, so `NAME ARGS` is
+    \\    exactly `flong launch NAME -- ARGS`, and `ls -l "$(command -v
+    \\    NAME)"` shows the link. A link called after a subcommand runs the
+    \\    subcommand, so no declaration may take one's name.
+    \\
+    \\flong list
+    \\    Print each declaration flong launch NAME finds, one a line, as
+    \\    `NAME PATH`, PATH the file it is read from: /etc/flong's first,
+    \\    then the caller's, each directory's by name. One that /etc/flong
+    \\    shadows is left out.
+    \\
+    \\flong check DECL.zon
+    \\    Judge a declaration without launching it: parse it, then check
+    \\    what needs no caller, such as clean paths, a destination mounted
+    \\    twice, a mask too deep below a writable bind, a source reaching
+    \\    what no session may, and every pattern and range. Each refusal is
+    \\    one line, `flong check: DECL.zon: ...`, a parse error's with its
+    \\    line and column. Exit status: 0 when it passes, 1 when anything is
+    \\    refused or the file cannot be read, 2 on a usage error.
+    \\
+    \\flong schema
+    \\    Print every field of a declaration as JSON: its path, type,
+    \\    default, description, and how Nix merges it. The NixOS module
+    \\    builds its options from it.
+    \\
+    \\flong help [decl [--markdown]]
+    \\    This text; with decl, every field of a declaration, its type,
+    \\    default and description; with --markdown, the same as Markdown.
+    \\
+    \\flong version
+    \\    Print `flong VERSION`, then each program flong runs, one a line,
+    \\    as NAME=PATH: bwrap, self (flong itself), pasta, newuidmap,
+    \\    newgidmap, tini, cache and seccomp.
+    \\
+    \\flong runs these itself, and they are not for typing:
+    \\
+    \\flong init GATE READY GROUPS TTY TRACE DIR -- COMMAND...
+    \\    A session's first process inside its sandbox: it sets the
+    \\    session's groups and capabilities, waits at the gate, and runs
+    \\    tini, which runs COMMAND.
+    \\
+    \\flong sweeper STATE-DIR
+    \\    The holder of the caller's sessions: the one process of the
+    \\    systemd user unit flong-sessions.service, as `flong sweeper
+    \\    %t/flong`. It releases the sessions of launchers that were killed.
+    \\
+    \\Files:
+    \\    /etc/flong/NAME.zon              a declaration, as NixOS writes it
+    \\    $XDG_CONFIG_HOME/flong/NAME.zon  a declaration, outside Nix
+    \\    ~/.config/flong/NAME.zon         the same, XDG_CONFIG_HOME unset
+    \\    $XDG_RUNTIME_DIR/flong/          sessions' records, prepared roots,
+    \\                                     compiled syscall filters
+    \\
+    \\A usage error exits 2.
+    \\
 ;
 
 /// `flong version`: the version, then each program compiled into flong as
@@ -138,7 +249,7 @@ pub fn main() noreturn {
             .list => list(argv[d.at..], envp),
             .schema => schema(argv[d.at..]),
             .version => put(version_text),
-            .help => put(usage ++ "\n"),
+            .help => help(argv[d.at..]),
         },
         .declaration => |name| launch.named(argv, name, envp),
         .unknown => |word| {
@@ -192,6 +303,48 @@ fn schema(argv: []const [*:0]const u8) noreturn {
         sys.exitGroup(1);
     };
     put(out.written());
+}
+
+/// What `flong help`'s arguments ask for.
+pub const HelpTopic = union(enum) {
+    /// `help_text`.
+    usage,
+    /// The declaration's reference, in a style.
+    decl: decl_docs.Style,
+    /// Arguments that ask for nothing: a usage error.
+    bad,
+};
+
+/// Pure, as dispatch: `argv` is from the subcommand's word on.
+pub fn helpTopic(argv: []const [*:0]const u8) HelpTopic {
+    if (argv.len <= 1) return .usage;
+    if (!std.mem.eql(u8, std.mem.span(argv[1]), "decl")) return .bad;
+    if (argv.len == 2) return .{ .decl = .text };
+    if (argv.len == 3 and std.mem.eql(u8, std.mem.span(argv[2]), "--markdown")) return .{ .decl = .markdown };
+    return .bad;
+}
+
+/// flong help: `help_text`, or the declaration's reference
+/// (decl_docs.writeReference), on stdout, whole, then exit 0.
+fn help(argv: []const [*:0]const u8) noreturn {
+    msg.prog = "flong help";
+    msg.mode = .whole;
+    switch (helpTopic(argv)) {
+        .usage => put(help_text),
+        .bad => {
+            msg.bare("usage: flong help [decl [--markdown]]", .{});
+            sys.exitGroup(usage_status);
+        },
+        .decl => |style| {
+            var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+            var out: std.Io.Writer.Allocating = .init(arena_state.allocator());
+            decl_docs.writeReference(&out.writer, style) catch {
+                msg.say("out of memory", .{});
+                sys.exitGroup(1);
+            };
+            put(out.written());
+        },
+    }
 }
 
 /// Writes `text` on stdout and exits 0, or says why it could not and
@@ -253,7 +406,38 @@ test "dispatch: flong alone, or with a word that is no subcommand" {
     try testing.expectEqual(Dispatch.usage, dispatch(&.{"/bin/flong"}));
     try expectSub(.list, 1, &.{ "flong", "list" });
     try testing.expectEqualStrings("lsit", dispatch(&.{ "flong", "lsit" }).unknown);
+    try testing.expectEqualStrings("--version", dispatch(&.{ "flong", "--version" }).unknown);
     try testing.expectEqualStrings("", dispatch(&.{ "", "" }).unknown);
     // A path ending in a slash has an empty basename, as "" does.
     try expectSub(.launch, 1, &.{ "dir/", "launch" });
+}
+
+test "dispatch: --help and -h are help" {
+    try expectSub(.help, 1, &.{ "flong", "--help" });
+    try expectSub(.help, 1, &.{ "/bin/flong", "-h", "decl" });
+    // Only as flong's own first argument: a declaration's are its own.
+    try testing.expectEqualStrings("agent", dispatch(&.{ "agent", "--help" }).declaration);
+}
+
+test "help: its topics" {
+    try testing.expectEqual(HelpTopic.usage, helpTopic(&.{"help"}));
+    try testing.expectEqual(HelpTopic.usage, helpTopic(&.{"--help"}));
+    try testing.expectEqual(HelpTopic{ .decl = .text }, helpTopic(&.{ "help", "decl" }));
+    try testing.expectEqual(HelpTopic{ .decl = .markdown }, helpTopic(&.{ "help", "decl", "--markdown" }));
+    try testing.expectEqual(HelpTopic.bad, helpTopic(&.{ "help", "launch" }));
+    try testing.expectEqual(HelpTopic.bad, helpTopic(&.{ "help", "decl", "--html" }));
+    try testing.expectEqual(HelpTopic.bad, helpTopic(&.{ "help", "decl", "--markdown", "x" }));
+}
+
+test "help: every subcommand has its paragraph, and no store path" {
+    inline for (@typeInfo(Sub).@"enum".fields) |f| {
+        if (std.mem.indexOf(u8, help_text, "\n\nflong " ++ f.name ++ " ") == null and
+            std.mem.indexOf(u8, help_text, "\n\nflong " ++ f.name ++ "\n") == null) return error.NoParagraph;
+    }
+    try testing.expect(std.mem.startsWith(u8, help_text, usage ++ "\n\n"));
+    try testing.expect(std.mem.endsWith(u8, help_text, "exits 2.\n"));
+    try testing.expect(std.mem.indexOf(u8, help_text, "/nix/store") == null);
+    // Each line fits a terminal.
+    var lines = std.mem.splitScalar(u8, help_text, '\n');
+    while (lines.next()) |line| try testing.expect(line.len <= 76);
 }

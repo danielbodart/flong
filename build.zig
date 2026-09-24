@@ -33,8 +33,9 @@
 //!                 abi's aarch64 half
 //!   integration   the drivers checks.native runs (bin/flong-walker,
 //!                 bin/flong-proc), built only by tests/integration.nix
-//!   schema        decl-options.json at the package root, rewritten from
-//!                 src/decl.zig's fields and their doc comments
+//!   schema        decl-options.json at the package root, and
+//!                 docs/declaration.md, rewritten from src/decl.zig's
+//!                 fields and their doc comments
 //!
 //! Every path a step reads is a lazy b.path, so an install set's derivation,
 //! which holds build.zig, build.zig.zon and its own sources only, configures
@@ -508,10 +509,11 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    // ---- schema: decl-options.json ----
-    // build/schema.zig, for the host, prints decl_docs.writeSchema, and its
-    // output replaces the checked-in file.
-    const schema_step = b.step("schema", "Write decl-options.json from src/decl.zig");
+    // ---- schema: decl-options.json and docs/declaration.md ----
+    // build/schema.zig, for the host, prints decl_docs.writeSchema, or
+    // writeReference's Markdown, and its outputs replace the checked-in
+    // files.
+    const schema_step = b.step("schema", "Write decl-options.json and docs/declaration.md from src/decl.zig");
     {
         const d = declModules(b, modules(b, b.graph.host, .Debug), b.graph.host, .Debug, b.path("src/decl.zig"));
         const exe = b.addExecutable(.{
@@ -525,6 +527,9 @@ pub fn build(b: *std.Build) void {
         });
         const update = b.addUpdateSourceFiles();
         update.addCopyFileToSource(b.addRunArtifact(exe).captureStdOut(), "decl-options.json");
+        const reference = b.addRunArtifact(exe);
+        reference.addArg("reference");
+        update.addCopyFileToSource(reference.captureStdOut(), "docs/declaration.md");
         schema_step.dependOn(&update.step);
     }
 

@@ -80,6 +80,18 @@
             touch $out
           '';
 
+          # docs/declaration.md, the declaration's reference for a reader
+          # without Nix, against a fresh walk: `flong help decl --markdown`,
+          # the same walk as decl-options.json's (src/decl_docs.zig).
+          reference-fresh = pkgs.runCommand "reference-fresh" { } ''
+            ${native.launcher}/bin/flong help decl --markdown >fresh.md
+            if ! diff -u ${./docs/declaration.md} fresh.md; then
+              echo "docs/declaration.md is stale: run nix run .#update-options" >&2
+              exit 1
+            fi
+            touch $out
+          '';
+
           # The version script decides what every release is called, so it is
           # gated by the same check that gates the release.
           shellcheck = pkgs.runCommand "shellcheck"
@@ -122,9 +134,10 @@
           meta.description = "Rewrite tests/golden's filters after a libseccomp bump";
         };
 
-        # update-options rewrites decl-options.json from src/decl.zig, after
-        # a change to the declaration or a doc comment in it: run it from the
-        # repository's root, and commit the result with the change.
+        # update-options rewrites decl-options.json and docs/declaration.md
+        # from src/decl.zig, after a change to the declaration or a doc
+        # comment in it: run it from the repository's root, and commit the
+        # results with the change.
         update-options = {
           type = "app";
           program = pkgs.lib.getExe (pkgs.writeShellApplication {
@@ -134,13 +147,16 @@
                 echo "update-options: run it from flong's repository root" >&2
                 exit 1
               fi
+              flong=${(import ./native.nix { inherit pkgs; }).launcher}/bin/flong
               fresh=$(mktemp)
               trap 'rm -f "$fresh"' EXIT
-              ${(import ./native.nix { inherit pkgs; }).launcher}/bin/flong schema >"$fresh"
+              "$flong" schema >"$fresh"
               install -m 0644 "$fresh" decl-options.json
+              "$flong" help decl --markdown >"$fresh"
+              install -D -m 0644 "$fresh" docs/declaration.md
             '';
           });
-          meta.description = "Rewrite decl-options.json from src/decl.zig";
+          meta.description = "Rewrite decl-options.json and docs/declaration.md from src/decl.zig";
         };
 
         # The local gate, `nix run .#gate` from the repository's root: every

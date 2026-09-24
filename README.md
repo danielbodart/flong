@@ -261,6 +261,10 @@ Every hook but `workspace` is a list of commands, run in order: several
 modules' lists concatenate, ordered with `mkBefore` and `mkAfter`.
 `workspace` is one command, or `null` for the directory the launcher starts
 in. Each declaration is also written, as data, to `/etc/flong/<name>.zon`.
+[docs/declaration.md](docs/declaration.md) is that file's reference, every
+field with its type, default and full description, generated from the same
+source as these options; `flong help decl` prints it, and `flong help` the
+usage of every subcommand.
 
 | option | default | meaning |
 |---|---|---|
@@ -464,6 +468,12 @@ builds the launcher (`flong`, whose subcommands are `launch`, `init` and
 Zig, with their unit and property tests, lint and analysis; evaluates each
 refusal; and shellchecks the version script.
 `nix build .#bench` times launches in a VM.
+
+A declaration's fields and their descriptions live in `src/decl.zig`, as doc
+comments. After changing one, `nix run .#update-options` rewrites
+`decl-options.json`, which the module builds its options from, and
+`docs/declaration.md`; `decl-options-fresh` and `reference-fresh` fail until
+both are committed.
 
 ```console
 $ nix run .#gate

@@ -1612,7 +1612,7 @@ Every installed artifact is ReleaseSafe, stripped by the build,
 fmt`), `native-analyze`, `cross-aarch64` (on x86_64), `launcher`, `seccomp`,
 `golden`, `integration`, the VM tests `native`, `basic-a`, `basic-b`,
 `rootless-a`, `rootless-b` and `parity`, the six `assertions-N` shards,
-`assertions-decl`, `decl-options-fresh` and `shellcheck`. `native` boots one node with a lingering user, subordinate
+`assertions-decl`, `decl-options-fresh`, `reference-fresh` and `shellcheck`. `native` boots one node with a lingering user, subordinate
 ranges and a delegated user manager, for what the build sandbox cannot do:
 `clone3` into a cgroup, U1 and U2 through the real `newuidmap`, the walker
 against a symlink swapper, the spawn probe, the terminal through a pty, the
@@ -1659,12 +1659,13 @@ The native code is tested at four levels, each a check.
   bump changes nothing), flong init's argv refusals, flong sweeper's usage
   and state-directory refusals; `flong launch`'s entry (its usage, a name
   with no declaration, a declaration that does not parse or that `flong
-  check` refuses, and one that reaches the prologue); and `flong check`
+  check` refuses, and one that reaches the prologue); `flong check`
   over `tests/golden/decl/`, one declaration a case, each refusal of a
-  declaration with its accepted counterpart (below). The spec's own cases,
-  recorded from the C's argv parser, went with it in S3: each refusal a
-  value can still reach is a case of `tests/zig/spec_test.zig` under its
-  old name. What
+  declaration with its accepted counterpart (below); and `flong help`'s
+  text and flong's usage errors (`tests/golden/help/`). The spec's own
+  cases, recorded from the C's argv parser, went with it in S3: each
+  refusal a value can still reach is a case of `tests/zig/spec_test.zig`
+  under its old name. What
   a case derives (store paths, project keys) is filled in as the check
   runs. The `.bpf` files follow golden-update's rule above.
 - **Unit and property tests** (minish, `native-test`): the descriptor
@@ -1744,7 +1745,8 @@ ports.
 | `src/cgroup.zig` | the nsdelegate check, finding or starting the holder, the session cgroup, its limits and leaves; kill, wait, remove |
 | `src/record.zig` | the state directory, records and `leader=`, liveness, the sweep, `postStop`, the watch |
 | `src/tty.zig` | the foreground wait, the pty relay or passthrough, raw mode, the watchdog, `^]^]^]`, the wait for bwrap |
-| `src/main.zig` | `flong`'s root: the dispatch, the start settings and the one panic handler; each subcommand's `main` is handed argv from its word on |
+| `src/main.zig` | `flong`'s root: the dispatch, the start settings and the one panic handler; each subcommand's `main` is handed argv from its word on; `flong help`'s text |
+| `src/decl_docs.zig` | the walk of the declaration's type and doc comments: `flong schema` (`decl-options.json`) and `flong help decl` (`docs/declaration.md`, with `--markdown`) |
 | `src/mount.zig` | the mount helper, a fork body of `flong launch`'s: sources, the walker, masks, overlays, `/sys`, `/run` read-only; checkpoint 7 |
 | `src/launch.zig` | `flong launch`: `main` (its words), the declaration loaded and judged, `launch` (the prologue), `run` and `teardown`, the order of a launch; checkpoints 1, 2, 3, 5 and 6 |
 | `src/launch/` | the launch's pieces, each tested alone: `assemble.zig` (the prologue's work in the wrapper's order, building the spec) and its pieces `caller.zig`, `workspace.zig`, `cmd.zig`, `binds.zig`, `refuse.zig`, `depth.zig`, `subid.zig`, `prepare.zig`, `identity.zig`, `groups.zig`, `hometmp.zig` and `resolv.zig`; `lookup.zig` (a name's declaration); `prologue.zig` (the cache lock, the relaunch, the close of what was inherited, the protected paths), `bwrap.zig` (its spawn), `childpid.zig` (`--info-fd`), `hook.zig` (`postStart`), `pasta.zig` |

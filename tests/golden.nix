@@ -57,7 +57,8 @@
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:10-19
 # does; seccomp is the program the seccomp sets run against, launcher the
 # output whose flong the init, sweeper, launch and decl sets run as `flong
-# init`, `flong sweeper`, `flong launch` and `flong check`.
+# init`, `flong sweeper`, `flong launch` and `flong check`, and the help set
+# as itself.
 {
   pkgs ?
     let
@@ -216,6 +217,18 @@ let
       vars = {
         GOLDEN = "${cases}";
       };
+    };
+
+    # Recorded from flong of 2026-09-24 (src/main.zig, STANDALONE.md S4):
+    # `flong help`'s text, whole, which describes flong launch as S3
+    # delivers it; flong alone and a word that is no subcommand, each the
+    # usage and 2; flong help's topics refused, 2. `flong help decl` has
+    # no case: its Markdown is docs/declaration.md, which reference-fresh
+    # holds to it, and its text decl_docs.zig's tests. No `sub`: each case
+    # names its own first argument.
+    help = {
+      program = "${launcher}/bin/flong";
+      vars = { };
     };
 
     # The subcommands' usage errors, the one text phase 2 (a) changed

@@ -1,0 +1,9 @@
+flong: no subcommand "frobnicate"
+usage: flong launch DECL.zon [-- ARGUMENT...]
+       flong launch NAME [-- ARGUMENT...]
+       NAME [ARGUMENT...]
+       flong list
+       flong check DECL.zon
+       flong schema
+       flong help [decl [--markdown]]
+       flong version
