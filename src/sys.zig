@@ -23,7 +23,10 @@
 //! pidfd, pidfd_open and pidfd_send_signal, poll, pipe2, the signal mask,
 //! signalfd4 and dispositions, fcntl and dup2 for Spawn's child, inotify,
 //! the real and effective uid, and faccessat for postStop's X_OK; phase 7
-//! the launch's records (flong-record.c:343-356): O_TMPFILE and linkat.
+//! the launch's records (flong-record.c:343-356): O_TMPFILE and linkat;
+//! phase 7's L3 the terminal's (flong-tty.c): the termios, window size and
+//! foreground ioctls, the pty's unlock and number, cfmakeraw, SIGTTOU's
+//! disposition, getpgrp, kill and the monotonic clock.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -859,6 +862,213 @@ pub const O_TMPFILE: O = .{ .TMPFILE = true, .DIRECTORY = true };
 /// /proc/self/fd/N needs to name the file and not the magic link.
 pub fn linkat(old_dir: fd_t, old: [*:0]const u8, new_dir: fd_t, new: [*:0]const u8, flags: u32) Result(void) {
     return result(void, linux.linkat(old_dir, old, new_dir, new, @intCast(flags)));
+}
+
+// ---- the terminal (flong-tty.c; phase 7 L3) ----
+
+/// The kernel's struct termios (asm-generic/termbits.h, x86_64's and
+/// aarch64's): four flag words, the line discipline and 19 control
+/// characters, 36 bytes, what TCGETS fills and TCSETS reads. Not std's
+/// linux.termios, which is glibc's (32 characters and two speeds, 60
+/// bytes). glibc's tcgetattr and tcsetattr convert to and from their own
+/// struct around the ioctls; the launcher saves only modes the kernel gave
+/// and hands them back, changed by cfmakeraw alone (flong-tty.c:94-107,
+/// 188), so the kernel's struct is all it needs.
+pub const Termios = extern struct {
+    iflag: u32,
+    oflag: u32,
+    cflag: u32,
+    lflag: u32,
+    line: u8,
+    cc: [nccs]u8,
+};
+pub const nccs = 19;
+
+comptime {
+    std.debug.assert(@sizeOf(Termios) == 36);
+    std.debug.assert(@offsetOf(Termios, "cc") == 17);
+}
+
+/// struct winsize (asm-generic/termios.h), as TIOCGWINSZ and TIOCSWINSZ
+/// take it.
+pub const Winsize = extern struct {
+    row: u16,
+    col: u16,
+    xpixel: u16,
+    ypixel: u16,
+};
+
+/// The terminal ioctls (asm-generic/ioctls.h, x86_64's and aarch64's; the
+/// generic branch of std's T, linux.zig:5090-5139).
+pub const TCGETS: u32 = 0x5401;
+pub const TCSETS: u32 = 0x5402;
+pub const TCSETSF: u32 = 0x5404;
+pub const TIOCGPGRP: u32 = 0x540F;
+pub const TIOCSPGRP: u32 = 0x5410;
+pub const TIOCGWINSZ: u32 = 0x5413;
+pub const TIOCSWINSZ: u32 = 0x5414;
+/// _IOR('T', 0x30, unsigned int) and _IOW('T', 0x31, int).
+pub const TIOCGPTN: u32 = 0x80045430;
+pub const TIOCSPTLCK: u32 = 0x40045431;
+
+/// tcsetattr's action: TCSANOW is TCSETS, TCSAFLUSH TCSETSF, as glibc's
+/// tcsetattr maps them.
+pub const Tcsa = enum { now, flush };
+
+/// The termios bits cfmakeraw clears and sets (asm-generic/termbits.h).
+pub const IGNBRK: u32 = 0o1;
+pub const BRKINT: u32 = 0o2;
+pub const PARMRK: u32 = 0o10;
+pub const ISTRIP: u32 = 0o40;
+pub const INLCR: u32 = 0o100;
+pub const IGNCR: u32 = 0o200;
+pub const ICRNL: u32 = 0o400;
+pub const IXON: u32 = 0o2000;
+pub const OPOST: u32 = 0o1;
+pub const ISIG: u32 = 0o1;
+pub const ICANON: u32 = 0o2;
+pub const ECHO: u32 = 0o10;
+pub const ECHONL: u32 = 0o100;
+pub const IEXTEN: u32 = 0o100000;
+pub const CSIZE: u32 = 0o60;
+pub const CS8: u32 = 0o60;
+pub const PARENB: u32 = 0o400;
+/// Indices into `cc`.
+pub const VTIME = 5;
+pub const VMIN = 6;
+
+/// cfmakeraw(3) with glibc's bits (glibc termios/cfmakeraw.c; held to
+/// glibc's by tests/zig/libc_tty.zig): no input or output processing, no
+/// echo, canonical mode, signal keys or extensions, eight bits without
+/// parity, and a read that returns once one byte is there.
+pub fn cfmakeraw(t: *Termios) void {
+    t.iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
+    t.oflag &= ~OPOST;
+    t.lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    t.cflag &= ~(CSIZE | PARENB);
+    t.cflag |= CS8;
+    t.cc[VMIN] = 1;
+    t.cc[VTIME] = 0;
+}
+
+/// tcgetattr(3): TCGETS.
+pub fn tcgetattr(fd: fd_t) Result(Termios) {
+    var t: Termios = undefined;
+    return switch (result(void, linux.syscall3(.ioctl, @bitCast(@as(isize, fd)), TCGETS, @intFromPtr(&t)))) {
+        .ok => .{ .ok = t },
+        .err => |e| .{ .err = e },
+    };
+}
+
+/// tcsetattr(3): TCSETS or TCSETSF. Not retried: a background caller is
+/// stopped by SIGTTOU inside it, and the kernel restarts it on SIGCONT, as
+/// it restarted glibc's.
+pub fn tcsetattr(fd: fd_t, when: Tcsa, t: *const Termios) Result(void) {
+    const request = switch (when) {
+        .now => TCSETS,
+        .flush => TCSETSF,
+    };
+    return result(void, linux.syscall3(.ioctl, @bitCast(@as(isize, fd)), request, @intFromPtr(t)));
+}
+
+/// isatty(3): TCGETS succeeding, the question glibc's asks.
+pub fn isatty(fd: fd_t) bool {
+    return tcgetattr(fd) == .ok;
+}
+
+pub fn getWinsize(fd: fd_t) Result(Winsize) {
+    var ws: Winsize = undefined;
+    return switch (result(void, linux.syscall3(.ioctl, @bitCast(@as(isize, fd)), TIOCGWINSZ, @intFromPtr(&ws)))) {
+        .ok => .{ .ok = ws },
+        .err => |e| .{ .err = e },
+    };
+}
+
+pub fn setWinsize(fd: fd_t, ws: *const Winsize) Result(void) {
+    return result(void, linux.syscall3(.ioctl, @bitCast(@as(isize, fd)), TIOCSWINSZ, @intFromPtr(ws)));
+}
+
+/// tcgetpgrp(3): TIOCGPGRP, the terminal's foreground process group.
+pub fn tcgetpgrp(fd: fd_t) Result(pid_t) {
+    var pgrp: pid_t = 0;
+    return switch (result(void, linux.syscall3(.ioctl, @bitCast(@as(isize, fd)), TIOCGPGRP, @intFromPtr(&pgrp)))) {
+        .ok => .{ .ok = pgrp },
+        .err => |e| .{ .err = e },
+    };
+}
+
+/// tcsetpgrp(3): TIOCSPGRP.
+pub fn tcsetpgrp(fd: fd_t, pgrp: pid_t) Result(void) {
+    return result(void, linux.syscall3(.ioctl, @bitCast(@as(isize, fd)), TIOCSPGRP, @intFromPtr(&pgrp)));
+}
+
+/// unlockpt(3): TIOCSPTLCK with 0.
+pub fn unlockpt(fd: fd_t) Result(void) {
+    const unlock: i32 = 0;
+    return result(void, linux.syscall3(.ioctl, @bitCast(@as(isize, fd)), TIOCSPTLCK, @intFromPtr(&unlock)));
+}
+
+/// TIOCGPTN: the pty's number, the N of /dev/pts/N (glibc's ptsname_r).
+pub fn ptyNumber(fd: fd_t) Result(u32) {
+    var n: u32 = 0;
+    return switch (result(void, linux.syscall3(.ioctl, @bitCast(@as(isize, fd)), TIOCGPTN, @intFromPtr(&n)))) {
+        .ok => .{ .ok = n },
+        .err => |e| .{ .err = e },
+    };
+}
+
+/// getpgrp(2) as getpgid(0), which both arches have (aarch64 has no
+/// getpgrp). It cannot fail.
+pub fn getpgrp() pid_t {
+    return @bitCast(@as(u32, @truncate(linux.syscall1(.getpgid, 0))));
+}
+
+/// kill(2): `pid` 0 is the caller's process group, -N the group N; `sig`
+/// 0 only asks whether it could be sent.
+pub fn kill(pid: pid_t, sig: i32) Result(void) {
+    return result(void, linux.kill(pid, sig));
+}
+
+pub const SIGTTOU = 22;
+
+/// rt_sigaction(sig, act, old), either pointer null as the C passes NULL:
+/// `old` receives the action before the call, which a caller may put back
+/// as it is (flong-tty.c:45, 86-92).
+pub fn sigaction(sig: u7, act: ?*const KSigaction, old: ?*KSigaction) Result(void) {
+    return result(void, linux.syscall4(.rt_sigaction, sig, @intFromPtr(act), @intFromPtr(old), @sizeOf(u64)));
+}
+
+/// SIG_IGN, an empty mask and no flags, as `{ .sa_handler = SIG_IGN }`
+/// reaches the kernel through glibc's sigaction: with SA_RESTORER and a
+/// restorer on x86_64 (sigDefault's).
+pub fn ignoreAction() KSigaction {
+    const x86 = builtin.cpu.arch == .x86_64;
+    return .{
+        .handler = sig_ign,
+        .flags = if (x86) sa_restorer else 0,
+        .restorer = if (x86) @intFromPtr(&linux.restore_rt) else 0,
+        .mask = 0,
+    };
+}
+
+/// The signal mask, read with rt_sigprocmask(SIG_BLOCK, NULL, &old).
+pub fn sigmask() Result(u64) {
+    var old: u64 = 0;
+    return switch (result(void, linux.syscall4(.rt_sigprocmask, SIG_BLOCK, 0, @intFromPtr(&old), @sizeOf(u64)))) {
+        .ok => .{ .ok = old },
+        .err => |e| .{ .err = e },
+    };
+}
+
+/// PR_SET_NAME (linux/prctl.h): the thread's name, /proc's comm.
+pub const PR_SET_NAME = 15;
+
+/// CLOCK_MONOTONIC in nanoseconds, the ^] escape's clock
+/// (flong-tty.c:362-372). It cannot fail with a valid clock and pointer.
+pub fn clockMonotonic() i64 {
+    var t: timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &t);
+    return @as(i64, t.sec) * std.time.ns_per_s + t.nsec;
 }
 
 test "read and write carry the errno" {

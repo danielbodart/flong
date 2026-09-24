@@ -31,7 +31,10 @@
 //! reserved before clone3) and `retainOnly`, a fork child's close of all
 //! but its keep list. Phase 7's L2 adds the launch's: `record` (a session's
 //! record, made unnamed with O_TMPFILE, flong-record.c:343-386) and U1's
-//! and U2's `userns` by /proc/<pid>/ns/user (flong-ns.c:141-150).
+//! and U2's `userns` by /proc/<pid>/ns/user (flong-ns.c:141-150). L3 adds
+//! the terminal's (flong-tty.c): `pty_master`, `pty_slave` and `tty_out`,
+//! the terminal calls on Stdio, and `pollEntry`, for a poll over several
+//! descriptors.
 //!
 //!   Fd(k)       an owned handle: `close` once, then every copy is stale
 //!   Held(k)     `h.holdUntilExit()`: the same descriptor, no `close`, for
@@ -76,6 +79,13 @@ pub const Kind = enum(u8) {
     /// read and blanked at 0, linked by its selfPath, unlinked before its
     /// close (ZIG.md, ordering checkpoint 10).
     record,
+    /// The relay's pty master, O_NONBLOCK (flong-tty.c:169-175).
+    pty_master,
+    /// The pty's slave, opened by path: the payload's terminal.
+    pty_slave,
+    /// The caller's terminal opened again, O_NONBLOCK, for the relay's
+    /// output (flong-tty.c:196-203).
+    tty_out,
 };
 
 /// A namespace setns enters, with the kind of descriptor naming it.
@@ -258,12 +268,12 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
         // ---- file ----
 
         pub fn read(self: Self, buf: []u8) sys.Result(usize) {
-            comptime need("read", &.{ .file, .pipe_r });
+            comptime need("read", &.{ .file, .pipe_r, .pty_master });
             return sys.read(self.raw(), buf);
         }
 
         pub fn write(self: Self, bytes: []const u8) sys.Result(usize) {
-            comptime need("write", &.{ .file, .pipe_w, .record });
+            comptime need("write", &.{ .file, .pipe_w, .record, .pty_master, .tty_out });
             return sys.write(self.raw(), bytes);
         }
 
@@ -446,6 +456,32 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
         pub fn readSiginfo(self: Self, si: *sys.SignalfdSiginfo) sys.Result(usize) {
             comptime need("readSiginfo", &.{.signalfd});
             return sys.read(self.raw(), std.mem.asBytes(si));
+        }
+
+        // ---- the terminal ----
+
+        /// unlockpt(3), TIOCSPTLCK (flong-tty.c:177).
+        pub fn unlock(self: Self) sys.Result(void) {
+            comptime need("unlock", &.{.pty_master});
+            return sys.unlockpt(self.raw());
+        }
+
+        /// TIOCGPTN: the N of the slave's /dev/pts/N (flong-tty.c:178).
+        pub fn ptyNumber(self: Self) sys.Result(u32) {
+            comptime need("ptyNumber", &.{.pty_master});
+            return sys.ptyNumber(self.raw());
+        }
+
+        /// TIOCSWINSZ: the pty's window size (flong-tty.c:192, 281).
+        pub fn setWinsize(self: Self, ws: *const sys.Winsize) sys.Result(void) {
+            comptime need("setWinsize", &.{ .pty_master, .pty_slave });
+            return sys.setWinsize(self.raw(), ws);
+        }
+
+        /// tcsetattr(3) of the payload's terminal (flong-tty.c:188).
+        pub fn tcsetattr(self: Self, when: sys.Tcsa, t: *const sys.Termios) sys.Result(void) {
+            comptime need("tcsetattr", &.{.pty_slave});
+            return sys.tcsetattr(self.raw(), when, t);
         }
     };
 }
@@ -657,6 +693,26 @@ pub fn openNs(pidfd: Fd(.pidfd), comptime k: Kind) Error!sys.Result(Fd(k)) {
     return adopted(k, sys.ioctlFd(pidfd.raw(), request, 0));
 }
 
+/// posix_openpt(O_RDWR|O_NOCTTY|O_CLOEXEC|O_NONBLOCK), glibc's open of
+/// /dev/ptmx (flong-tty.c:174): a new pty's master.
+pub fn openPtmx() Error!sys.Result(Fd(.pty_master)) {
+    return adopted(.pty_master, sys.openat(sys.AT.FDCWD, "/dev/ptmx", .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true, .NONBLOCK = true }, 0));
+}
+
+/// The pty's slave by its path, O_RDWR|O_NOCTTY|O_CLOEXEC
+/// (flong-tty.c:182).
+pub fn openSlave(path: [*:0]const u8) Error!sys.Result(Fd(.pty_slave)) {
+    return adopted(.pty_slave, sys.openat(sys.AT.FDCWD, path, .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true }, 0));
+}
+
+/// The caller's terminal opened again through /proc/self/fd/1,
+/// O_WRONLY|O_NOCTTY|O_NONBLOCK|O_CLOEXEC (flong-tty.c:196-203): a new
+/// open file description, non-blocking without changing fd 1's. A terminal
+/// the caller may not open (after su) refuses it (quirk 42).
+pub fn reopenOut() Error!sys.Result(Fd(.tty_out)) {
+    return adopted(.tty_out, sys.openat(sys.AT.FDCWD, "/proc/self/fd/1", .{ .ACCMODE = .WRONLY, .NOCTTY = true, .NONBLOCK = true, .CLOEXEC = true }, 0));
+}
+
 /// A descriptor a C caller opened and handed over, as kind `k`: the
 /// mount-helper shim's (src/hybrid/mount_c.zig) U1, ready read end and
 /// leader's pidfd (ZIG.md, "The mount-helper shim"). The lint allows it
@@ -777,7 +833,44 @@ pub const Stdio = enum(u2) {
     pub fn writeAll(self: Stdio, bytes: []const u8) sys.Result(void) {
         return writeAllTo(self.raw(), bytes);
     }
+
+    // ---- the caller's terminal (flong-tty.c) ----
+
+    pub fn isatty(self: Stdio) bool {
+        return sys.isatty(self.raw());
+    }
+
+    pub fn tcgetattr(self: Stdio) sys.Result(sys.Termios) {
+        return sys.tcgetattr(self.raw());
+    }
+
+    pub fn tcsetattr(self: Stdio, when: sys.Tcsa, t: *const sys.Termios) sys.Result(void) {
+        return sys.tcsetattr(self.raw(), when, t);
+    }
+
+    pub fn getWinsize(self: Stdio) sys.Result(sys.Winsize) {
+        return sys.getWinsize(self.raw());
+    }
+
+    pub fn tcgetpgrp(self: Stdio) sys.Result(sys.pid_t) {
+        return sys.tcgetpgrp(self.raw());
+    }
+
+    pub fn tcsetpgrp(self: Stdio, pgrp: sys.pid_t) sys.Result(void) {
+        return sys.tcsetpgrp(self.raw(), pgrp);
+    }
 };
+
+/// A pollfd for `h`, a handle of any kind, Stdio, or an optional of
+/// either, null being an entry poll skips (fd -1): for a poll over several
+/// descriptors outside the syscall layer, the relay's (flong-tty.c:393-405).
+/// The number goes into the kernel's array and nowhere else.
+pub fn pollEntry(h: anytype, events: i16) sys.pollfd {
+    if (@typeInfo(@TypeOf(h)) == .optional) {
+        return if (h) |x| pollEntry(x, events) else .{ .fd = -1, .events = events, .revents = 0 };
+    }
+    return .{ .fd = h.raw(), .events = events, .revents = 0 };
+}
 
 fn writeAllTo(raw: sys.fd_t, bytes: []const u8) sys.Result(void) {
     var rest = bytes;

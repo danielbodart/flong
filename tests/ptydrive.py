@@ -35,19 +35,36 @@ The scenarios:
   hangup     closes the master and waits for COMMAND's exit: status=
   output     a newline, then every line the payload printed until it
              exits (line=) and status=
+  eio        a newline; the payload prints "bye", closes its terminal and
+             says so in $PTYDRIVE_DIR/closed: closed=, then whether COMMAND
+             sleeps (idle=, see asleep()), then SIGTERMs COMMAND: status=
+  drain      stops the caller's terminal's output (TCOOFF), a newline; the
+             payload prints numbered lines, writes its pid to
+             $PTYDRIVE_DIR/done and exits; once it is a zombie (exited,
+             not reaped) the output starts again (TCOON). The number lines
+             seen while stopped (before=), all of them (lines=, last=),
+             status=
+  winch      puts the terminal in canonical mode and sends ^D, so
+             COMMAND's stdin reads EOF; waits for $PTYDRIVE_DIR/hup, which
+             the payload's SIGHUP trap makes (hup=), SIGWINCHes COMMAND,
+             makes $PTYDRIVE_DIR/go: status=
 
 Statuses are a shell's: the exit code, or 128 plus the signal. The driver's
-own failure (no "ready") exits 2.
+own failure (no "ready") exits 2. COMMAND gets PTYDRIVE_DIR in its
+environment: a directory of the driver's, for the files the scenarios and
+payloads say things through, removed at the end.
 """
 
 import fcntl
 import os
 import re
 import select
+import shutil
 import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 import time
 
@@ -252,6 +269,26 @@ def stopped(pid):
         return f.read().rsplit(")", 1)[1].split()[0] == "T"
 
 
+def state(pid):
+    """PID's state letter, from /proc/PID/stat; "" once it is gone."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return ""
+
+
+def asleep(pid, samples=10):
+    """Whether PID is sleeping (S) at SAMPLES reads 50 ms apart, every one:
+    a process blocked in poll is, and one spinning on a descriptor that
+    stays ready never is."""
+    for _ in range(samples):
+        if state(pid) != "S":
+            return False
+        time.sleep(0.05)
+    return True
+
+
 def guard_pid(t):
     """The pid of COMMAND's child named flong-ttyguard, the watchdog
     (flong-tty.c:243-246), or None."""
@@ -306,6 +343,16 @@ def main():
         args = args[2:]
     if args[:1] != ["--"] or len(args) < 2:
         sys.exit(__doc__.split("\n\n")[0])
+    d = tempfile.mkdtemp(prefix="ptydrive-")
+    os.chmod(d, 0o755)
+    os.environ["PTYDRIVE_DIR"] = d
+    try:
+        run(scenario, args, stderr, d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def run(scenario, args, stderr, d):
     t = Outer(args[1:], stderr)
     t.expect_line("ready")
     print(f"pid={t.pid}", flush=True)
@@ -358,6 +405,40 @@ def main():
             if line:
                 print(f"line={line}")
         print(f"status={status}")
+    elif scenario == "eio":
+        t.send(b"\n")
+        t.expect_line("bye", WAIT)
+        closed = t.until(lambda: os.path.exists(f"{d}/closed"))
+        print(f"closed={'yes' if closed else 'no'}")
+        # Every slave closed: the master reports POLLHUP from here on, so a
+        # relay still polling it would never sleep.
+        print(f"idle={'yes' if t.until(lambda: asleep(t.pid)) else 'no'}")
+        # And the launcher still forwards a signal to the leader.
+        os.kill(t.pid, signal.SIGTERM)
+        print(f"status={t.wait()}")
+    elif scenario == "drain":
+        termios.tcflow(t.slave, termios.TCOOFF)
+        t.send(b"\n")
+        done = f"{d}/done"
+        t.until(lambda: os.path.exists(done) and os.path.getsize(done) > 0)
+        with open(done) as f:
+            payload = f.read().strip()
+        t.until(lambda: state(payload) == "Z")
+        before = [ln for ln in t.text().split("\n") if re.fullmatch(r"\d+", ln)]
+        print(f"before={len(before)}")
+        termios.tcflow(t.slave, termios.TCOON)
+        status = t.wait()
+        nums = [ln for ln in t.text().split("\n") if re.fullmatch(r"\d+", ln)]
+        print(f"lines={len(nums)} last={nums[-1] if nums else 'none'}")
+        print(f"status={status}")
+    elif scenario == "winch":
+        subprocess.run(["stty", "icanon"], stdin=t.slave, check=True)
+        t.send(b"\x04")
+        hup = t.until(lambda: os.path.exists(f"{d}/hup"))
+        print(f"hup={'yes' if hup else 'no'}")
+        os.kill(t.pid, signal.SIGWINCH)
+        open(f"{d}/go", "w").close()
+        print(f"status={t.wait()}")
     else:
         sys.exit(f"ptydrive: no scenario {scenario!r}")
     t.kill()

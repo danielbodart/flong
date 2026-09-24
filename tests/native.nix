@@ -5,8 +5,9 @@
 # order (ZIG.md, "Tests", checks.native). Before them, flong-init past its
 # argv, the walker, and flong-proc: clone3 into a cgroup, a fork after
 # setns(CLONE_NEWUSER), a session swept, and the C and the Zig sweepers
-# over the same records (phase 5). A fourth VM beside basic, rootless and
-# parity; nothing in it is about time.
+# over the same records (phase 5); src/tty.zig through flong-tty and
+# ptydrive (phase 7's L3). A fourth VM beside basic, rootless and parity;
+# nothing in it is about time.
 #
 # Fragments are Python run in this testScript's scope, so they may use
 # `machine`, `shlex` and `as_alice`; each opens its own subtest.
@@ -371,6 +372,9 @@ in
       pkgs.util-linux
       integration.vm
       (probes pkgs)
+      # The caller's terminal and shell for flong-tty, rootless.nix's L0
+      # driver (ZIG.md phase 7 L3).
+      (pkgs.writers.writePython3Bin "ptydrive" { flakeIgnore = [ "E501" ]; } (builtins.readFile ./ptydrive.py))
     ];
   };
 
@@ -670,5 +674,95 @@ in
             "flong-sweeper: released 1 dead session",
             "flong-sweeper: rmdir H/c/once/sandbox/inner: Permission denied",
         ], out
+
+    with subtest("tty: the relay both ways, EIO, the drain, the window, the watchdog, a hang-up then SIGWINCH, and a terminal alice cannot reopen"):
+        # ZIG.md phase 7 L3: src/tty.zig through flong-tty
+        # (tests/zig/ttydriver.zig), which drives it as the launcher does,
+        # PROGRAM standing in for bwrap and the payload; ptydrive
+        # (tests/ptydrive.py) plays the caller's terminal and shell, as for
+        # rootless.nix's L0 subtest of the C, whose lines the first runs
+        # repeat. Each run's lines are compared whole, after its pid= line.
+        # CTTY runs the payload under `setsid -c`, the pty its controlling
+        # terminal, as flong-init makes it, for a hang-up to reach it.
+        SH = "/run/current-system/sw/bin/sh"
+        def drive(scenario, payload, stderr=None, ctty=False, root=False):
+            opt = f"--stderr {stderr} " if stderr else ""
+            prog = f"/run/current-system/sw/bin/setsid -c {SH}" if ctty else SH
+            launch = f"flong-tty --report {prog} -c {shlex.quote(payload)}"
+            if root:
+                out = machine.succeed(f"ptydrive {scenario} {opt}-- setpriv --reuid=alice --regid=users --init-groups {launch}")
+            else:
+                out = machine.succeed(as_alice(f"ptydrive {scenario} {opt}-- {launch}"))
+            lines = out.splitlines()
+            assert lines[0].startswith("pid="), (scenario, out)
+            return lines[1:]
+
+        READ = "echo ready; read -r l; exit 7"
+        # The relay both ways: every input byte reaches the payload, the ^]
+        # run another key broke included, and its output the terminal
+        # (flong-tty.c:384-492); three ^] in a row are the escape's 137.
+        lines = drive("keys", "echo ready; read -r l; [ \"$l\" = \"$(printf '\\035\\035x\\035')\" ] && exit 7; exit 8")
+        assert lines == ["status=7"], lines
+        lines = drive("escape", READ)
+        assert lines == ["status=137"], lines
+        OUT = "echo ready; read -r l; echo out; echo err >&2; [ -t 2 ] && echo err-tty || echo err-file"
+        lines = drive("output", OUT)
+        assert lines == ["line=out", "line=err", "line=err-tty", "status=0"], lines
+        # A redirected stderr stays where the caller sent it (quirk 43);
+        # the relay's output went through the terminal alice reopened.
+        machine.succeed("rm -f /tmp/tty-err")
+        lines = drive("output", OUT, "/tmp/tty-err")
+        assert lines == ["line=out", "line=err-file", "status=0"], lines
+        err = machine.succeed("cat /tmp/tty-err")
+        assert err == "flong-tty: tty.out: reopened\nerr\n", err
+
+        # A root-owned terminal, the launch run as alice through setpriv:
+        # the /proc/self/fd/1 reopen is refused, and the output still
+        # arrives, through fd 1 (quirk 42, flong-tty.c:196-203, 384).
+        machine.succeed("rm -f /tmp/tty-err")
+        lines = drive("output", OUT, "/tmp/tty-err", root=True)
+        assert lines == ["line=out", "line=err-file", "status=0"], lines
+        err = machine.succeed("cat /tmp/tty-err")
+        assert err == "flong-tty: tty.out: fd 1\nerr\n", err
+        machine.succeed("rm /tmp/tty-err")
+
+        # The window size copied at the start, 30x100, and a resize of the
+        # caller's terminal (:192-195, 276-282, 427-428).
+        lines = drive("resize", "echo ready; stty size; read -r l; stty size; exit 7")
+        assert lines == ["size=30 100", "size=40 120", "status=7"], lines
+
+        # SIGKILLed while the terminal is raw, the relay leaves the watchdog
+        # (checkpoint 8: 0-2, its pipe and the leader, nothing else), which
+        # puts the caller's modes back (:243-259, 293-321). SIGCONT makes
+        # the terminal raw again after the caller's shell restored it
+        # (:429-433), and a clean end restores it (:515-521).
+        lines = drive("watchdog", "echo ready; sleep infinity")
+        assert lines == ["guard=0:tty 1:tty 2:tty pidfd pipe", "raw=yes", "status=137", "restored=yes"], lines
+        lines = drive("sigcont", READ)
+        assert lines == ["raw=yes", "stopped=yes", "raw=no", "raw=yes", "status=7", "restored=yes"], lines
+
+        # EIO: the payload closes its terminal and lives on. The relay
+        # stops reading the master, whose every slave is closed, and sleeps
+        # in its poll instead of spinning on the master's POLLHUP; it still
+        # forwards SIGTERM to the leader (:436-444, 425-426).
+        lines = drive("eio", "echo ready; read -r l; echo bye; exec </dev/null >/dev/null 2>&1; touch \"$PTYDRIVE_DIR/closed\"; while :; do sleep 0.1; done")
+        assert lines == ["closed=yes", "idle=yes", "status=143"], lines
+
+        # The drain: the caller's terminal stopped (TCOOFF) while the
+        # payload writes and exits, so the relay holds output when bwrap
+        # is gone; restarted, every line arrives (:498-511). before=0 is
+        # the control that the stop held the output back.
+        lines = drive("drain", "echo ready; read -r l; seq 1 2000; echo $$ > \"$PTYDRIVE_DIR/done\"; exit 3")
+        assert lines == ["before=0", "lines=2000 last=2000", "status=3"], lines
+
+        # Hang-ups: the terminal gone, the payload's session sees SIGHUP
+        # (:487-491). Then stdin at EOF on a terminal that is still there
+        # (^D in canonical mode) closes the master, and a SIGWINCH after it
+        # finds the master null (quirk 44): the payload's own status, 5,
+        # not 125.
+        lines = drive("hangup", "echo ready; sleep infinity", ctty=True)
+        assert lines == ["status=129"], lines
+        lines = drive("winch", "trap 'touch \"$PTYDRIVE_DIR/hup\"' HUP; echo ready; while [ ! -e \"$PTYDRIVE_DIR/go\" ]; do sleep 0.1; done; exit 5", ctty=True)
+        assert lines == ["hup=yes", "status=5"], lines
   '' + lib.concatMapStrings (p: "\n# ${p.name}\n" + p.script) integration.vm.vmScripts;
 }

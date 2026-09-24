@@ -3,7 +3,7 @@
 //! there are no pipes yet) and phase 2's B9-B11, written against src/fd.zig
 //! as flong's code calls it: an open's result through msg.check.
 //! zwanzig reads syntax and matches methods by name, so this is analysed,
-//! never compiled. Each function is one bug (B12-B23 one per minting
+//! never compiled. Each function is one bug (B12-B26 one per minting
 //! function); `ok*` are controls that must stay quiet. B4 (a leak) and B5 (a
 //! stale copy in a struct) are beyond zwanzig: the table and the property
 //! test (tests/zig/fd_props.zig) catch those.
@@ -252,4 +252,40 @@ pub fn b23PipeClosedTwice() !void {
     p.r.close();
     p.w.close();
     p.w.close();
+}
+
+// ---- B24-B26: the terminal's minting functions (phase 7 L3) ----
+
+// B24: a pty master closed twice
+pub fn b24PtmxClosedTwice() !void {
+    const m = try msg.check(fd.openPtmx(), "x", .{});
+    m.close();
+    m.close();
+}
+
+// B25: a pty slave's size set after it was closed
+pub fn b25SlaveAfterClose(ws: anytype) !void {
+    const s = try msg.check(fd.openSlave("/dev/pts/0"), "x", .{});
+    s.close();
+    _ = s.setWinsize(ws);
+}
+
+// B26: the reopened terminal written after it was closed
+pub fn b26OutAfterClose() !void {
+    const o = try msg.check(fd.reopenOut(), "x", .{});
+    o.close();
+    _ = o.write("x");
+}
+
+// The terminal's controls: each opened, used, closed once.
+pub fn ok8PtyOnce() !void {
+    const m = try msg.check(fd.openPtmx(), "x", .{});
+    defer m.close();
+    _ = m.unlock();
+}
+
+pub fn ok9OutOnce() !void {
+    const o = try msg.check(fd.reopenOut(), "x", .{});
+    _ = o.write("x");
+    o.close();
 }

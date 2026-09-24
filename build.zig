@@ -501,9 +501,12 @@ pub fn build(b: *std.Build) void {
                 "bugs.zig:239:9: error: [store-violations-engine] use after close", // B21, start
                 "bugs.zig:246:9: error: [store-violations-engine] use after close", // B22, openSignalfd
                 "bugs.zig:254:14: error: [store-violations-engine] double-close", // B23, pipe
+                "bugs.zig:263:12: error: [store-violations-engine] double-close", // B24, openPtmx
+                "bugs.zig:270:9: error: [store-violations-engine] use after close", // B25, openSlave
+                "bugs.zig:277:9: error: [store-violations-engine] use after close", // B26, reopenOut
             }) |want| run.addCheck(.{ .expect_stdout_match = want });
-            // And those twenty-two only: the ok* controls stay quiet.
-            run.addCheck(.{ .expect_stdout_match = "Found 22 issue(s):\n" });
+            // And those twenty-five only: the ok* controls stay quiet.
+            run.addCheck(.{ .expect_stdout_match = "Found 25 issue(s):\n" });
             run.addCheck(.{ .expect_term = .{ .Exited = 1 } });
             analyze_step.dependOn(&run.step);
         }
@@ -901,6 +904,120 @@ pub fn build(b: *std.Build) void {
             });
             root.addAnonymousImport("paths.txt", .{ .root_source_file = b.path("tests/golden/paths.txt") });
             paths_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "paths", .root_module = root })).step);
+        }
+    }
+    // L3, the terminal: src/tty.zig, not yet built into the launcher.
+    //
+    //   test         (-Ddev=true) tty.zig's own tests, and
+    //                tests/zig/tty_test.zig: the pty path, the ^] detector's
+    //                property over any chunking
+    //   test-libc    sys.cfmakeraw against glibc's (tests/zig/libc_tty.zig)
+    //   integration  bin/flong-tty (tests/zig/ttydriver.zig), checks.native's
+    //                pty driver
+    // The terminal's minting functions' planted bugs are B24-B26 in
+    // tests/zig/analyze/bugs.zig, checked by analyze above.
+    {
+        const Terminal = struct {
+            /// src/tty.zig over `m`'s modules.
+            fn module(bb: *std.Build, m: Modules, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+                return bb.createModule(.{
+                    .root_source_file = bb.path("src/tty.zig"),
+                    .target = t,
+                    .optimize = o,
+                    .imports = &.{
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "fd", .module = m.fd },
+                        .{ .name = "msg", .module = m.msg },
+                        .{ .name = "sig", .module = m.sig },
+                        .{ .name = "proc", .module = m.proc },
+                    },
+                });
+            }
+        };
+
+        if (dev) {
+            if (b.lazyDependency("minish", .{ .target = target, .optimize = optimize })) |minish| {
+                {
+                    const m = modules(b, target, optimize);
+                    const t = b.addTest(.{ .name = "tty", .root_module = Terminal.module(b, m, target, optimize) });
+                    test_step.dependOn(&b.addRunArtifact(t).step);
+                }
+                {
+                    const m = modules(b, target, optimize);
+                    const t = b.addTest(.{
+                        .name = "tty_test",
+                        .root_module = b.createModule(.{
+                            .root_source_file = b.path("tests/zig/tty_test.zig"),
+                            .target = target,
+                            .optimize = optimize,
+                            .imports = &.{
+                                .{ .name = "minish", .module = minish.module("minish") },
+                                .{ .name = "sys", .module = m.sys },
+                                .{ .name = "fd", .module = m.fd },
+                                .{ .name = "proc", .module = m.proc },
+                                .{ .name = "tty", .module = Terminal.module(b, m, target, optimize) },
+                            },
+                        }),
+                    });
+                    test_step.dependOn(&b.addRunArtifact(t).step);
+                }
+            }
+        }
+
+        {
+            // glibc's struct termios and cfmakeraw through translate-c, the
+            // header found as tests/zig/scmp.h's is.
+            const m = modules(b, target, optimize);
+            const header = b.addTranslateC(.{
+                .root_source_file = b.path("tests/zig/termios.h"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            if (target.query.isNativeOs() and target.query.isNativeAbi()) {
+                const paths = std.zig.system.NativePaths.detect(b.allocator, &target.result) catch @panic("OOM");
+                for (paths.include_dirs.items) |dir| header.addSystemIncludePath(.{ .cwd_relative = dir });
+            }
+            const t = b.addTest(.{
+                .name = "libc_tty",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/zig/libc_tty.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "termios_h", .module = header.createModule() },
+                    },
+                }),
+            });
+            libc_step.dependOn(&b.addRunArtifact(t).step);
+        }
+
+        {
+            // flong-tty: static, no libc, stripped, no stack size in
+            // PT_GNU_STACK, as an installed artifact.
+            const m = modules(b, target, optimize);
+            const exe = b.addExecutable(.{
+                .name = "flong-tty",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/zig/ttydriver.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .strip = true,
+                    .single_threaded = true,
+                    .imports = &.{
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "fd", .module = m.fd },
+                        .{ .name = "msg", .module = m.msg },
+                        .{ .name = "sig", .module = m.sig },
+                        .{ .name = "proc", .module = m.proc },
+                        .{ .name = "tty", .module = Terminal.module(b, m, target, optimize) },
+                    },
+                }),
+            });
+            exe.stack_size = 0;
+            integration_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
         }
     }
     // ---- end of launcher (branch) ----

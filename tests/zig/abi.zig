@@ -180,6 +180,62 @@ fn initConstants() usize {
     return pairs.len;
 }
 
+/// The terminal's struct termios and winsize, ioctls and termios bits in
+/// sys.zig against asm/termbits.h, asm/termios.h and asm/ioctls.h: the
+/// kernel's struct termios, not glibc's (phase 7 L3).
+fn terminal() usize {
+    const Pair = struct { []const u8, []const u8 };
+    const termios = [_]Pair{ .{ "iflag", "c_iflag" }, .{ "oflag", "c_oflag" }, .{ "cflag", "c_cflag" }, .{ "lflag", "c_lflag" }, .{ "line", "c_line" }, .{ "cc", "c_cc" } };
+    const winsize = [_]Pair{ .{ "row", "ws_row" }, .{ "col", "ws_col" }, .{ "xpixel", "ws_xpixel" }, .{ "ypixel", "ws_ypixel" } };
+    inline for (.{ .{ sys.Termios, c.struct_termios, termios, "termios" }, .{ sys.Winsize, c.struct_winsize, winsize, "winsize" } }) |t| {
+        inline for (t[2]) |p| {
+            const mo = @offsetOf(t[0], p[0]);
+            const co = @offsetOf(t[1], p[1]) + (if (options.plant == .offset) 1 else 0);
+            if (mo != co) fail("{s}.{s}: offset {d}, header {d}", .{ t[3], p[0], mo, co });
+            if (@sizeOf(@FieldType(t[0], p[0])) != @sizeOf(@FieldType(t[1], p[1])))
+                fail("{s}.{s}: size differs", .{ t[3], p[0] });
+        }
+        if (@sizeOf(t[0]) != @sizeOf(t[1])) fail("{s}: size {d}, header {d}", .{ t[3], @sizeOf(t[0]), @sizeOf(t[1]) });
+    }
+    const pairs = .{
+        .{ "nccs", sys.nccs, c.NCCS },
+        .{ "TCGETS", sys.TCGETS, c.TCGETS },
+        .{ "TCSETS", sys.TCSETS, c.TCSETS },
+        .{ "TCSETSF", sys.TCSETSF, c.TCSETSF },
+        .{ "TIOCGPGRP", sys.TIOCGPGRP, c.TIOCGPGRP },
+        .{ "TIOCSPGRP", sys.TIOCSPGRP, c.TIOCSPGRP },
+        .{ "TIOCGWINSZ", sys.TIOCGWINSZ, c.TIOCGWINSZ },
+        .{ "TIOCSWINSZ", sys.TIOCSWINSZ, c.TIOCSWINSZ },
+        .{ "TIOCGPTN", sys.TIOCGPTN, c.TIOCGPTN },
+        .{ "TIOCSPTLCK", sys.TIOCSPTLCK, c.TIOCSPTLCK },
+        .{ "IGNBRK", sys.IGNBRK, c.IGNBRK },
+        .{ "BRKINT", sys.BRKINT, c.BRKINT },
+        .{ "PARMRK", sys.PARMRK, c.PARMRK },
+        .{ "ISTRIP", sys.ISTRIP, c.ISTRIP },
+        .{ "INLCR", sys.INLCR, c.INLCR },
+        .{ "IGNCR", sys.IGNCR, c.IGNCR },
+        .{ "ICRNL", sys.ICRNL, c.ICRNL },
+        .{ "IXON", sys.IXON, c.IXON },
+        .{ "OPOST", sys.OPOST, c.OPOST },
+        .{ "ISIG", sys.ISIG, c.ISIG },
+        .{ "ICANON", sys.ICANON, c.ICANON },
+        .{ "ECHO", sys.ECHO, c.ECHO },
+        .{ "ECHONL", sys.ECHONL, c.ECHONL },
+        .{ "IEXTEN", sys.IEXTEN, c.IEXTEN },
+        .{ "CSIZE", sys.CSIZE, c.CSIZE },
+        .{ "CS8", sys.CS8, c.CS8 },
+        .{ "PARENB", sys.PARENB, c.PARENB },
+        .{ "VTIME", sys.VTIME, c.VTIME },
+        .{ "VMIN", sys.VMIN, c.VMIN },
+        .{ "SIGTTOU", sys.SIGTTOU, c.SIGTTOU },
+        .{ "PR_SET_NAME", sys.PR_SET_NAME, c.PR_SET_NAME },
+    };
+    inline for (pairs) |p| {
+        if (p[1] != p[2]) fail("sys.{s}: {d}, header {d}", .{ p[0], p[1], p[2] });
+    }
+    return termios.len + winsize.len + pairs.len;
+}
+
 /// std's Statx against the header's struct statx: its fields are the
 /// header's with stx_ dropped, but for the spares, and __pad2 starts at
 /// stx_mnt_id (0x90), where phase 4 reads the unique mount id.
@@ -339,6 +395,7 @@ pub const report = blk: {
         .launch = launchConstants(),
         .constants = sameConstants(),
         .syscalls = sameSyscalls(),
+        .terminal = terminal(),
         .stx_mnt_id = @offsetOf(c.struct_statx, "stx_mnt_id"),
     };
 };
@@ -348,6 +405,7 @@ comptime {
 }
 
 test "the kernel ABI matches Zig's bundled headers" {
+    std.debug.print("abi: {s}: terminal: termios, winsize and constants {d}\n", .{ report.arch, report.terminal });
     std.debug.print("abi: {s}: __NR_openat {d}, LINUX_VERSION_CODE {d}, stx_mnt_id at 0x{x}; fields compared: open_how {d}, mount_attr {d}, mnt_id_req {d}, statmount {d}, clone_args {d}, iovec {d}, Statx {d}, capability {d}, sigaction {d}; constants: clone3's {d}, flong-init's {d}, the mount helper's {d}, the launch's {d}; syscalls {d}\n", .{
         report.arch,       report.openat,     report.version,    report.stx_mnt_id,
         report.open_how,   report.mount_attr, report.mnt_id_req, report.statmount,

@@ -8,8 +8,10 @@
 #   <pN>         a proof's `build`, whose own build runs its assertions
 #   <pN>-bins    a proof's `bins`, a tree with bin/
 #   drivers      `zig build integration` over the package: bin/flong-walker
-#                (tests/zig/walker.zig, phase 4) and bin/flong-proc
-#                (tests/zig/procdriver.zig, phase 5), for checks.native
+#                (tests/zig/walker.zig, phase 4), bin/flong-proc
+#                (tests/zig/procdriver.zig, phase 5) and bin/flong-tty
+#                (tests/zig/ttydriver.zig, phase 7's L3: src/tty.zig as the
+#                launcher drives it), for checks.native
 #   spec-probe   `zig build spec-probe`: bin/spec-probe, src/launch.zig as
 #                far as phase 7's L1 goes (root refused, the spec parsed,
 #                the launcher's exit), for golden's spec set
@@ -100,6 +102,9 @@ let
       ../src/cgroup.zig
       ../tests/zig/walker.zig
       ../tests/zig/procdriver.zig
+      # Phase 7's L3, the terminal.
+      ../src/tty.zig
+      ../tests/zig/ttydriver.zig
     ];
   };
 

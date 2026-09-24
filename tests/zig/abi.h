@@ -17,5 +17,7 @@
 #include <linux/prctl.h>
 #include <linux/limits.h>
 #include <asm/ioctls.h>
+#include <asm/termbits.h>
+#include <asm/termios.h>
 #include <asm/signal.h>
 #include <asm/unistd.h>
