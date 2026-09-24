@@ -1,1 +1,1 @@
-flong-launch: spec: machine '.m' is not a name: 1 to 128 of A-Z a-z 0-9 _ - ., not starting with .
+flong launch: spec: machine '.m' is not a name: 1 to 128 of A-Z a-z 0-9 _ - ., not starting with .

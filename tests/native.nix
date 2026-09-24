@@ -2,8 +2,8 @@
 # lingering user with subordinate ids and a delegated user manager, the
 # proofs' binaries on PATH (tests/integration.nix's `vm`), and each proof's
 # testScript fragment after the common setup below, in tests/proofs/ name
-# order (DESIGN.md, "Tests": checks.native). Before them, flong-init past its
-# argv, the walker, and flong-proc: clone3 into a cgroup, a fork after
+# order (DESIGN.md, "Tests": checks.native). Before them, flong init past its
+# argv, flong's dispatch under strace, the walker, and flong-proc: clone3 into a cgroup, a fork after
 # setns(CLONE_NEWUSER), a session swept, and the sweeper over the records
 # the C sweeper's output pins (phase 5); src/tty.zig through flong-tty and
 # ptydrive (phase 7's L3). A fourth VM beside basic, rootless and parity;
@@ -15,7 +15,7 @@
 
 let
   integration = import ./integration.nix { pkgs = hostPkgs; };
-  # The launcher's output, for its flong-init (src/init.zig).
+  # The launcher's output, for its flong init (src/init.zig).
   launcher = import ../launcher { pkgs = hostPkgs; };
   # rootless.nix's ioctl-probe and swapper; the swapper races the walker
   # (the Zig port's phase 4).
@@ -109,9 +109,9 @@ let
   '';
 
   # The sweeper's differential fixture (the port's phase 5; DESIGN.md,
-  # "Tests": the record contract): sweep-diff PROGRAM builds one state directory of records a
+  # "Tests": the record contract): sweep-diff COMMAND... builds one state directory of records a
   # launcher writes and hostile ones, and the sessions they name under a
-  # holder h of the calling unit's, runs PROGRAM as the holder's sweeper in
+  # holder h of the calling unit's, runs COMMAND as the holder's sweeper in
   # h/supervisor until it blocks in its inotify read, adds a record, lets it
   # sweep that, stops it, and prints what it said and left. Until phase 5
   # (b) deleted the C sweeper, the C and the Zig printed the same.
@@ -150,7 +150,7 @@ let
   '';
   sweepDiff = hostPkgs.writeShellScript "sweep-diff" ''
     set -u
-    prog=$1
+    prog=("$@")
     cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
     # The unit's cgroup and the job's pids differ from run to run.
     main() {
@@ -220,7 +220,7 @@ let
     for i in $(seq 3000); do grep -q ":$(stat -c %i $D/locked) " /proc/locks && break; sleep 0.05; done
 
     # The sweeper in the holder's supervisor leaf (flong-cgroup.c:279-298).
-    (echo $BASHPID >$H/supervisor/cgroup.procs; exec "$prog" $S) 2>/tmp/sweeper.err &
+    (echo $BASHPID >$H/supervisor/cgroup.procs; exec "''${prog[@]}" $S) 2>/tmp/sweeper.err &
     swp=$!
     blocked() {
       local s fd
@@ -265,7 +265,7 @@ let
 
   # postStop once, and the watch before the first sweep (the port's phase 5,
   # DESIGN.md's ordering checkpoint 11; flong-record.c:193-217, 755-825): sweep-order
-  # PROGRAM runs PROGRAM as the holder's sweeper over three records, all
+  # COMMAND... runs COMMAND as the holder's sweeper over three records, all
   # dead but one. `gated`'s postStop (psGate) holds the first sweep until
   # told. `late` comes before it in the directory's order and its lock is
   # held by a stand-in launcher, so the first sweep tries it once and leaves
@@ -283,7 +283,7 @@ let
   '';
   sweepOrder = hostPkgs.writeShellScript "sweep-order" ''
     set -u
-    prog=$1
+    prog=("$@")
     cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)
     H=$cg/h
     S=/tmp/order/state
@@ -307,7 +307,7 @@ let
     stand=$!
     for i in $(seq 600); do flock -n $D/$late true || break; sleep 0.05; done
 
-    (echo $BASHPID >$H/supervisor/cgroup.procs; exec "$prog" $S) 2>/tmp/order/err &
+    (echo $BASHPID >$H/supervisor/cgroup.procs; exec "''${prog[@]}" $S) 2>/tmp/order/err &
     swp=$!
     blocked() {
       local s fd
@@ -370,6 +370,7 @@ in
 
     environment.systemPackages = [
       pkgs.util-linux
+      pkgs.strace
       integration.vm
       (probes pkgs)
       # The caller's terminal and shell for flong-tty, rootless.nix's L0
@@ -409,7 +410,7 @@ in
             "unshare --user --map-auto --map-root-user cat /proc/self/uid_map")).split()
         assert out[:2] == ["0", "1000"] and "100000" in out and "65536" in out, out
 
-    with subtest("flong-init past its argv: the gate's EOF, and a failing chdir printed whole"):
+    with subtest("flong init past its argv: the gate's EOF, and a failing chdir printed whole"):
         # What golden's init set cannot reach (tests/golden.nix): as root of
         # a namespace newuidmap made, setgroups and the capability drop
         # succeed, as in the launcher's U1 (src/init.zig:210-213). GATE is 4,
@@ -418,22 +419,40 @@ in
         def init_run(gate_file, dir):
             return machine.succeed(as_alice(
                 "unshare --user --map-auto --map-root-user -- "
-                f"${launcher}/bin/flong-init 4 5 - - - {shlex.quote(dir)} -- true "
+                f"${launcher}/bin/flong init 4 5 - - - {shlex.quote(dir)} -- true "
                 f"4<{gate_file} 5>/dev/null 2>&1; echo rc=$?"))
 
         machine.succeed("printf g > /tmp/init-gate && chmod 644 /tmp/init-gate")
         # The gate closed without its byte (:230-233).
         out = init_run("/dev/null", "/")
-        assert out == "flong-init: the gate closed without opening: not starting the payload\nrc=125\n", out
+        assert out == "flong init: the gate closed without opening: not starting the payload\nrc=125\n", out
         # The gate open, DIR missing (:235-239): the message is over 1 KiB
         # and printed whole (quirk 22), then too long a DIR.
         for dir, text in (("/nonexistent/" + "/".join(["d" * 200] * 6), "No such file or directory"),
                           ("/" + "/".join(["d" * 200] * 21), "File name too long")):
             out = init_run("/tmp/init-gate", dir)
-            assert len(dir) > 1024 and out == f"flong-init: changing to {dir}: {text}\nrc=125\n", out
+            assert len(dir) > 1024 and out == f"flong init: changing to {dir}: {text}\nrc=125\n", out
         # The control: the gate open, DIR there, tini runs the payload.
         out = init_run("/tmp/init-gate", "/tmp")
         assert out.endswith("rc=0\n"), out
+
+    with subtest("flong's dispatch makes no syscall: the first after execve is the subcommand's"):
+        # src/main.zig reads argv and nothing else (DESIGN.md, "What the
+        # port measured": start code), so under strace the call after
+        # execve is the first the subcommand's main makes: version's write,
+        # the sweeper's SIGPIPE disposition before its usage line, init's
+        # refusal (its prefix the first of the writev's pieces), and flong's
+        # own usage when there is no subcommand.
+        for args, first in (("version", "write(1, \"flong "),
+                             ("sweeper", "rt_sigaction(SIGPIPE, "),
+                             ("init", "writev(2, [{iov_base=\"flong init\", "),
+                             ("", "writev(2, [{iov_base=\"usage: flong launch ")):
+            calls = machine.succeed(
+                f"strace -o /tmp/dispatch.strace -s 64 ${launcher}/bin/flong {args} >/dev/null 2>&1 || true; "
+                "cat /tmp/dispatch.strace").splitlines()
+            print("\n".join(calls))
+            assert calls[0].startswith("execve(") and calls[0].endswith(" = 0"), calls
+            assert calls[1].startswith(first), (args, calls)
 
     with subtest("the walker: symlinks, a file on the way, masks, EEXIST, protected paths, and the swap race"):
         # src/mount.zig through flong-walker (tests/zig/walker.zig), as root
@@ -622,30 +641,30 @@ in
         # each ending as the C's did. The controls below are against a
         # vacuous run, such as one stopping at the holder.
         machine.succeed("${mkDeep}")
-        out = machine.succeed(as_alice("${sweepDiff} ${launcher}/bin/flong-sweeper 2>&1"))
+        out = machine.succeed(as_alice("${sweepDiff} ${launcher}/bin/flong sweeper 2>&1"))
         print(out)
         golden = ${builtins.toJSON (builtins.readFile ./golden/sweep-diff.said)}
         for var, path in (("@PSNOEXEC@", "${psNoexec}"), ("@PSOUT@", "${psOut}"), ("@PSDIR@", "${psDir}")):
             golden = golden.replace(var, path)
         def sweeps(said):
-            first, rest = said.split("flong-sweeper: released 14 dead sessions\n")
+            first, rest = said.split("flong sweeper: released 14 dead sessions\n")
             return sorted(first.splitlines()), set(rest.splitlines()), rest.splitlines()[-1]
         said = out.split("== said\n")[1].split("== left\n")[0]
         assert sweeps(said) == sweeps(golden), said
         assert "never blocked" not in out, out
         for want in ("== sweeper status 143", "== sleep status 137",
-                     "flong-sweeper: released 1 dead session\n",
-                     "flong-sweeper: postStop failed for s-noleader (status 3)",
-                     "flong-sweeper: postStop failed for s-absent (status 143)",
-                     "flong-sweeper: postStop failed for ps-dir (status 127)",
-                     "flong-sweeper: postStop failed for ps-deep (status 3)",
-                     "flong-sweeper: exec ${psDir}: Permission denied",
-                     "flong-sweeper: postStop failed for ps-symout: ${psOut} is not a program in /nix/store",
-                     "flong-sweeper: the record of bad-nul is removed: it is not lines of text",
-                     "flong-sweeper: the record of bad-leader2 is removed: its leader= is not <pid>:<starttime>",
-                     "flong-sweeper: the record s-dotdot does not name a session's cgroup:",
-                     "flong-sweeper: read the record of bad-big: File too large",
-                     "flong-sweeper: open the record of unreadable: Permission denied",
+                     "flong sweeper: released 1 dead session\n",
+                     "flong sweeper: postStop failed for s-noleader (status 3)",
+                     "flong sweeper: postStop failed for s-absent (status 143)",
+                     "flong sweeper: postStop failed for ps-dir (status 127)",
+                     "flong sweeper: postStop failed for ps-deep (status 3)",
+                     "flong sweeper: exec ${psDir}: Permission denied",
+                     "flong sweeper: postStop failed for ps-symout: ${psOut} is not a program in /nix/store",
+                     "flong sweeper: the record of bad-nul is removed: it is not lines of text",
+                     "flong sweeper: the record of bad-leader2 is removed: its leader= is not <pid>:<starttime>",
+                     "flong sweeper: the record s-dotdot does not name a session's cgroup:",
+                     "flong sweeper: read the record of bad-big: File too large",
+                     "flong sweeper: open the record of unreadable: Permission denied",
                      "${psLog} argc=1 1=s-full machine=s-full pwd=/ stdin-rc=1",
                      "${psLog} argc=1 1=ps-symin machine=ps-symin pwd=/ stdin-rc=1",
                      "\ns-other regular file", "\nlocked regular file", "\nlinkrec symbolic link",
@@ -660,7 +679,7 @@ in
         # said the same. A sweep that skips the blank runs once's postStop
         # twice; a watch added after the first sweep leaves late
         # (checkpoint 11).
-        out = machine.succeed(as_alice("${sweepOrder} ${launcher}/bin/flong-sweeper 2>&1"))
+        out = machine.succeed(as_alice("${sweepOrder} ${launcher}/bin/flong sweeper 2>&1"))
         print(out)
         assert out.splitlines() == [
             "gate entered: yes",
@@ -671,8 +690,8 @@ in
             "once: released, cgroup gone",
             "ran: gated=1 once=1 late=0",
             "said:",
-            "flong-sweeper: released 1 dead session",
-            "flong-sweeper: rmdir H/c/once/sandbox/inner: Permission denied",
+            "flong sweeper: released 1 dead session",
+            "flong sweeper: rmdir H/c/once/sandbox/inner: Permission denied",
         ], out
 
     with subtest("tty: the relay both ways, EIO, the drain, the window, the watchdog, a hang-up then SIGWINCH, and a terminal alice cannot reopen"):
@@ -683,7 +702,7 @@ in
         # rootless.nix's L0 subtest of the C, whose lines the first runs
         # repeat. Each run's lines are compared whole, after its pid= line.
         # CTTY runs the payload under `setsid -c`, the pty its controlling
-        # terminal, as flong-init makes it, for a hang-up to reach it.
+        # terminal, as flong init makes it, for a hang-up to reach it.
         SH = "/run/current-system/sw/bin/sh"
         def drive(scenario, payload, stderr=None, ctty=False, root=False):
             opt = f"--stderr {stderr} " if stderr else ""

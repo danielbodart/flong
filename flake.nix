@@ -56,8 +56,8 @@
           integration = pkgs.linkFarm "integration"
             (import ./tests/integration.nix { inherit pkgs; });
 
-          # The native launcher set: flong-launch, flong-init and
-          # flong-sweeper, Zig, static, without libc (native.nix).
+          # The native launcher set: flong, one binary whose subcommands are
+          # launch, init and sweeper, Zig, static, without libc (native.nix).
           launcher = import ./launcher { inherit pkgs; };
 
           # The seccomp compiler, in Zig (native.nix's seccomp set).
@@ -114,18 +114,23 @@
         # already in a binary cache are skipped (--skip-cached); a check
         # that fails to evaluate or build makes the exit status non-zero.
         # A worker takes up to about 3 GB (rootless-b; each assertion shard
-        # about 2 GB, tests/assertions.nix), so 6 workers, each
-        # restarted past 6 GiB, stay within a 62 GB host with room to
-        # build. GATE_EVAL_WORKERS overrides the count; the arguments are
+        # about 2 GB, tests/assertions.nix) and is restarted past 6 GiB, so
+        # there is one worker per 10 GiB of the host's memory, at least one:
+        # the rest is room for the builds and their VMs. Memory, not cores,
+        # is what runs out: a fixed six once froze a 32 GB host without
+        # swap. GATE_EVAL_WORKERS overrides the count; the arguments are
         # nix-fast-build's (--select to run some checks, say).
         gate = {
           type = "app";
           program = pkgs.lib.getExe (pkgs.writeShellApplication {
             name = "flong-gate";
-            runtimeInputs = [ pkgs.nix-fast-build ];
+            runtimeInputs = [ pkgs.nix-fast-build pkgs.gawk ];
             text = ''
+              kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+              workers=$((kib / (10 * 1024 * 1024)))
+              if ((workers < 1)); then workers=1; fi
               exec nix-fast-build --flake ".#checks.x86_64-linux" --skip-cached --no-nom \
-                --eval-workers "''${GATE_EVAL_WORKERS:-6}" --eval-max-memory-size 6144 "$@"
+                --eval-workers "''${GATE_EVAL_WORKERS:-$workers}" --eval-max-memory-size 6144 "$@"
             '';
           });
           meta.description = "Build every x86_64 check in parallel, skipping what a cache has";
@@ -139,12 +144,16 @@
           type = "app";
           program = pkgs.lib.getExe (pkgs.writeShellApplication {
             name = "flong-gate-aarch64";
-            runtimeInputs = [ pkgs.nix-eval-jobs pkgs.jq ];
+            runtimeInputs = [ pkgs.nix-eval-jobs pkgs.jq pkgs.gawk ];
             text = ''
+              # One worker per 10 GiB, as the gate's.
+              kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+              workers=$((kib / (10 * 1024 * 1024)))
+              if ((workers < 1)); then workers=1; fi
               out=$(mktemp)
               trap 'rm -f "$out"' EXIT
               nix-eval-jobs --flake ".#checks.aarch64-linux" \
-                --workers "''${GATE_EVAL_WORKERS:-6}" --max-memory-size 6144 > "$out"
+                --workers "''${GATE_EVAL_WORKERS:-$workers}" --max-memory-size 6144 > "$out"
               jq -r 'if .error then "error: \(.attr): \(.error)" else "ok: \(.attr) \(.drvPath)" end' "$out"
               # The control: the checks were listed at all.
               [[ -s $out ]] || { echo "gate-aarch64: no checks evaluated"; exit 1; }

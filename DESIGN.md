@@ -17,7 +17,7 @@ reported, never used as a pass mark.
 
 ## Launch sequence
 
-The launcher is a bash wrapper, run as the caller, that execs `flong-launch`,
+The launcher is a bash wrapper, run as the caller, that execs `flong launch`,
 a Zig program, static and without libc. Nothing in either runs as host root,
 and nothing asks for it.
 
@@ -32,9 +32,9 @@ The wrapper works out what only the launch can know:
 5. Build the id maps from `/etc/subuid` and `/etc/subgid`.
 6. Prepare the root if this closure, prepare program and map have none yet.
 7. Read `user`'s uid, gid, home and groups from the prepared root.
-8. Build the spec and exec `flong-launch` with it as its arguments.
+8. Build the spec and exec `flong launch` with it as its arguments.
 
-`flong-launch` then runs the session, in this order (the full table is in
+`flong launch` then runs the session, in this order (the full table is in
 [The launch, in order](#the-launch-in-order)):
 
 1. Lock the cache shared, for the launcher's life.
@@ -43,10 +43,10 @@ The wrapper works out what only the launch can know:
 4. Make U1 and U2, the two user namespaces.
 5. Make the session's cgroup, with any declared limits.
 6. Start bwrap in the session's cgroup; learn its child's pid.
-7. Fork the mount helper at bwrap's child pid; it mounts once flong-init
+7. Fork the mount helper at bwrap's child pid; it mounts once flong init
    reports the root built.
 8. `postStart`, then pasta (with `network`).
-9. Open the gate: flong-init execs tini and the payload.
+9. Open the gate: flong init execs tini and the payload.
 10. Wait for the session. Then kill its cgroup, run `postStop` and release
     the rest.
 
@@ -98,7 +98,7 @@ The payload script `cd`s into the workspace and runs
 `bash -c '. /etc/set-environment; exec "$@"'` with `command` and the launcher's
 arguments as that bash's positional parameters. None of them is ever the text
 of a script, so a space, `;`, `$` or glob in any argument arrives as that
-character. The spec reaches `flong-launch` as argv and bwrap takes each path
+character. The spec reaches `flong launch` as argv and bwrap takes each path
 as a whole argument, so nothing on the way splits or expands a word either.
 
 It goes through `/etc/set-environment` because that file is where the
@@ -252,7 +252,7 @@ A session runs in U1, a user namespace the caller owns, whose maps
   The home is read at launch from the prepared root's `/etc/passwd`, and a
   launch refuses a root whose ids disagree with the declaration.
 - **Supplementary groups** are the primary group and every group in the
-  prepared root's `/etc/group` that names the user. flong-init sets exactly
+  prepared root's `/etc/group` that names the user. flong init sets exactly
   these with `setgroups`. bwrap never calls `setgroups` itself, so without it
   the caller's host groups (wheel, docker, kvm) stay effective in the payload:
   measured.
@@ -307,7 +307,7 @@ default.
 `$workspace`, `$workspace_mode` and `$binds` as they will be mounted, and
 judges those rather than re-deriving a directory from `$PWD`. A non-zero exit
 refuses the launch. Without root it cannot refuse the caller anything: the
-caller can run `flong-launch` directly with any spec. So it catches a launch
+caller can run `flong launch` directly with any spec. So it catches a launch
 the declaration does not mean to make (chase's trusted-tier check is one),
 and setting it warns, to say so. It runs in a shell of its own, so `exit 0`
 allows the launch rather than ending the launcher, and nothing it assigns
@@ -389,7 +389,7 @@ descriptor as a destination, so the helper does the mounting itself:
    clones it (`open_tree(OPEN_TREE_CLONE|AT_RECURSIVE)`), makes each tmpfs
    and overlay (`fsopen`, `fsmount`), and sets their flags, while bwrap is
    still building the root.
-2. It waits for flong-init's ready byte: bwrap has finished the root.
+2. It waits for flong init's ready byte: bwrap has finished the root.
 3. It joins the session's mount namespace, through the leader's pidfd
    (`PIDFD_GET_MNT_NAMESPACE`), and walks each destination one component at
    a time with `openat2(RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS|RESOLVE_BENEATH)`,
@@ -583,7 +583,7 @@ at hook time", so it stays sequential.
 ### The gate
 
 bwrap's own `--block-fd` gate is fail-open: the payload runs when the launcher
-dies. So flong-init, which bwrap execs as the session's pid 1, is the gate.
+dies. So flong init, which bwrap execs as the session's pid 1, is the gate.
 Its protocol is its argv, not the environment, so the wrapper's `--clearenv`
 cannot drop it and nothing has to be unset before the payload sees its
 environment; the argv is gone at the exec of tini. In order, it:
@@ -782,7 +782,7 @@ controllers for its children).
 
 ```
 <user@UID.service>/app.slice/flong-sessions.service/   the holder (Delegate=yes)
-  supervisor/                                         flong-sweeper
+  supervisor/                                         flong sweeper
   <container>/                                        shared; never removed by a launcher
     <machine>/                                        the session; no process of its own
       sandbox/                                        bwrap, the payload, the mount helper briefly; the limits
@@ -929,7 +929,7 @@ kills it and leaves `poststop=` in place, so the next sweep runs it again.
 
 ### The sweeper
 
-`flong-sweeper $XDG_RUNTIME_DIR/flong` is the holder unit's one process. It
+`flong sweeper $XDG_RUNTIME_DIR/flong` is the holder unit's one process. It
 keeps the holder's cgroup up while no session is, sweeps at start, and sweeps
 again whenever a record is closed (inotify `IN_CLOSE_WRITE` on `sessions/`),
 so a SIGKILLed launcher's session is released within milliseconds.
@@ -964,7 +964,7 @@ One function, run whatever stage the launch reached, in this order:
 
 1. Restore the terminal, release the watchdog and hand back the foreground.
    Hooks and `postStop` then print to a cooked terminal.
-2. Close the gate's write end if it is still open: flong-init, if it exists,
+2. Close the gate's write end if it is still open: flong init, if it exists,
    reads EOF and exits 125.
 3. `cgroup.kill`: every process in the session, bwrap and the helper
    included.
@@ -990,7 +990,7 @@ and closes the record for the sweeper.
 **A pty is relayed when stdin and stdout are both terminals.** The launcher
 opens the pty on the host's devpts before bwrap, copies the caller's modes
 and window size to it, and relays bytes both ways; bwrap gets
-`--new-session` and flong-init takes the pty as its controlling terminal. The
+`--new-session` and flong init takes the pty as its controlling terminal. The
 caller's terminal is raw only between the gate and the payload's exit.
 SIGWINCH, SIGTERM, SIGHUP, SIGINT and SIGCONT are handled, and `^]^]^]` within
 a second ends the session (exit 137), as nspawn's escape does. The escape is
@@ -1141,7 +1141,7 @@ what is compiled and by which compiler, so a new compiler makes new filters.
 It measured 32 ms cold and 3 ms warm. A policy that prints nothing
 compiles nothing, so the warm path stays builtins-only. It needs a tier to act
 on, and it is a consistency check in the way `guard` is: the caller can run
-`flong-launch` with any filter.
+`flong launch` with any filter.
 
 ### What the stack costs and what it matches
 
@@ -1268,7 +1268,7 @@ mounts, rules and cgroup, and read or write anything in it. That is the same
 reach the caller has over any process they run. The boundary is between the
 payload and everything else, not between the caller and the payload.
 `guard`, `seccompPolicy` and the wrapper's checks are consistency checks for
-the same reason: the caller can run `flong-launch` with any spec.
+the same reason: the caller can run `flong launch` with any spec.
 
 **Stronger:**
 
@@ -1362,16 +1362,23 @@ Component costs are quoted in their sections, with their harness.
 
 ## The native launcher
 
-Four programs and the tests' fixtures, all Zig 0.15.2: `flong-seccomp`, the
+Two programs and the tests' fixtures, all Zig 0.15.2: `flong-seccomp`, the
 policy compiler, with its `expand`, `render` and `project` subcommands, which
-links libc through libseccomp; and `flong-launch`, `flong-init` (pid 1 in the
-session) and `flong-sweeper` (the holder unit's process), static, stripped
-and without libc. The programs `flong-launch` runs (bwrap, pasta, the
-`flong-init` beside it, `/run/wrappers/bin/newuidmap` and `newgidmap`) and
-the tini `flong-init` execs are compiled in, as build options with no
-default (`-Dbwrap`, `-Dpasta`, `-Dinit`, `-Dnewuidmap`, `-Dnewgidmap`,
-`-Dtini`; `build.zig:56-62, 77, 585, 1206-1226`), so the wrapper cannot
-point the launcher at another bwrap, and a build that forgets one fails.
+links libc through libseccomp; and `flong`, static, stripped and without
+libc, whose subcommands are `launch`, `init` (pid 1 in the session),
+`sweeper` (the holder unit's process), `version` and `help`. `src/main.zig`
+picks the subcommand from `argv[0]`'s basename, then from `argv[1]`, as
+busybox does, and makes no syscall doing it; a basename that is no
+subcommand is a declaration's name, which nothing looks up yet. Until the
+one binary (S1 of `STANDALONE.md`), `flong launch`, `flong init` and
+`flong sweeper` were three, `flong-launch`, `flong-init` and
+`flong-sweeper`, and the measurements below that name those are of the
+three. The programs `flong launch` runs (bwrap, pasta, its own binary as
+`flong init`, `/run/wrappers/bin/newuidmap` and `newgidmap`) and the tini
+`flong init` execs are compiled in, as build options with no default
+(`-Dbwrap`, `-Dpasta`, `-Dself`, `-Dnewuidmap`, `-Dnewgidmap`, `-Dtini`;
+`build.zig`'s `LaunchPaths`), so the wrapper cannot point the launcher at
+another bwrap, and a build that forgets one fails.
 
 Line numbers that cite the deleted C (`launcher/flong-*.c` and `*.h`,
 `seccomp/flong-seccomp.c`, `tests/parity/*.c`) are those of the C as it last
@@ -1402,7 +1409,7 @@ before the C was deleted. The decisions that stand:
   (static analysis) are lazy dependencies pinned to tags (minish v0.1.0,
   zwanzig v0.15.1, `build.zig.zon:8-16`).
 - **flong-seccomp keeps libseccomp**, so its filters are libseccomp's bytes;
-  the other three have no libc, with glibc's errno texts in `errno.zig`
+  flong has no libc, with glibc's errno texts in `errno.zig`
   and an `/etc/passwd` reader in `passwd.zig` for the one `getpwuid`.
 - **Nothing observable changed.** Every string a test asserts, every exit
   status, bwrap's and pasta's argv, the record bytes and the BPF bytes
@@ -1497,6 +1504,7 @@ binary sizes and closures are the tree's after L5; the timings are L4's.
 | terminal, kernel 6.18 | a write to the pty master after the last slave closed succeeds, so no test asserts the C's EIO for input writes |
 | a sweeper's `waitEmpty` | can wait forever when another process of the user removes the cgroup inside the kernel's 10 ms `cgroup.events` delay, as the C could; kept |
 | derivations, `nix build --rebuild`, empty Zig cache | seccomp 10.9–11.6 s, launcher 19.6 s, fixtures 8.5–9.3 s, each bit-identical; `native-test` 15.7 s Debug, 26.9 s ReleaseSafe; `native-analyze` 76–88 s; `native-lint` 4.5–8 s; `cross-aarch64` 7–19 s |
+| `flong`, S1 | 513,200 bytes, stripped and static as the three were, against their sum of 629,032: the shared modules, std and the start code are in it once |
 | binaries, stripped | flong-launch 446,448 bytes, flong-init 40,312, flong-sweeper 142,272, static, no INTERP, `PT_GNU_STACK` size 0; flong-seccomp 144,784 (libc, libseccomp); fixtures bpfdump 43,872, syscall-probe 22,104, swapper 20,584, ioctl-probe 19,080 |
 | closures | the launcher set 44,256,760 bytes (54,318,016 with the C, before phase 3); flong-seccomp 38,057,520 (48,454,728 with the C); the fixtures 38,019,032 |
 | `packages.bench`, C against Zig, medians of 20 over three runs, ms | flong-init: no network C 31.0–31.8, Zig 29.5–33.5; flong-launch (6acfa9b against a103e76's tree): no network 32.5–33.6 against 30.8–34.0, pasta and an nft hook 53.1–60.1 against 52.5–59.3, a forwarded port 72.0–79.0 against 71.4–73.9, cold 355.7–358.2 against 374.7–382.0, and in an earlier pair cold 368.2–379.4 against 352.9–374.0 |
@@ -1515,7 +1523,7 @@ fixtures.
 | set | installs | its sources |
 |---|---|---|
 | `seccomp` | `flong-seccomp`; `-Dself=$out`, the project key's compiler path | `src/seccomp/` and the shared modules (`sys`, `msg`, `errno`, `num`, `fd`) |
-| `launcher` | `flong-launch`, `flong-init`, `flong-sweeper`; the compiled-in programs as `-D` options, `-Dinit` the `flong-init` in the same `$out` | `src/` but `seccomp/` and `fixtures/` |
+| `launcher` | `flong`; the compiled-in programs as `-D` options, `-Dself` the `flong` in the same `$out` | `src/` but `seccomp/` and `fixtures/` |
 | `fixtures` | `bpfdump` (libc, libseccomp), `syscall-probe`, `swapper`, `ioctl-probe` | `src/fixtures/`, `scmp.zig`, `sys`, `msg`, `errno` and `fd` |
 
 A set is `stdenv.mkDerivation` with the `zig_0_15` hook, whose own build and
@@ -1524,8 +1532,8 @@ runs `zig build test`, which needs the dependencies. The one build is the
 install phase, `zig build install -Dset=<set>` with the hook's
 `--release=safe -Dcpu=baseline`, then the set's assertions
 (`native.nix:167-177, 210-229`): the static programs static with no
-interpreter, no stack size in any `PT_GNU_STACK`, `flong-launch` with no
-symbol table and naming the `flong-init` beside it, `bpfdump` needing
+interpreter, no stack size in any `PT_GNU_STACK`, `flong` the launcher's
+one program, with no symbol table and naming its own path, `bpfdump` needing
 libseccomp. `disallowedReferences = [ zig_0_15 ]` holds for every set. A
 `build.zig` or `build.zig.zon` edit moves every set; only its own sources,
 the shared modules, those two files, libseccomp or Zig move `seccomp`'s
@@ -1552,7 +1560,7 @@ build fail fetching it. After a `build.zig.zon` change, the hash is set to
 | `lint` | `tools/fdlint.zig` over `src/` and `tests/zig/`, and over its planted files |
 | `fmt` | `zig fmt --check` |
 | `analyze` | zwanzig over `src/`, and the 27 planted bugs of `tests/zig/analyze/bugs.zig` it must report, and no more; needs `-Ddev=true` |
-| `cross` | aarch64: flong-launch, flong-init and flong-sweeper (dummy paths) and the three static fixtures built, flong-seccomp and bpfdump compiled unlinked, `abi`'s half |
+| `cross` | aarch64: flong (dummy paths) and the three static fixtures built, flong-seccomp and bpfdump compiled unlinked, `abi`'s half |
 | `integration`, `launch-driver`, `test-launch`, `test-paths` | the drivers `checks.native` runs (`flong-walker`, `flong-proc`, `flong-tty`, `flong-launch-driver`), the record writer against `tests/golden/records/`, and `tests/golden/paths.txt` against `spec.clean` and `mount.overlaps`, built only by `tests/integration.nix` |
 
 Every installed artifact is ReleaseSafe, stripped by the build,
@@ -1607,7 +1615,7 @@ The native code is tested at four levels, each a check.
   from the C, or from the awk and bash for the seccomp tooling, and are
   never regenerated: every seccomp refusal and edge, the tooling over a
   checked-in copy of `systemd-analyze syscall-filter`'s dump (so a systemd
-  bump changes nothing), flong-init's argv refusals, flong-sweeper's usage
+  bump changes nothing), flong init's argv refusals, flong sweeper's usage
   and state-directory refusals, and one case per refusal of the spec. What
   a case derives (store paths, project keys) is filled in as the check
   runs. The `.bpf` files follow golden-update's rule above.
@@ -1634,8 +1642,9 @@ The native code is tested at four levels, each a check.
   the headers (see the `build.zig` table), and `abi`'s structs and
   constants against Zig's bundled headers on both arches.
 - **`checks.native`** (one node, a lingering user with subordinate ranges, a
-  delegated user manager): `clone3(CLONE_INTO_CGROUP)` into an `O_PATH`
-  leaf; the spawn probe (held descriptors equal the keep list, the signal
+  delegated user manager): the first syscall after `execve` under strace,
+  the subcommand's and never the dispatch's; `clone3(CLONE_INTO_CGROUP)`
+  into an `O_PATH` leaf; the spawn probe (held descriptors equal the keep list, the signal
   mask and dispositions default, stdio remapped over every permutation);
   the walker against the symlink swapper, 0 escapes in 400; a session's
   cgroup killed, waited for and removed; U1 and U2 through the real
@@ -1675,21 +1684,24 @@ ports.
 | `src/cgroup.zig` | the nsdelegate check, finding or starting the holder, the session cgroup, its limits and leaves; kill, wait, remove |
 | `src/record.zig` | the state directory, records and `leader=`, liveness, the sweep, `postStop`, the watch |
 | `src/tty.zig` | the foreground wait, the pty relay or passthrough, raw mode, the watchdog, `^]^]^]`, the wait for bwrap |
-| `src/mount.zig` | the mount helper, a fork body of `flong-launch`'s: sources, the walker, masks, overlays, `/sys`, `/run` read-only; checkpoint 7 |
-| `src/launch.zig` | `flong-launch`: `main` (the prologue), `run` and `teardown`, the order of a launch; checkpoints 1, 2, 3, 5 and 6 |
+| `src/main.zig` | `flong`'s root: the dispatch, the start settings and the one panic handler; each subcommand's `main` is handed argv from its word on |
+| `src/mount.zig` | the mount helper, a fork body of `flong launch`'s: sources, the walker, masks, overlays, `/sys`, `/run` read-only; checkpoint 7 |
+| `src/launch.zig` | `flong launch`: `main` (the prologue), `run` and `teardown`, the order of a launch; checkpoints 1, 2, 3, 5 and 6 |
 | `src/launch/` | the launch's pieces, each tested alone: `prologue.zig` (the cache lock, the relaunch, the close of what the wrapper left open, the protected paths), `bwrap.zig` (its spawn), `childpid.zig` (`--info-fd`), `hook.zig` (`postStart`), `pasta.zig` |
-| `src/init.zig` | `flong-init`: groups, capabilities, the controlling tty, the ready byte, the gate, chdir, exec tini; no allocator; checkpoint 9 |
-| `src/sweeper.zig` | `flong-sweeper`: the state directory, its holder, then the watch; no allocator |
+| `src/init.zig` | `flong init`: groups, capabilities, the controlling tty, the ready byte, the gate, chdir, exec tini; no allocator; checkpoint 9 |
+| `src/sweeper.zig` | `flong sweeper`: the state directory, its holder, then the watch; no allocator |
 | `src/seccomp/` | `flong-seccomp`: `main.zig` the root, `compile.zig` the policy compiler, `expand.zig`, `render.zig`, `project.zig` the subcommands, `scmp.zig` libseccomp's externs |
 | `src/fixtures/` | the tests' programs: `bpfdump`, `syscall-probe`, `swapper`, `ioctl-probe` |
 | `tools/fdlint.zig` | the lint |
 
 Dependencies point one way: `sys`; then `msg`, `errno`, `num` and `fd`; then
 `sig` and `proc`; `record` uses `cgroup`; `mount` uses no `proc`. `sys`
-imports none of flong's modules. `flong-launch` imports spec, ns, cgroup,
-record, mount, tty, passwd, names, proc, sig, fd, sys, msg, errno and num,
-and `src/launch/`; `flong-sweeper` record, cgroup, names, proc, sig and the
-shared modules; `flong-init` sys, msg and errno only. The records the
+imports none of flong's modules. `src/main.zig` imports the three
+subcommands' modules, all over one graph of the others, so they share fd's
+table and msg's prefix. `flong launch` imports spec, ns, cgroup, record,
+mount, tty, passwd, names, proc, sig, fd, sys, msg, errno and num, and
+`src/launch/`; `flong sweeper` record, cgroup, names, proc, sig and the
+shared modules; `flong init` sys, msg and errno only. The records the
 launcher writes are the C's, byte for byte as `tests/golden/records/` pins
 them (`launch_test.zig`'s writer test, basic's record subtest), so an old
 sweeper reads a new launcher's records.
@@ -1705,7 +1717,7 @@ sweeper reads a new launcher's records.
   <strerror>`, or a refusal in plain words in the user's terms ("a symlink
   is on the way to /srv/x"). Each is one unbuffered write, cut at 1022 bytes
   and a newline in the launcher, its children and the sweeper, and whole, as
-  one `writev`, in flong-init and flong-seccomp, as the C printed them
+  one `writev`, in flong init and flong-seccomp, as the C printed them
   (quirk 22). `errno.zig` holds glibc's texts, so the programs without libc
   say what glibc would. `std.posix` is banned: it turns errnos a caller must
   see into `unreachable`. Numbers from outside go through `num.zig`'s
@@ -1766,20 +1778,22 @@ sweeper reads a new launcher's records.
   <msg>`, one line, then `exit_group` with the program's failure status
   (125 but for flong-seccomp's 1). Zig's default ends in `abort`, whose
   SIGABRT pid 1 would drop. A handle used stale is a panic, so it fails
-  closed. When `flong-launch` panics it skips the teardown: the sweeper
+  closed. When `flong launch` panics it skips the teardown: the sweeper
   releases the session, the watchdog restores the terminal and
   `--die-with-parent` ends the payload; in the mount helper a panic's 125
-  reads as a failed mount. flong-sweeper must not panic on any record a
+  reads as a failed mount. flong sweeper must not panic on any record a
   caller can write, since its exit stops the holder and every session: its
   readers are fuzzed.
 - **Start code.** Every program is single-threaded with `stack_size = 0`,
   so Zig's start code makes no syscall before `main` and `RLIMIT_STACK`
   reaches bwrap, tini, the payload and the hooks as the caller set it
-  (quirk 20). No segfault handler; SIGPIPE is left as it came, for `main`
-  to set (`keep_sigpipe`).
-- **Allocation.** flong-init and flong-sweeper allocate nothing: fixed
-  buffers, and flong-init execs tini from the kernel's own argv.
-  flong-launch has one arena over `page_allocator`, never freed, and builds
+  (quirk 20). flong's dispatch reads argv and makes no syscall either, so
+  the first call after `execve` is the subcommand's (`checks.native`'s
+  strace subtest). No segfault handler; SIGPIPE is left as it came, for
+  each subcommand's `main` to set (`keep_sigpipe`).
+- **Allocation.** flong init and flong sweeper allocate nothing: fixed
+  buffers, and flong init execs tini from the kernel's own argv.
+  flong launch has one arena over `page_allocator`, never freed, and builds
   a fork body's inputs before the fork; the mount helper uses `page_allocator` in
   its child. flong-seccomp has an arena over libc's allocator. No
   general-purpose allocator.
@@ -1817,7 +1831,7 @@ sweeper reads a new launcher's records.
 | 6 | teardown: finish the terminal, close the gate, kill, reap (short-circuiting), wait the sandbox and hooks leaves, `postStop`, pasta only with `pasta-wait`, remove or close | `teardown` | basic's teardown subtests |
 | 7 | the mount helper: umask, sort, duplicates; the namespaces through the leader's pidfd, as the caller; `setns(U1)`, then root; its own mount namespace and the sources; the ready byte; the session's mount namespace, its root, then its network and cgroup namespaces before sysfs and cgroup2; `/.hostsys` detached; the mounts in sorted order; `/run` read-only last | `mount.run` | the mount subtests, the walker |
 | 8 | the watchdog forks before raw mode, only when stdin is a terminal, keeping its pipe, the leader and 0–2 | `tty.zig` | the watchdog subtest |
-| 9 | flong-init: groups, the bounding set, the ambient set, capabilities, the controlling tty, INT and QUIT default and an empty mask, the ready byte then close, the gate byte, chdir, close all but 0–2, the trace, exec | `init.zig` | the init golden cases, basic's groups and capabilities |
+| 9 | flong init: groups, the bounding set, the ambient set, capabilities, the controlling tty, INT and QUIT default and an empty mask, the ready byte then close, the gate byte, chdir, close all but 0–2, the trace, exec | `init.zig` | the init golden cases, basic's groups and capabilities |
 | 10 | records: `O_TMPFILE`, `LOCK_EX\|LOCK_NB`, one write, linked through `/proc/self/fd` with the uncounted EEXIST loop; `leader=` at the offset; unlink before close | `record.zig` | the record-bytes subtest, the writer test |
 | 11 | the sweeper adds its inotify watch before the first sweep | `record.watch` | `checks.native`'s watch subtest |
 
@@ -1836,7 +1850,7 @@ parameter):
 | 5.3, 5.4 | `clone3`, `pidfd_open`; `waitid(P_PIDFD)` | every child, and waiting on it |
 | 5.6 | `openat2` with `RESOLVE_*` | the walker, exact binds |
 | 5.7 | `CLONE_INTO_CGROUP` | a child created in its leaf, never migrated |
-| 5.9 | `close_range` | a child's keep list; flong-init; the prologue |
+| 5.9 | `close_range` | a child's keep list; flong init; the prologue |
 | 5.11 | overlayfs mountable in a user namespace; `CLOSE_RANGE_CLOEXEC` | overlay mounts; `Spawn`'s child marking all but its keep list close-on-exec (`proc.zig:300`) |
 | 5.12 | `mount_setattr` | read-only and the other flags after attaching |
 | 5.14 | `cgroup.kill` | ending a session |
@@ -1858,7 +1872,7 @@ behaviour wait for [Open decisions](#open-decisions).
 
 | # | behaviour | where | verdict |
 |---|---|---|---|
-| 1 | the ready byte written after the helper died gives flong-init EPIPE, not SIGPIPE's death: it is its namespace's pid 1, which a default-action signal never kills; it says `telling the launcher the root is built: Broken pipe`, or not, by timing | `init.zig` | Keep; SIGPIPE stays default for the payload |
+| 1 | the ready byte written after the helper died gives flong init EPIPE, not SIGPIPE's death: it is its namespace's pid 1, which a default-action signal never kills; it says `telling the launcher the root is built: Broken pipe`, or not, by timing | `init.zig` | Keep; SIGPIPE stays default for the payload |
 | 2 | a relaunch execs the wrapper before inherited descriptors are closed, restoring SIGPIPE and the mask first | `launch/prologue.zig` | Keep |
 | 3 | pasta gets `$leader`, `$userns`, `$netns`, `$machine` only when a hook ran | `launch/hook.zig`, `pasta.zig` | Keep: the environment is built only when a hook runs, and pasta gets it then |
 | 4 | pasta's `--netns` names the leader by pid, the hook's `$netns` the launcher's descriptor | `launch/pasta.zig` | Keep |
@@ -1879,7 +1893,7 @@ behaviour wait for [Open decisions](#open-decisions).
 | 19 | `getpwuid` | `passwd.zig` | Change, forced by no libc: `/etc/passwd` only; an NSS-only user gets the `uid N` form; the tested text is unchanged |
 | 20 | `RLIMIT_STACK` passes through to children | `init.zig`, `build.zig` | Keep, `stack_size = 0` and rootless's `ulimit -s` subtest |
 | 21 | `realpath` for `postStop`, the closure and the protected paths | `launch/prologue.zig`, `record.zig`, `spec.zig` | Mechanism: an `O_PATH` open and the readlink of its `selfPath`, which needs a free descriptor and `/proc` where glibc's needs neither; the longest-existing-prefix rule unchanged; `access(X_OK)` is `faccessat` |
-| 22 | message lengths: the launcher's, the mount helper's and the sweeper's cut at 1023 bytes; flong-init's, flong-seccomp's and the tooling's whole | `msg.zig` | Keep the lengths; Mechanism: one write or `writev` per message, where the C's stdio wrote some in pieces |
+| 22 | message lengths: the launcher's, the mount helper's and the sweeper's cut at 1023 bytes; flong init's, flong-seccomp's and the tooling's whole | `msg.zig` | Keep the lengths; Mechanism: one write or `writev` per message, where the C's stdio wrote some in pieces |
 | 23 | the C waited for the info pipe or bwrap with epoll | `sig.zig` | Mechanism: one `poll`, the descriptor winning a tie |
 | 24 | the prototype's fork child exited 125 silently when `retainOnly` failed, its spawned child 127 | `proc.zig` | Fix: printed first, as the C did |
 | 25 | the prototype's `Child.deinit` killed an unreaped child | `proc.zig` | Change: no implicit kill; each site says `.kill` or `.wait`, as the C did |
@@ -1923,7 +1937,7 @@ behaviour wait for [Open decisions](#open-decisions).
 
 ### The input contract
 
-The wrapper runs `flong-launch` with the whole spec as its arguments: keywords,
+The wrapper runs `flong launch` with the whole spec as its arguments: keywords,
 each followed by a fixed number of fields, then `--` and the payload's
 command. An argument is already NUL-terminated, so a path may hold a tab or a
 newline, and bash builds and passes the list with builtins alone; bash cannot
@@ -1977,7 +1991,7 @@ mounts, `/sys`, `/run` read-only, the nsdelegate check, or anything about
 seccomp policy beyond the compiled files.
 
 **bwrap's argv** is, in this order, so the fixed part cannot be undone by the
-wrapper's part, and flong-init's protocol follows everything:
+wrapper's part, and flong init's protocol follows everything:
 
 ```
 bwrap --userns <U1> --userns2 <U2> [--assert-userns-disabled]
@@ -1985,7 +1999,7 @@ bwrap --userns <U1> --userns2 <U2> [--assert-userns-disabled]
   --die-with-parent --as-pid-1 --info-fd <info>
   [--new-session]                                    (relay only)
   --add-seccomp-fd <fd> ...                          (one per seccomp, in order)
-  --cap-add CAP_SETGID --cap-add CAP_SETPCAP         (for flong-init, which drops them)
+  --cap-add CAP_SETGID --cap-add CAP_SETPCAP         (for flong init, which drops them)
   --uid <UID> --gid <GID>
   --overlay-src <cache>/prepared --tmp-overlay /
   --ro-bind /nix/store /nix/store --ro-bind /nix/var/nix/db /nix/var/nix/db
@@ -1996,7 +2010,7 @@ bwrap --userns <U1> --userns2 <U2> [--assert-userns-disabled]
   --perms 1777 --tmpfs /tmp
   --ro-bind /sys /.hostsys                           (the mount helper detaches it)
   <bwrap-arg ...>
-  -- flong-init <gate-fd> <ready-fd> <groups> <ctty|-> <trace|-> <dir> -- <COMMAND...>
+  -- flong init <gate-fd> <ready-fd> <groups> <ctty|-> <trace|-> <dir> -- <COMMAND...>
 ```
 
 ### The launch, in order
@@ -2034,7 +2048,7 @@ to the teardown, and the gate is never written.
   work overlaps bwrap's setup; it does nothing in the session's mount
   namespace before the byte.
 - **bwrap's death also ends the waits of steps 13 and 14.** bwrap's child was
-  seen to outlive bwrap before it had execed flong-init, still holding the
+  seen to outlive bwrap before it had execed flong init, still holding the
   info and ready pipes' write ends, so neither pipe reported EOF.
 - **The info pipe's read end stays open until exit.** bwrap 0.12 writes its
   JSON in several writes (the child pid, each namespace id, the closing
@@ -2047,7 +2061,7 @@ to the teardown, and the gate is never written.
 | status | when |
 |---|---|
 | the payload's | the gate opened: bwrap's status, which is pid 1's, which is tini's, which is the payload's; 128+n when a signal killed it |
-| 125 | the payload never ran: a refusal, a failed step, a failing hook, pasta failing (a host port in use), bwrap failing, flong-init's gate EOF. stderr says which |
+| 125 | the payload never ran: a refusal, a failed step, a failing hook, pasta failing (a host port in use), bwrap failing, flong init's gate EOF. stderr says which |
 | 75 | the cache was swept before it was locked, and there is no `relaunch` |
 | 128+n | a terminating signal n reached the launcher before the gate: the launch was aborted and torn down |
 

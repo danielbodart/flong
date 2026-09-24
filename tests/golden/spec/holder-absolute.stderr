@@ -1,1 +1,1 @@
-flong-launch: spec: holder is not a relative path: '/flong.slice/s'
+flong launch: spec: holder is not a relative path: '/flong.slice/s'

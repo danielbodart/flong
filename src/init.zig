@@ -1,12 +1,12 @@
-//! flong-init's root (DESIGN.md, "Files"): launcher/flong-init.c, line by
-//! line; the C was deleted in phase 3 (b), and its line numbers here are
-//! those of db5fdeb.
+//! flong init (DESIGN.md, "Files"): launcher/flong-init.c, line by line;
+//! the C was deleted in phase 3 (b), and its line numbers here are those of
+//! db5fdeb. `main` is the subcommand's, which src/main.zig calls.
 //!
 //! The first program inside the session: bwrap execs it as pid 1
 //! (--as-pid-1), so it runs before anything of the payload's and is the
 //! gate; bwrap's own --block-fd is fail-open, this one is fail-closed.
 //!
-//!   flong-init GATE READY GROUPS TTY TRACE DIR -- COMMAND...
+//!   flong init GATE READY GROUPS TTY TRACE DIR -- COMMAND...
 //!
 //! GATE and READY are descriptor numbers, GROUPS is comma-separated gids or
 //! "-", TTY is "ctty" or "-", TRACE is "trace" or "-", DIR is absolute. The
@@ -40,32 +40,17 @@
 //! (quirk 22). No libc, no allocator, no descriptor table: the groups go in
 //! a static array and tini's argv is the kernel's own (DESIGN.md,
 //! "Conventions"). Static, single-threaded and with no stack size, the start
-//! code makes no syscall before main and leaves RLIMIT_STACK as it came
-//! (quirk 20; DESIGN.md, "What the port measured": start code).
+//! code makes no syscall before main, nor does src/main.zig's dispatch, and
+//! RLIMIT_STACK is left as it came (quirk 20; DESIGN.md, "What the port
+//! measured": start code).
 
 const std = @import("std");
 const sys = @import("sys");
 const msg = @import("msg");
 const config = @import("config");
 
-/// flong-init.c:56.
-const failed = 125;
-
 /// FLONG_TINI (flong-init.c:52-54), -Dtini, as the C string execve takes.
 const tini = std.fmt.comptimePrint("{s}", .{config.tini});
-
-// No SIGSEGV handler, and SIGPIPE left as it came: the start code would
-// otherwise install the one and ignore the other (start.zig:687-719). The
-// C dies of SIGPIPE writing READY after the helper died (quirk 1), and a
-// payload would inherit an ignored SIGPIPE through the exec.
-pub const std_options: std.Options = .{
-    .enable_segfault_handler = false,
-    .keep_sigpipe = true,
-};
-
-// "flong-init: internal error: <msg>", 125: the payload never ran. The
-// default panic ends in abort, which pid 1 drops (posix.zig:680-727).
-pub const panic = std.debug.FullPanic(msg.onPanic(failed));
 
 /// The groups, parsed (flong-init.c:113-138's calloc): at most NGROUPS_MAX,
 /// counted before any is parsed.
@@ -185,29 +170,61 @@ fn resetSignals() void {
     must(sys.emptyMask(), "emptying the signal mask");
 }
 
+/// The words of flong init's argv, from the subcommand's word on
+/// (flong-init.c:185-193): each slot's pointer, read before `tiniArgv`
+/// writes over TRACE, DIR and "--". Nothing but the shape is checked.
+pub const Words = struct {
+    gate: [*:0]const u8,
+    ready: [*:0]const u8,
+    groups: [*:0]const u8,
+    tty: [*:0]const u8,
+    trace: [*:0]const u8,
+    dir: [*:0]const u8,
+};
+
+/// argv as src/main.zig hands it over: the word "init" in slot 0, so the
+/// kernel's slots from `flong init` are these plus one. Null when the
+/// shape is wrong: no "--" in slot 7, or no command after it.
+pub fn words(argv: []const [*:0]const u8) ?Words {
+    if (argv.len < 9 or !std.mem.eql(u8, std.mem.span(argv[7]), "--")) return null;
+    return .{ .gate = argv[1], .ready = argv[2], .groups = argv[3], .tty = argv[4], .trace = argv[5], .dir = argv[6] };
+}
+
+/// tini's argv, in the kernel's own slots (flong-init.c:222-237): COMMAND
+/// is slot 8 onward, and tini's three words go in slots 5-7, whose TRACE,
+/// DIR and "--" `words` has read, so &argv[5] is tini's argv as it stands,
+/// the kernel's NULL after COMMAND ending it. Under `flong init` those are
+/// the kernel's slots 6-8.
+pub fn tiniArgv(argv: [][*:0]const u8) [*:null]const ?[*:0]const u8 {
+    argv[5] = "tini";
+    argv[6] = "-g";
+    argv[7] = "--";
+    return @ptrCast(argv[5..].ptr);
+}
+
 /// flong-init.c:179-238. Ordering checkpoint 9 (DESIGN.md): one linear
-/// function, each step numbered as the header's list.
-pub fn main() noreturn {
-    msg.prog = "flong-init";
+/// function, each step numbered as the header's list. `argv` is the
+/// kernel's, from the subcommand's word on; `envp` the kernel's environ.
+pub fn main(argv: [][*:0]const u8, envp: []const [*:0]const u8) noreturn {
+    msg.prog = "flong init";
     msg.mode = .whole;
-    const argv = sys.argvSlots();
 
     // The argv, in the C's order; nothing is called until all of it holds.
-    if (argv.len < 9 or !std.mem.eql(u8, std.mem.span(argv[7]), "--"))
-        refuse("usage: flong-init GATE READY GROUPS TTY TRACE DIR -- COMMAND...", .{});
-    const gate = fdArg(argv[1], "gate");
-    const ready = fdArg(argv[2], "ready");
+    const w = words(argv) orelse
+        refuse("usage: flong init GATE READY GROUPS TTY TRACE DIR -- COMMAND...", .{});
+    const gate = fdArg(w.gate, "gate");
+    const ready = fdArg(w.ready, "ready");
     if (gate == ready) refuse("the gate and ready descriptors are the same", .{});
-    const groups: ?[]const u32 = switch (groupsArg(std.mem.span(argv[3]), &gids)) {
+    const groups: ?[]const u32 = switch (groupsArg(std.mem.span(w.groups), &gids)) {
         .none => null,
         .some => |n| gids[0..n],
         .too_many => refuse("more supplementary groups than the kernel allows", .{}),
         .not_gid => |tok| refuse("not a group id: {s}", .{tok}),
         .empty_field => refuse("an empty field in the group list", .{}),
     };
-    const ctty = flagArg(argv[4], "ctty");
-    msg.tracing = flagArg(argv[5], "trace");
-    const dir = argv[6];
+    const ctty = flagArg(w.tty, "ctty");
+    msg.tracing = flagArg(w.trace, "trace");
+    const dir = w.dir;
     if (dir[0] != '/') refuse("the working directory is not absolute", .{});
 
     // 1. setgroups.
@@ -243,17 +260,11 @@ pub fn main() noreturn {
     // 8. Every descriptor above stderr, then the trace and the exec.
     must(sys.closeRange(3, ~@as(u32, 0), 0), "closing inherited descriptors");
 
-    // COMMAND is argv[8] onward. tini's three words go in slots 5-7, whose
-    // TRACE, DIR and "--" have been read, so &argv[5] is tini's argv as it
-    // stands, the kernel's NULL after COMMAND ending it.
-    argv[5] = "tini";
-    argv[6] = "-g";
-    argv[7] = "--";
-    const exec_argv: [*:null]const ?[*:0]const u8 = @ptrCast(argv[5..].ptr);
-    const envp: [*:null]const ?[*:0]const u8 = @ptrCast(sys.environ().ptr);
+    const exec_argv = tiniArgv(argv);
+    const exec_envp: [*:null]const ?[*:0]const u8 = @ptrCast(envp.ptr);
 
     msg.trace("payload-exec");
-    fail(sys.execve(tini, exec_argv, envp), "executing {s}", .{tini});
+    fail(sys.execve(tini, exec_argv, exec_envp), "executing {s}", .{tini});
 }
 
 // ---- tests ----

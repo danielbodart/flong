@@ -1,6 +1,6 @@
 //! flong-tty: src/tty.zig driven as the launcher drives it, for
 //! checks.native's pty tests (DESIGN.md, "Tests": checks.native; the
-//! Zig port's L3). flong-launch itself has built tty.zig in since L4.
+//! Zig port's L3). flong launch itself has built tty.zig in since L4.
 //!
 //!   flong-tty [--report] PROGRAM ARG...
 //!
@@ -17,7 +17,7 @@
 //! reopen), `tty.out: fd 1` (its fallback) or `tty.out: passthrough`.
 //!
 //! A payload that should see a hang-up needs the pty as its controlling
-//! terminal, which flong-init gives it in a launch: `setsid -c` does here.
+//! terminal, which flong init gives it in a launch: `setsid -c` does here.
 
 const std = @import("std");
 const sys = @import("sys");

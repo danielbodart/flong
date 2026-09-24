@@ -5,7 +5,7 @@
 //!
 //! The launcher blocks the signals it cares about at start and reads them
 //! from a signalfd, so every wait is a poll that a terminating signal ends
-//! as an event (flong-util.h:88-97). A program without one (flong-sweeper)
+//! as an event (flong-util.h:88-97). A program without one (flong sweeper)
 //! leaves `fd` null: its waits poll the descriptor alone and SIGTERM kills
 //! it. A fork child that did not keep the signalfd has a stale handle here,
 //! which every wait tests with `isLive`, never `raw` (flong-util.c:476-479).
@@ -152,7 +152,7 @@ pub const Woke = enum {
 /// await_or_bwrap (flong-launch.c:414-448): waits, with no timeout, until
 /// `h` is readable or `child`'s process exits, or a terminating signal
 /// arrives on `fd`. bwrap's child can outlive bwrap until it has exec'd
-/// flong-init, holding the write ends of the info and ready pipes, so
+/// flong init, holding the write ends of the info and ready pipes, so
 /// neither pipe says EOF: bwrap's pidfd is watched too (:414-420).
 ///
 /// The C's epoll over {fd, bwrap's pidfd}, waited on through fl_await, is

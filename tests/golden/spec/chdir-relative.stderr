@@ -1,1 +1,1 @@
-flong-launch: spec: chdir is not an absolute path: 'work'
+flong launch: spec: chdir is not an absolute path: 'work'

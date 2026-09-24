@@ -1,1 +1,1 @@
-flong-launch: spec: post-stop has an empty, '.' or '..' component: '/nix/store/x/../../bin/sh'
+flong launch: spec: post-stop has an empty, '.' or '..' component: '/nix/store/x/../../bin/sh'

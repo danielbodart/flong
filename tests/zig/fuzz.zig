@@ -1,5 +1,5 @@
 //! The sweep's readers fuzzed (minish, the `test` step; DESIGN.md, "Tests":
-//! fuzzing). flong-sweeper reads records, cgroup paths, cgroup.events,
+//! fuzzing). flong sweeper reads records, cgroup paths, cgroup.events,
 //! /proc files and inotify events a caller can shape, and its exit stops
 //! the holder and every session (module.nix:936-941), so none may panic or
 //! reach `unreachable` on any input (DESIGN.md, open decision 2). Each target

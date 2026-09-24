@@ -1,11 +1,12 @@
-//! flong-launch: one session, from the wrapper's spec to the payload's exit
+//! flong launch: one session, from the wrapper's spec to the payload's exit
 //! (DESIGN.md, "Files"; the Zig port's L4; launcher/flong-launch.c of
-//! a7919be, whose line numbers these are). The wrapper execs this with the
-//! whole spec as arguments (DESIGN.md, "The input contract"). `main` is the
-//! prologue, steps 1-5 of DESIGN.md's "The launch, in order" (ordering
-//! checkpoint 1), then `proc.exit(teardown(&l, run(&l)))`: `run` is steps
-//! 6-18, returning at the first failure, and `teardown` step 19, undoing
-//! whatever exists whatever stage was reached (flong-launch.c:1-19).
+//! a7919be, whose line numbers these are). The wrapper execs `flong launch`
+//! with the whole spec as arguments (DESIGN.md, "The input contract"), and
+//! src/main.zig calls `main` here. `main` is the prologue, steps 1-5 of
+//! DESIGN.md's "The launch, in order" (ordering checkpoint 1), then
+//! `proc.exit(teardown(&l, run(&l)))`: `run` is steps 6-18, returning at
+//! the first failure, and `teardown` step 19, undoing whatever exists
+//! whatever stage was reached (flong-launch.c:1-19).
 //!
 //! Every resource a launch holds is in `Launch`: a handle that may not
 //! exist yet is optional, one kept until the process exits is `Held` (the
@@ -14,7 +15,7 @@
 //! "Conventions"), and each child is a `?proc.Child`, null once it
 //! is reaped (flong-launch.c:47-80). The payload runs only once the gate
 //! byte is written, and the gate is written only after every earlier step
-//! succeeded: flong-init reads EOF otherwise and exits 125.
+//! succeeded: flong init reads EOF otherwise and exits 125.
 //!
 //! The steps are modules: spec (the input contract, bwrap's argv), ns (U1
 //! and U2), cgroup (the holder and the session), record (the state
@@ -57,32 +58,19 @@ const Allocator = std.mem.Allocator;
 /// kept).
 const not_run = prologue.exit_not_run;
 
-// The programs a launch runs, compiled in (-Dbwrap, -Dinit, -Dpasta,
+// The programs a launch runs, compiled in (-Dbwrap, -Dself, -Dpasta,
 // -Dnewuidmap, -Dnewgidmap; FLONG_BWRAP and the rest in the C), so the
-// wrapper cannot point the launcher at another bwrap.
+// wrapper cannot point the launcher at another bwrap. -Dself is this
+// binary's own installed path, which bwrap runs as `flong init`.
 const paths: bwrap.Paths = .{
     .bwrap = std.fmt.comptimePrint("{s}", .{config.bwrap}),
-    .init = std.fmt.comptimePrint("{s}", .{config.init}),
+    .self = std.fmt.comptimePrint("{s}", .{config.self}),
 };
 const pasta_path = std.fmt.comptimePrint("{s}", .{config.pasta});
 const maps: ns.Programs = .{
     .newuidmap = std.fmt.comptimePrint("{s}", .{config.newuidmap}),
     .newgidmap = std.fmt.comptimePrint("{s}", .{config.newgidmap}),
 };
-
-// No SIGSEGV handler, and SIGPIPE left as it came for main to ignore, as
-// the C does (start.zig:687-719).
-pub const std_options: std.Options = .{
-    .enable_segfault_handler = false,
-    .keep_sigpipe = true,
-};
-
-/// "flong-launch: internal error: <msg>", 125. The main process then skips
-/// the teardown: the sweeper releases the session, the watchdog restores
-/// the terminal and --die-with-parent ends the payload (DESIGN.md,
-/// "Conventions": panics). In the mount helper, a fork of this process,
-/// 125 reads as a failed mount (flong-launch.c:570-575).
-pub const panic = std.debug.FullPanic(msg.onPanic(not_run));
 
 /// The session's cgroup leaves, in cgroup.leaf_names' order
 /// (flong-cgroup.h's FL_LEAF_*).
@@ -95,6 +83,9 @@ const Launch = struct {
     /// The launch's allocations, never freed (flong-launch.c:97-99).
     arena: Allocator,
     s: *const spec.Spec,
+    /// the environment the process started with, main's, which the hook
+    /// adds to
+    environ: []const [*:0]const u8,
 
     // What the prologue made, held until the process exits.
     state: record.State,
@@ -114,12 +105,12 @@ const Launch = struct {
 
     /// read end of bwrap's --info-fd, open until exit (quirk 31)
     info: ?fdt.Held(.pipe_r) = null,
-    /// read end of flong-init's ready pipe, until the mount helper has it
+    /// read end of flong init's ready pipe, until the mount helper has it
     ready: ?fdt.Fd(.pipe_r) = null,
     /// write end of the gate
     gate: ?fdt.Fd(.pipe_w) = null,
     bwrap: ?proc.Child = null,
-    /// bwrap's child: flong-init, the session's pid 1
+    /// bwrap's child: flong init, the session's pid 1
     leader_pid: sys.pid_t = 0,
     leader: ?fdt.Held(.pidfd) = null,
     /// the session's network namespace
@@ -135,14 +126,16 @@ const Launch = struct {
     gate_opened: bool = false,
 };
 
-pub fn main() noreturn {
+/// `argv` is the kernel's, from the subcommand's word on, and `envp` its
+/// environ, which a relaunch passes on.
+pub fn main(argv: []const [*:0]const u8, envp: []const [*:0]const u8) noreturn {
     // Ordering checkpoint 1, the prologue (flong-launch.c:847-925). The
     // time is main's first statement: `launcher-start` is stamped now and
     // printed once the trace flag is known (quirk 45). Nothing here changes
     // directory: relaunch's argv may be relative to the wrapper's (quirk
     // 30).
     const start = sys.clockRealtime();
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     msg.mode = .cut;
 
     // 1. Signals are read from a signalfd, so every wait can end on one as
@@ -162,7 +155,7 @@ pub fn main() noreturn {
     // page_allocator that lives as long as the process (:879-881).
     var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     const arena = arena_state.allocator();
-    const s = spec.parse(arena, sys.argv()) catch proc.exit(not_run);
+    const s = spec.parse(arena, argv) catch proc.exit(not_run);
 
     // 3. The keep-fds into the table, which the spec checked open by
     // F_GETFD: kept by bwrap's spawn, closed right after it (checkpoint 2),
@@ -198,7 +191,7 @@ pub fn main() noreturn {
         error.Reported => not_run,
     })) {
         .locked => |h| h,
-        .swept => proc.exit(prologue.relaunch(arena, s.cache, s.relaunch, old_mask, @ptrCast(sys.environ().ptr))),
+        .swept => proc.exit(prologue.relaunch(arena, s.cache, s.relaunch, old_mask, @ptrCast(envp.ptr))),
     };
     msg.trace("cache-locked");
 
@@ -208,7 +201,7 @@ pub fn main() noreturn {
     // (:909-924).
     prologue.closeUntracked() catch proc.exit(not_run);
 
-    var l: Launch = .{ .arena = arena, .s = &s, .state = state, .cache = cache, .keep = keep };
+    var l: Launch = .{ .arena = arena, .s = &s, .environ = envp, .state = state, .cache = cache, .keep = keep };
     proc.exit(teardown(&l, run(&l)));
 }
 
@@ -295,7 +288,7 @@ fn run(l: *Launch) sig.Error!u8 {
     // Checkpoint 2: the child's ends go at once, whether or not the spawn
     // succeeded, in flong-launch.c:396-408's order. A copy the launcher
     // kept of a write end would hide bwrap's death from the info and ready
-    // readers, and one of the gate's read end would never let flong-init
+    // readers, and one of the gate's read end would never let flong init
     // see EOF.
     // 1. The info pipe's write end.
     if (ends.info_w) |h| h.close();
@@ -371,7 +364,7 @@ fn run(l: *Launch) sig.Error!u8 {
     // (:579-620).
     var envp: ?hook.Envp = null;
     const self_pid = sys.getpid();
-    if (try hook.build(l.arena, s, sys.environ(), .{ .leader = pid, .self_pid = self_pid, .machine = s.machine }, outer, netns, cg.leaf[hooks].?)) |built| {
+    if (try hook.build(l.arena, s, l.environ, .{ .leader = pid, .self_pid = self_pid, .machine = s.machine }, outer, netns, cg.leaf[hooks].?)) |built| {
         var h = built;
         envp = h.envp;
         l.hook = try h.spawn.start();
@@ -454,7 +447,7 @@ fn teardown(l: *Launch, result: sig.Error!u8) u8 {
     // 1. The terminal: hooks and postStop then print to a cooked one.
     tty.finish(&l.tty);
 
-    // 2. The gate: flong-init reads EOF and exits 125, and the payload
+    // 2. The gate: flong init reads EOF and exits 125, and the payload
     // never runs.
     if (l.gate) |g| g.close();
     l.gate = null;

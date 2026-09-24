@@ -858,7 +858,7 @@ in
 
       @test("the payload holds descriptors 0-2 and nothing else", part="a")
       def _():
-          # flong-init closes everything above stderr before it execs tini
+          # flong init closes everything above stderr before it execs tini
           # (src/init.zig:240-241): bwrap leaks its namespace descriptors,
           # and the seccomp and pipe ends reach it too. The `; true` keeps
           # bash from exec'ing ls, so ls lists the payload's own table, $$.

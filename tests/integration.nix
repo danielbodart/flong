@@ -144,7 +144,7 @@ let
   };
 
   # L2's checks.native fragment: the driver above, and the launcher's Zig
-  # flong-sweeper sweeping a record the driver wrote.
+  # flong sweeper sweeping a record the driver wrote.
   launchNative = import ./launch-native.nix {
     inherit pkgs;
     launcher = import ../launcher { inherit pkgs; };

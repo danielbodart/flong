@@ -1,1 +1,1 @@
-flong-launch: spec: closure '@CLOSURE@/bin/flong-launch/x': Not a directory
+flong launch: spec: closure '@CLOSURE@/bin/flong/x': Not a directory

@@ -7,9 +7,9 @@
 //! modes, as the C has:
 //!
 //!   cut    the body cut at 1022 bytes, then the newline, one write: the
-//!          launcher, its children, the mount helper and flong-sweeper
+//!          launcher, its children, the mount helper and flong sweeper
 //!          (flong-util.c:51-79, a 1024-byte buffer, one byte kept free)
-//!   whole  the body however long, one writev of its pieces: flong-init and
+//!   whole  the body however long, one writev of its pieces: flong init and
 //!          flong-seccomp, whose messages quote a word of up to 4095 bytes
 //!          (flong-seccomp.c:75) or a directory of any length
 //!          (flong-init.c:59-67)

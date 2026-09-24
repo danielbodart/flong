@@ -3,7 +3,7 @@
 //! through /run/wrappers/bin/newuidmap, the U2 abort; cgroup's launch
 //! half; a record the Zig sweeper sweeps; passwd). It prepares signals as
 //! the launcher does (blocked, read from a signalfd, SIGPIPE ignored,
-//! SIGCHLD default) and says what it says as flong-launch. Static, no libc,
+//! SIGCHLD default) and says what it says as flong launch. Static, no libc,
 //! as a flong program is.
 //!
 //!   ns NEWUIDMAP NEWGIDMAP UIDMAP GIDMAP NESTED
@@ -313,7 +313,7 @@ fn run(gpa: std.mem.Allocator, args: []const [*:0]const u8) !void {
 }
 
 pub fn main() noreturn {
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     msg.mode = .cut;
     _ = sig.block() catch proc.exit(1);
     sig.ignorePipe();

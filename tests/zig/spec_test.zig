@@ -61,13 +61,14 @@ const Capture = struct {
 
 const Parsed = struct { spec: ?spec.Spec, err: []const u8 };
 
-/// Parses `words` as argv[1..] (argv[0] "flong-launch"), in `arena`, and
-/// returns what it said on stderr.
+/// Parses `words` as argv[1..] (argv[0] "launch", the subcommand's word
+/// flong launch's argv starts at), in `arena`, and returns what it said on
+/// stderr.
 fn parseWords(arena: Allocator, words: []const []const u8, errbuf: []u8) !Parsed {
     const argv = try arena.alloc([*:0]const u8, words.len + 1);
-    argv[0] = "flong-launch";
+    argv[0] = "launch";
     for (words, 1..) |w, i| argv[i] = (try arena.dupeZ(u8, w)).ptr;
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     msg.mode = .cut;
     const cap = try Capture.begin();
     const r = spec.parse(arena, argv);
@@ -143,7 +144,7 @@ fn expectArgv(extra: []const []const u8, relay: bool, want: []const []const u8) 
         .seccomp = seccomp_fds[0..s.seccomp.len],
         .gate_r = Named{ .name = "@GATE@" },
         .ready_w = Named{ .name = "@READY@" },
-    }, relay, "/nix/store/test-only-flong-init");
+    }, relay, "/nix/store/test-only-flong");
 
     var expected: std.ArrayList([]const u8) = .empty;
     for (want) |w| try expected.append(arena, try substitute(arena, w, &vars));
@@ -196,17 +197,17 @@ test "bwrapArgv: plain" {
     try expectArgv(&.{}, false, comptime cat(&.{
         &head,
         &middle,
-        &.{ "--", "/nix/store/test-only-flong-init", "@GATE@", "@READY@", "100,27", "-", "-", "/home/u/w" },
+        &.{ "--", "/nix/store/test-only-flong", "init", "@GATE@", "@READY@", "100,27", "-", "-", "/home/u/w" },
         &tail_command,
     }));
 }
 
-test "bwrapArgv: relay, a session of its own and flong-init's ctty" {
+test "bwrapArgv: relay, a session of its own and flong init's ctty" {
     try expectArgv(&.{}, true, comptime cat(&.{
         &head,
         &.{"--new-session"},
         &middle,
-        &.{ "--", "/nix/store/test-only-flong-init", "@GATE@", "@READY@", "100,27", "ctty", "-", "/home/u/w" },
+        &.{ "--", "/nix/store/test-only-flong", "init", "@GATE@", "@READY@", "100,27", "ctty", "-", "/home/u/w" },
         &tail_command,
     }));
 }
@@ -216,7 +217,7 @@ test "bwrapArgv: nestedSandbox drops --assert-userns-disabled" {
         &.{ "--userns", "@U1@", "--userns2", "@U2@" },
         head[5..],
         &middle,
-        &.{ "--", "/nix/store/test-only-flong-init", "@GATE@", "@READY@", "100,27", "-", "-", "/home/u/w" },
+        &.{ "--", "/nix/store/test-only-flong", "init", "@GATE@", "@READY@", "100,27", "-", "-", "/home/u/w" },
         &tail_command,
     }));
 }
@@ -226,7 +227,7 @@ test "bwrapArgv: the tier's filters and a project filter, one --add-seccomp-fd e
         &head,
         &.{ "--add-seccomp-fd", "@SECCOMP0@", "--add-seccomp-fd", "@SECCOMP1@", "--add-seccomp-fd", "@SECCOMP2@" },
         &middle,
-        &.{ "--", "/nix/store/test-only-flong-init", "@GATE@", "@READY@", "100,27", "-", "-", "/home/u/w" },
+        &.{ "--", "/nix/store/test-only-flong", "init", "@GATE@", "@READY@", "100,27", "-", "-", "/home/u/w" },
         &tail_command,
     }));
 }
@@ -247,7 +248,7 @@ test "bwrapArgv: keep-fds' bwrap-args go verbatim, after the fixed part" {
         &head,
         &middle,
         &.{ "--clearenv", "--setenv", "HOME", "/home/u", "--perms", "0644", "--ro-bind-data", "@KEEP@", "/etc/resolv.conf" },
-        &.{ "--", "/nix/store/test-only-flong-init", "@GATE@", "@READY@", "100,27", "-", "-", "/home/u/w" },
+        &.{ "--", "/nix/store/test-only-flong", "init", "@GATE@", "@READY@", "100,27", "-", "-", "/home/u/w" },
         &tail_command,
     }));
 }
@@ -275,11 +276,11 @@ test "bwrapArgv: trace, and no groups" {
         .seccomp = seccomp_fds[0..0],
         .gate_r = Named{ .name = "@GATE@" },
         .ready_w = Named{ .name = "@READY@" },
-    }, false, "/init");
+    }, false, "/flong");
     const got = rec.words.items;
-    try testing.expectEqualStrings("--", got[got.len - 10]);
-    const init_tail = [_][]const u8{ "/init", "@GATE@", "@READY@", "-", "-", "trace", "/home/u/w", "--", "true" };
-    for (init_tail, got[got.len - 9 ..]) |w, g| try testing.expectEqualStrings(w, g);
+    try testing.expectEqualStrings("--", got[got.len - 11]);
+    const init_tail = [_][]const u8{ "/flong", "init", "@GATE@", "@READY@", "-", "-", "trace", "/home/u/w", "--", "true" };
+    for (init_tail, got[got.len - 10 ..]) |w, g| try testing.expectEqualStrings(w, g);
 }
 
 // ---- the model ----
@@ -1176,7 +1177,7 @@ fn refusedWith(seed: u64, rule: Rule) !void {
     };
     var errbuf: [4096]u8 = undefined;
     const p = try parseWords(g.a, mut.words, &errbuf);
-    const want = try std.fmt.allocPrint(g.a, "flong-launch: {s}\n", .{mut.want});
+    const want = try std.fmt.allocPrint(g.a, "flong launch: {s}\n", .{mut.want});
     testing.expectEqualStrings(want, p.err) catch |err| {
         std.debug.print("rule {s}, seed {d}\n", .{ @tagName(rule), seed });
         return err;

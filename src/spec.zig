@@ -3,7 +3,7 @@
 //! checks it calls (:106-415), with flong-spec.h's struct as `Spec` (the Zig
 //! port's L1). The line numbers are those of 5f1f08e.
 //!
-//! The wrapper passes the whole spec as flong-launch's arguments: a sequence
+//! The wrapper passes the whole spec as flong launch's arguments: a sequence
 //! of keywords, each followed by a fixed number of fields, then "--" and the
 //! payload's command. An argument is a NUL-terminated string, so a path may
 //! hold a tab, a newline or anything else but NUL, and bash builds the list
@@ -800,9 +800,9 @@ fn tables(arena: Allocator, count: *const [kw_n]usize) Allocator.Error!Tables {
 
 /// bwrap's argv after its program, in DESIGN.md's order ("The input
 /// contract"; flong-launch.c:269-332): the fixed part, the wrapper's
-/// bwrap-args, then flong-init and its protocol. The fixed part comes first
-/// so nothing the wrapper adds can undo it, and flong-init's protocol is its
-/// argv, after everything, so a --clearenv among the wrapper's options
+/// bwrap-args, then flong init and its protocol. The fixed part comes first
+/// so nothing the wrapper adds can undo it, and flong init's protocol is
+/// its argv, after everything, so a --clearenv among the wrapper's options
 /// cannot drop it.
 ///
 /// `sp` is where the words go: a proc.Spawn begun with bwrap's path, or
@@ -810,9 +810,10 @@ fn tables(arena: Allocator, count: *const [kw_n]usize) Allocator.Error!Tables {
 /// through `passFd`, which keeps it in bwrap at that number: `fds` holds
 /// U1, U2, the info pipe's write end, the seccomp files (a slice, in the
 /// spec's order), the gate's read end and the ready pipe's write end.
-/// `relay` is the terminal's (tty.zig), `init` flong-init's path. The
-/// words made here (numbers, joined paths) are `gpa`'s.
-pub fn bwrapArgv(gpa: Allocator, sp: anytype, s: *const Spec, fds: anytype, relay: bool, init: [*:0]const u8) Allocator.Error!void {
+/// `relay` is the terminal's (tty.zig), `self` the flong binary's path,
+/// which bwrap runs with the word "init". The words made here (numbers,
+/// joined paths) are `gpa`'s.
+pub fn bwrapArgv(gpa: Allocator, sp: anytype, s: *const Spec, fds: anytype, relay: bool, self: [*:0]const u8) Allocator.Error!void {
     const a = struct {
         fn z(al: Allocator, comptime fmt: []const u8, args: anytype) Allocator.Error![*:0]const u8 {
             return (try std.fmt.allocPrintSentinel(al, fmt, args, 0)).ptr;
@@ -835,7 +836,7 @@ pub fn bwrapArgv(gpa: Allocator, sp: anytype, s: *const Spec, fds: anytype, rela
         try sp.arg("--add-seccomp-fd");
         try sp.passFd(h);
     }
-    // For flong-init's setgroups and capability drop, which leaves the
+    // For flong init's setgroups and capability drop, which leaves the
     // payload with none.
     for ([_][*:0]const u8{ "--cap-add", "CAP_SETGID", "--cap-add", "CAP_SETPCAP", "--uid" }) |w| try sp.arg(w);
     try sp.arg(try a.z(gpa, "{d}", .{s.uid}));
@@ -865,7 +866,8 @@ pub fn bwrapArgv(gpa: Allocator, sp: anytype, s: *const Spec, fds: anytype, rela
     for (s.bwrap_args) |w| try sp.arg(w.ptr);
 
     try sp.arg("--");
-    try sp.arg(init);
+    try sp.arg(self);
+    try sp.arg("init");
     try sp.passFd(fds.gate_r);
     try sp.passFd(fds.ready_w);
     try sp.arg(try groupsArg(gpa, s.groups));
@@ -876,7 +878,7 @@ pub fn bwrapArgv(gpa: Allocator, sp: anytype, s: *const Spec, fds: anytype, rela
     for (s.command) |w| try sp.arg(w);
 }
 
-/// flong-init's <groups> argument: comma-separated gids, or "-"
+/// flong init's <groups> argument: comma-separated gids, or "-"
 /// (flong-launch.c:252-267).
 fn groupsArg(gpa: Allocator, groups: []const u32) Allocator.Error![*:0]const u8 {
     if (groups.len == 0) return "-";

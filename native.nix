@@ -5,8 +5,8 @@
 #
 # Phase 1 has the seccomp set, which seccomp/default.nix imports; phase 3
 # adds launcher, which launcher/default.nix imports (phase 5 adds
-# flong-sweeper to it, phase 7's L4 the Zig flong-launch); phase 6
-# fixtures, which tests/parity/default.nix and tests/probes.nix import.
+# flong-sweeper to it, phase 7's L4 the Zig flong-launch, and S1 makes the
+# three one binary, flong); phase 6 fixtures, which tests/parity/default.nix and tests/probes.nix import.
 # tests/integration.nix builds phase 0's proofs with the same zigSet.
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:10-19
@@ -177,24 +177,24 @@ let
     '';
   };
 
-  # The programs flong-launch runs, compiled in.
+  # The programs flong launch runs, compiled in.
   bwrap = "${pkgs.bubblewrap}/bin/bwrap";
   pasta = "${pkgs.passt}/bin/pasta";
   newuidmap = "/run/wrappers/bin/newuidmap";
   newgidmap = "/run/wrappers/bin/newgidmap";
 
-  # flong-launch, flong-sweeper and flong-init side by side in one $out
-  # (tests/rootless.nix:636-641 finds the sweeper beside the launcher), all
-  # three Zig (phases 3, 5 and 7), static and without libc: -Dtini is
-  # flong-init's compiled-in tini, and flong-launch's programs are
-  # -Dbwrap, -Dpasta, -Dnewuidmap, -Dnewgidmap and -Dinit, the flong-init
-  # installed beside it, in the same $out. The fileset holds src/ but for
-  # the seccomp set's and the fixtures' own sources (DESIGN.md, "The
-  # build"), so neither set's edits move it.
+  # flong, one binary whose subcommands are launch, init and sweeper
+  # (src/main.zig), static and without libc: -Dtini is
+  # flong init's compiled-in tini, and flong launch's programs are -Dbwrap,
+  # -Dpasta, -Dnewuidmap, -Dnewgidmap and -Dself, the flong in this $out,
+  # which bwrap runs as `flong init`. The fileset holds src/ but for the
+  # seccomp set's and the fixtures' own sources (DESIGN.md, "The build"), so
+  # neither set's edits move it. Its size is printed, never gated (DESIGN.md,
+  # "What the port measured": binaries).
   launcher = zigSet {
     pname = "flong-launcher";
     set = "launcher";
-    flags = "-Dtini=${pkgs.tini}/bin/tini -Dbwrap=${bwrap} -Dpasta=${pasta} -Dnewuidmap=${newuidmap} -Dnewgidmap=${newgidmap} -Dinit=$out/bin/flong-init";
+    flags = "-Dtini=${pkgs.tini}/bin/tini -Dbwrap=${bwrap} -Dpasta=${pasta} -Dnewuidmap=${newuidmap} -Dnewgidmap=${newgidmap} -Dself=$out/bin/flong";
     files = [
       (lib.fileset.difference ./src (
         lib.fileset.unions [
@@ -208,24 +208,24 @@ let
       pkgs.binutils
     ];
     extra = ''
-      # The three: static, no INTERP, and no stack size in PT_GNU_STACK, so
-      # the start code leaves RLIMIT_STACK alone (quirk 20; DESIGN.md,
-      # "What the port measured": start code).
-      for prog in flong-launch flong-init flong-sweeper; do
-        file -b $out/bin/$prog | tee /dev/stderr | grep -q 'statically linked'
-        readelf -lW $out/bin/$prog > $TMPDIR/$prog.phdrs
-        if grep -q INTERP $TMPDIR/$prog.phdrs; then echo "$prog has an INTERP"; exit 1; fi
-        [[ $(awk '$1 == "GNU_STACK" { print $6 }' $TMPDIR/$prog.phdrs) == 0x000000 ]]
-      done
+      # One program, flong.
+      [[ "$(ls $out/bin)" == flong ]]
+      # Static, no INTERP, and no stack size in PT_GNU_STACK, so the start
+      # code leaves RLIMIT_STACK alone (quirk 20; DESIGN.md, "What the port
+      # measured": start code).
+      file -b $out/bin/flong | tee /dev/stderr | grep -q 'statically linked'
+      readelf -lW $out/bin/flong > $TMPDIR/flong.phdrs
+      if grep -q INTERP $TMPDIR/flong.phdrs; then echo "flong has an INTERP"; exit 1; fi
+      [[ $(awk '$1 == "GNU_STACK" { print $6 }' $TMPDIR/flong.phdrs) == 0x000000 ]]
       # Stripped, as build.zig makes every installed artifact: no symbol
       # table, so nothing names Zig's lib/std (disallowedReferences holds
       # the rest).
-      readelf -SW $out/bin/flong-launch > $TMPDIR/flong-launch.sections
-      grep -q '\.text' $TMPDIR/flong-launch.sections
-      if grep -q '\.symtab' $TMPDIR/flong-launch.sections; then echo "flong-launch has a symbol table"; exit 1; fi
-      # flong-launch runs the flong-init beside it.
-      grep -qF "$out/bin/flong-init" $out/bin/flong-launch
-      [[ "$(ls $out/bin)" == "$(printf '%s\n' flong-init flong-launch flong-sweeper)" ]]
+      readelf -SW $out/bin/flong > $TMPDIR/flong.sections
+      grep -q '\.text' $TMPDIR/flong.sections
+      if grep -q '\.symtab' $TMPDIR/flong.sections; then echo "flong has a symbol table"; exit 1; fi
+      # flong launch runs its own binary as bwrap's payload, flong init.
+      grep -qF "$out/bin/flong" $out/bin/flong
+      echo "flong: $(stat -c %s $out/bin/flong) bytes" >&2
     '';
   };
 
@@ -280,14 +280,14 @@ let
     # aarch64 from x86_64 (DESIGN.md, "The build": cross): flong-seccomp
     # and bpfdump compiled and not linked, since the flake has no aarch64
     # libseccomp here; syscall-probe, swapper and ioctl-probe built; tests/zig/abi.zig's aarch64 half, and its controls, each plant
-    # failing the build naming what differs on both arches; flong-launch
-    # and flong-init (with dummy paths) and flong-sweeper for aarch64, the
-    # launcher set.
+    # failing the build naming what differs on both arches; flong (with
+    # dummy paths) for aarch64, the launcher set.
     cross-aarch64 = pkgs.linkFarm "cross-aarch64" {
       flong = zigSet {
         pname = "cross-aarch64";
         files = [
           ./src/seccomp
+          ./src/main.zig
           ./src/init.zig
           ./src/mount.zig
           ./src/sweeper.zig
@@ -313,10 +313,9 @@ let
           pkgs.binutils
         ];
         extra = ''
-          # flong-launch and flong-init (with dummy paths) and flong-sweeper
-          # for aarch64: static, no INTERP.
+          # flong (with dummy paths) for aarch64: static, no INTERP.
           # And the fixtures but bpfdump, which needs libseccomp.
-          for prog in flong-launch flong-init flong-sweeper syscall-probe swapper ioctl-probe; do
+          for prog in flong syscall-probe swapper ioctl-probe; do
             file -b $out/cross/$prog | tee /dev/stderr | grep -q 'ARM aarch64.*statically linked'
             if file -b $out/cross/$prog | grep -q interpreter; then exit 1; fi
           done

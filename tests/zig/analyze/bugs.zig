@@ -299,21 +299,21 @@ const bwrap = @import("bwrap");
 
 // B27: bwrap's Child released twice
 pub fn b27BwrapReleasedTwice(a: anytype, s: anytype, u1: anytype, ends: anytype) !void {
-    const b = try bwrap.spawn(a, s, .{ .bwrap = "/b", .init = "/i" }, u1, false, .{ null, null, null }, null, ends);
+    const b = try bwrap.spawn(a, s, .{ .bwrap = "/b", .self = "/f" }, u1, false, .{ null, null, null }, null, ends);
     b.child.release();
     b.child.release();
 }
 
 // B28: the gate's write end closed twice
 pub fn b28GateClosedTwice(a: anytype, s: anytype, u1: anytype, ends: anytype) !void {
-    const b = try bwrap.spawn(a, s, .{ .bwrap = "/b", .init = "/i" }, u1, false, .{ null, null, null }, null, ends);
+    const b = try bwrap.spawn(a, s, .{ .bwrap = "/b", .self = "/f" }, u1, false, .{ null, null, null }, null, ends);
     b.gate_w.close();
     b.gate_w.close();
 }
 
 // ok10: each of spawn's handles ended once
 pub fn ok10BwrapOnce(a: anytype, s: anytype, u1: anytype, ends: anytype) !void {
-    const b = try bwrap.spawn(a, s, .{ .bwrap = "/b", .init = "/i" }, u1, false, .{ null, null, null }, null, ends);
+    const b = try bwrap.spawn(a, s, .{ .bwrap = "/b", .self = "/f" }, u1, false, .{ null, null, null }, null, ends);
     b.gate_w.close();
     b.ready_r.close();
     b.info_r.close();

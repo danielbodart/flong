@@ -628,11 +628,11 @@ in
         assert "refusing to run as root" in out and out.split()[-1] == "rc=1", out
         # The launcher and the sweeper refuse root themselves, before
         # reading anything else, for a caller who runs them directly.
-        launch = machine.succeed(
-            "grep -m 1 -o '/nix/store/[^/]*/bin/flong-launch' \"$(readlink -f \"$(command -v plain)\")\"").strip()
-        out = machine.succeed(f"{launch} -- true 2>&1 && echo rc=0 || echo rc=$?")
+        flong = machine.succeed(
+            "grep -m 1 -o '/nix/store/[^/]*-flong-launcher-[^/]*/bin/flong' \"$(readlink -f \"$(command -v plain)\")\"").strip()
+        out = machine.succeed(f"{flong} launch -- true 2>&1 && echo rc=0 || echo rc=$?")
         assert "refusing to run as root" in out and out.split()[-1] == "rc=125", out
-        out = machine.succeed(f"{launch.removesuffix('launch')}sweeper /tmp 2>&1 && echo rc=0 || echo rc=$?")
+        out = machine.succeed(f"{flong} sweeper /tmp 2>&1 && echo rc=0 || echo rc=$?")
         assert "refusing to run as root" in out and out.split()[-1] == "rc=125", out
         machine.fail("test -e /run/user/0/flong")
 
@@ -653,7 +653,7 @@ in
     @test("the caller's RLIMIT_STACK reaches the payload unchanged")
     def _():
         # Quirk 20 (DESIGN.md, "Kept behaviour"): nothing between the caller and the payload (the
-        # wrapper, flong-launch, bwrap, flong-init, tini) sets it.
+        # wrapper, flong launch, bwrap, flong init, tini) sets it.
         out = machine.succeed(as_user("ulimit -s 4096; plain 'ulimit -s'"))
         assert out == "4096\n", out
         # The soft limit alone, the hard one left as it was: a program that
@@ -948,11 +948,11 @@ in
         # (flong-launch.c:563-575). The workspace is /srv/work, bound there.
         wrapper = machine.succeed("readlink -f \"$(command -v plain)\"").strip()
         machine.succeed("mkdir /srv/work/adir && echo file > /srv/work/afile")
-        GATE = "flong-init: the gate closed without opening: not starting the payload"
-        # flong-init is its namespace's pid 1, which SIGPIPE's default never
+        GATE = "flong init: the gate closed without opening: not starting the payload"
+        # flong init is its namespace's pid 1, which SIGPIPE's default never
         # kills: writing READY after the helper refused gets EPIPE, and says so.
-        READY = "flong-init: telling the launcher the root is built: Broken pipe"
-        FAILED = "flong-launch: the session's mounts failed; the payload does not run"
+        READY = "flong init: telling the launcher the root is built: Broken pipe"
+        FAILED = "flong launch: the session's mounts failed; the payload does not run"
 
         def extra_mount(tokens, payload="echo ok"):
             line = f"spec+=({tokens})"
@@ -962,13 +962,13 @@ in
                 f"test \"$(grep -cxF {shlex.quote(line)} /tmp/plain-mount)\" = 1")
             return machine.succeed(as_user(f"/tmp/plain-mount {shlex.quote(payload)} 2>&1; echo rc=$?"))
 
-        # flong-init may or may not say the gate closed, or that READY's
+        # flong init may or may not say the gate closed, or that READY's
         # reader is gone, before teardown kills it (flong-launch.c:792-797);
         # nothing else may be said.
         def refused(tokens, message):
             out = extra_mount(tokens)
             lines = [l for l in out.splitlines() if l not in (GATE, READY)]
-            assert lines == [f"flong-launch: {message}", FAILED, "rc=125"], (tokens, out)
+            assert lines == [f"flong launch: {message}", FAILED, "rc=125"], (tokens, out)
 
         # The control: the copy launches, and a mount it adds lands.
         out = extra_mount("")

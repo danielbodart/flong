@@ -6,8 +6,9 @@
 #
 # A set is a directory tests/golden/<set>/ run against one program (`sets`
 # below), or another set's directory (`dir`), so a transition runs one set
-# of cases against the C and the Zig. A case NAME there is these files,
-# NAME.status the only required one:
+# of cases against the C and the Zig. A set's `sub`, when it has one, is the
+# program's subcommand, every case's first argument before its own. A case
+# NAME there is these files, NAME.status the only required one:
 #
 #   NAME.status    the exit status, in decimal, then a newline
 #   NAME.args      the arguments, one per line (none if absent)
@@ -55,8 +56,8 @@
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:10-19
 # does; seccomp is the program the seccomp sets run against, launcher the
-# output whose flong-init, flong-sweeper and flong-launch the init, sweeper
-# and spec sets do.
+# output whose flong the init, sweeper and spec sets run as `flong init`,
+# `flong sweeper` and `flong launch`.
 {
   pkgs ?
     let
@@ -139,7 +140,8 @@ let
     # (tests/native.nix), the rest is the gate and the launches of rootless
     # and basic.
     init = {
-      program = "${launcher}/bin/flong-init";
+      program = "${launcher}/bin/flong";
+      sub = "init";
       vars = { };
     };
 
@@ -156,12 +158,12 @@ let
     # rootless.nix:629-642 has), fstat or mkdir failing on a directory the
     # caller owns, and the holder's other refusals, which need a cgroup the
     # sandbox does not give. CALLER is the builder's uid, OWNER that of the
-    # store directory GOLDEN. Run against the Zig flong-sweeper (src/
+    # store directory GOLDEN. Run against the Zig flong sweeper (src/
     # sweeper.zig, phase 5).
-    sweeper = sweeperSet "${launcher}/bin/flong-sweeper";
+    sweeper = sweeperSet "${launcher}/bin/flong";
 
     # Recorded from the C of 2026-09-24 (launcher/flong-spec.c:417-708,
-    # through flong-launch's main, flong-launch.c:880-881): every refusal of
+    # through flong launch's main, flong-launch.c:880-881): every refusal of
     # the spec but root's (:423, which needs uid 0; rootless.nix:629-642 has
     # it) and the two ENOMEMs no input reaches (:465-468, 697-700), all made
     # before anything needs a privilege. Pass 1's shape (:425-444), each
@@ -192,10 +194,10 @@ let
     # to /, which realpath resolves out of the store (:245-256), and TOSTORE
     # one to /nix/store, which it resolves to the store's directory, not a
     # path under it: the prefix is checked with its slash. Run against the
-    # Zig flong-launch since phase 7's L4 (src/launch.zig); that the shipped
-    # flong-launch is the Zig is native.nix's launcher build's control (it
+    # Zig flong launch since phase 7's L4 (src/launch.zig); that the shipped
+    # flong launch is the Zig is native.nix's launcher build's control (it
     # is static, with no libc).
-    spec = specSet "${launcher}/bin/flong-launch";
+    spec = specSet "${launcher}/bin/flong";
 
     # The subcommands' usage errors, the one text phase 2 (a) changed
     # (quirk 38): rewritten from the bash's then, and expand's added.
@@ -211,6 +213,7 @@ let
   # a store path that is a symlink to /, TOSTORE one to /nix/store.
   specSet = program: {
     inherit program;
+    sub = "launch";
     vars = {
       CLOSURE = "${launcher}";
       LEADSOUT = "${leadsOut}";
@@ -224,6 +227,7 @@ let
 
   sweeperSet = program: {
     inherit program;
+    sub = "sweeper";
     vars = {
       GOLDEN = "${cases}";
     };
@@ -247,15 +251,19 @@ let
 
   # The shell both the check and golden-update source: run_case and expect.
   lib-sh = pkgs.writeText "golden-lib.sh" ''
-    # run_case PROGRAM DIR NAME OUT [VAR=VALUE]...: runs case NAME of DIR,
-    # leaving its stdout, stderr and status in OUT, its working directory in
-    # OUT/work, and that directory's listing in OUT/tree.
+    # run_case PROGRAM SUB DIR NAME OUT [VAR=VALUE]...: runs case NAME of
+    # DIR, SUB (when not empty) its first argument, leaving its stdout,
+    # stderr and status in OUT, its working directory in OUT/work, and that
+    # directory's listing in OUT/tree.
     run_case() {
-      local program=$1 dir=$2 name=$3 out=$4 stdin=/dev/null redirect= setup=/dev/null work kv i
-      shift 4
+      local program=$1 sub=$2 dir=$3 name=$4 out=$5 stdin=/dev/null redirect= setup=/dev/null work kv i
+      shift 5
       local -a args=()
       if [[ -e $dir/$name.args ]]; then
         mapfile -t args <"$dir/$name.args"
+      fi
+      if [[ -n $sub ]]; then
+        args=("$sub" "''${args[@]}")
       fi
       for kv in "$@"; do
         for i in "''${!args[@]}"; do
@@ -321,7 +329,8 @@ let
   '';
 
   # A call of FN (run_set or prepare) for set NAME: its case_vars, then FN
-  # NAME DIR PROGRAM VAR=VALUE... with the set's directory and vars.
+  # NAME DIR PROGRAM SUB VAR=VALUE... with the set's directory, program,
+  # subcommand ("" for none) and vars.
   # case_vars DIR NAME prints the case's own VAR=VALUE lines.
   setCall =
     fn: name: s:
@@ -336,6 +345,7 @@ let
           [
             (s.dir or name)
             s.program
+            (s.sub or "")
           ]
           ++ lib.mapAttrsToList (k: v: "${k}=${v}") s.vars
         )
@@ -369,14 +379,14 @@ let
         failed=0
         mkdir -p $out
         run_set() {
-          local set=$1 program=$3 dir=${cases}/$2 status name got bpf n=0
+          local set=$1 program=$3 sub=$4 dir=${cases}/$2 status name got bpf n=0
           local -a vars
-          shift 3
+          shift 4
           for status in "$dir"/*.status; do
             name=$(basename "$status" .status)
             mapfile -t vars < <(case_vars "$dir" "$name")
             got=$(mktemp -d)
-            run_case "$program" "$dir" "$name" "$got" "$@" "''${vars[@]}"
+            run_case "$program" "$sub" "$dir" "$name" "$got" "$@" "''${vars[@]}"
             expect "$status" "$got/status.want"
             expect "$dir/$name.stderr" "$got/stderr.want" "$@" "''${vars[@]}"
             expect "$dir/$name.tree" "$got/tree.want" "$@" "''${vars[@]}"
@@ -458,9 +468,9 @@ let
 
       # Every new byte is made and judged before any file is written.
       prepare() {
-        local set=$1 program=$3 dir=tests/golden/$2 bpf name got filter
+        local set=$1 program=$3 sub=$4 dir=tests/golden/$2 bpf name got filter
         local -a vars
-        shift 3
+        shift 4
         if [[ $(<"$dir/LIBSECCOMP") == "$want" ]]; then
           echo "golden-update: $dir/LIBSECCOMP already says $want; at one version a changed byte is a bug" >&2
           exit 1
@@ -470,7 +480,7 @@ let
           name=$(basename "$bpf" .bpf)
           mapfile -t vars < <(case_vars "$dir" "$name")
           got=$(mktemp -d)
-          run_case "$program" "$PWD/$dir" "$name" "$got" "$@" "''${vars[@]}"
+          run_case "$program" "$sub" "$PWD/$dir" "$name" "$got" "$@" "''${vars[@]}"
           expect "$dir/$name.status" "$got/status.want"
           expect "$dir/$name.stderr" "$got/stderr.want" "$@" "''${vars[@]}"
           expect "$dir/$name.tree" "$got/tree.want" "$@" "''${vars[@]}"

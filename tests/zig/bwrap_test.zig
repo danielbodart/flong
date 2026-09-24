@@ -153,7 +153,7 @@ fn baseSpec() spec.Spec {
     };
 }
 
-const init_path = "/nix/store/test-only-flong-init";
+const self_path = "/nix/store/test-only-flong";
 
 /// The fixed part up to --info-fd's number (flong-launch.c:279-294),
 /// nested namespaces off.
@@ -204,7 +204,7 @@ fn expectSpawn(b: Branch, want: []const []const u8) !void {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     msg.mode = .cut;
 
     const ns1 = try userns();
@@ -236,7 +236,7 @@ fn expectSpawn(b: Branch, want: []const []const u8) !void {
 
     const before = fd.liveCount();
     var ends: bwrap.ChildEnds = .{ .u2 = try userns(), .keep = keep };
-    const got = try bwrap.spawn(arena, &s, .{ .bwrap = fakeBwrap(), .init = init_path }, ns1, b.relay, .{ null, out.w.any(), null }, null, &ends);
+    const got = try bwrap.spawn(arena, &s, .{ .bwrap = fakeBwrap(), .self = self_path }, ns1, b.relay, .{ null, out.w.any(), null }, null, &ends);
 
     // Every descriptor's name, by its number, before the walk closes them.
     var names: std.ArrayList([2][]const u8) = .empty;
@@ -284,11 +284,13 @@ fn expectSpawn(b: Branch, want: []const []const u8) !void {
     for (args.items, 0..) |w, i| {
         var n = w;
         // A number is a descriptor's where the argv names one: after its
-        // option, or flong-init's first two words.
+        // option, or flong init's first two words.
         const prev = if (i > 0) args.items[i - 1] else "";
         const prev2 = if (i > 1) args.items[i - 2] else "";
+        const prev3 = if (i > 2) args.items[i - 3] else "";
         const is_fd = eql(prev, "--userns") or eql(prev, "--userns2") or eql(prev, "--info-fd") or
-            eql(prev, "--add-seccomp-fd") or eql(prev, "--ro-bind-data") or eql(prev, init_path) or eql(prev2, init_path);
+            eql(prev, "--add-seccomp-fd") or eql(prev, "--ro-bind-data") or
+            (eql(prev2, self_path) and eql(prev, "init")) or (eql(prev3, self_path) and eql(prev2, "init"));
         if (is_fd) {
             for (names.items) |nm| {
                 if (eql(nm[1], w)) n = nm[0];
@@ -332,18 +334,18 @@ fn lessStr(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == .lt;
 }
 
-const init_plain = [_][]const u8{ "--", init_path, "@GATE@", "@READY@", "100,27", "-", "-", "/home/u/w" };
+const init_plain = [_][]const u8{ "--", self_path, "init", "@GATE@", "@READY@", "100,27", "-", "-", "/home/u/w" };
 
 test "spawn: plain" {
     try expectSpawn(.{}, comptime cat(&.{ &head, &middle, &init_plain, &tail_command }));
 }
 
-test "spawn: relay, a session of its own and flong-init's ctty" {
+test "spawn: relay, a session of its own and flong init's ctty" {
     try expectSpawn(.{ .relay = true }, comptime cat(&.{
         &head,
         &.{"--new-session"},
         &middle,
-        &.{ "--", init_path, "@GATE@", "@READY@", "100,27", "ctty", "-", "/home/u/w" },
+        &.{ "--", self_path, "init", "@GATE@", "@READY@", "100,27", "ctty", "-", "/home/u/w" },
         &tail_command,
     }));
 }
@@ -382,7 +384,7 @@ test "spawn: trace, and no groups" {
     try expectSpawn(.{ .trace = true, .groups = &.{} }, comptime cat(&.{
         &head,
         &middle,
-        &.{ "--", init_path, "@GATE@", "@READY@", "-", "-", "trace", "/home/u/w" },
+        &.{ "--", self_path, "init", "@GATE@", "@READY@", "-", "-", "trace", "/home/u/w" },
         &tail_command,
     }));
 }
@@ -391,7 +393,7 @@ test "spawn: a seccomp program refused; U2, the keep-fd and the program opened b
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     msg.mode = .cut;
     const ns1 = try userns();
     defer ns1.close();
@@ -403,10 +405,10 @@ test "spawn: a seccomp program refused; U2, the keep-fd and the program opened b
     var ends: bwrap.ChildEnds = .{ .u2 = try userns(), .keep = &ks };
     var errbuf: [4096]u8 = undefined;
     const cap = try Capture.begin();
-    const r = bwrap.spawn(arena, &s, .{ .bwrap = fakeBwrap(), .init = init_path }, ns1, false, .{ null, null, null }, null, &ends);
+    const r = bwrap.spawn(arena, &s, .{ .bwrap = fakeBwrap(), .self = self_path }, ns1, false, .{ null, null, null }, null, &ends);
     const said = try cap.end(&errbuf);
     try testing.expectError(error.Reported, r);
-    try testing.expectEqualStrings("flong-launch: open seccomp program /nonexistent/b.bpf: No such file or directory\n", said);
+    try testing.expectEqualStrings("flong launch: open seccomp program /nonexistent/b.bpf: No such file or directory\n", said);
     try testing.expectEqual(@as(usize, 1), ends.seccomp.len);
     try testing.expect(ends.info_w == null and ends.ready_w == null and ends.gate_r == null);
     walk(&ends);
@@ -419,7 +421,7 @@ test "spawn: a start refused after the pipes; the launcher's ends closed, the ch
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     msg.mode = .cut;
     const ns1 = try userns();
     defer ns1.close();
@@ -439,10 +441,10 @@ test "spawn: a start refused after the pipes; the launcher's ends closed, the ch
 
     var errbuf: [4096]u8 = undefined;
     const cap = try Capture.begin();
-    const r = bwrap.spawn(arena, &s, .{ .bwrap = fakeBwrap(), .init = init_path }, ns1, false, .{ null, null, null }, null, &ends);
+    const r = bwrap.spawn(arena, &s, .{ .bwrap = fakeBwrap(), .self = self_path }, ns1, false, .{ null, null, null }, null, &ends);
     const said = try cap.end(&errbuf);
     try testing.expectError(error.Reported, r);
-    const want = try std.fmt.allocPrint(arena, "flong-launch: clone3 {s}: too many open descriptors\n", .{fakeBwrap()});
+    const want = try std.fmt.allocPrint(arena, "flong launch: clone3 {s}: too many open descriptors\n", .{fakeBwrap()});
     try testing.expectEqualStrings(want, said);
     try testing.expect(ends.info_w != null and ends.ready_w != null and ends.gate_r != null);
     walk(&ends);
@@ -454,7 +456,7 @@ test "spawn: a bwrap that cannot be exec'd is a child that exits 127, its ends w
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     msg.mode = .cut;
     const ns1 = try userns();
     defer ns1.close();
@@ -463,12 +465,12 @@ test "spawn: a bwrap that cannot be exec'd is a child that exits 127, its ends w
     defer errp.r.close();
     const before = fd.liveCount() - 1;
     var ends: bwrap.ChildEnds = .{ .u2 = try userns(), .keep = &.{} };
-    const got = try bwrap.spawn(arena, &s, .{ .bwrap = "/nonexistent/bwrap", .init = init_path }, ns1, false, .{ null, null, errp.w.any() }, null, &ends);
+    const got = try bwrap.spawn(arena, &s, .{ .bwrap = "/nonexistent/bwrap", .self = self_path }, ns1, false, .{ null, null, errp.w.any() }, null, &ends);
     walk(&ends);
     errp.w.close();
     const said = try drain(arena, errp.r);
     try testing.expectEqual(@as(u8, 127), try got.child.await());
-    try testing.expectEqualStrings("flong-launch: exec /nonexistent/bwrap: No such file or directory\n", said);
+    try testing.expectEqualStrings("flong launch: exec /nonexistent/bwrap: No such file or directory\n", said);
     got.info_r.close();
     got.ready_r.close();
     got.gate_w.close();

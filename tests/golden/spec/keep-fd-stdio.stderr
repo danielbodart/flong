@@ -1,1 +1,1 @@
-flong-launch: spec: keep-fd 2 is stdio
+flong launch: spec: keep-fd 2 is stdio

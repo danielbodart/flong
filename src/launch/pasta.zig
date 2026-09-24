@@ -2,7 +2,7 @@
 //! (launcher/flong-launch.c:622-675 of a7919be, start_pasta). The
 //! launcher's root starts it with `Pasta.start`, awaits the Child and
 //! judges its status with `done`; this module waits for nothing. One
-//! module per piece of flong-launch under src/launch/, a small deviation
+//! module per piece of flong launch under src/launch/, a small deviation
 //! from the port's plan of one launch.zig (hook.zig says why).
 //!
 //! pasta runs in the pasta leaf, as the caller. --userns names U1, the
@@ -72,7 +72,7 @@ pub const Pasta = struct {
 ///
 /// `program` is the compiled-in pasta (-Dpasta; FLONG_PASTA); `self_pid`
 /// this process's (sys.getpid()); `userns` the launcher's handle of U1;
-/// `leader` flong-init's pid; `envp` hook.Hook's `envp` when the hook ran,
+/// `leader` flong init's pid; `envp` hook.Hook's `envp` when the hook ran,
 /// else null (quirk 3); `pasta_leaf` the session's pasta cgroup. The
 /// strings are `gpa`'s (the launcher's arena, never freed). A failure is
 /// said as the C says it: "memfd_create: <text>", "open /dev/null:

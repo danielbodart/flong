@@ -74,7 +74,7 @@ fn InChild(comptime C: type, comptime body: fn (C) noreturn) type {
             if (linux.E.init(linux.dup2(self.err.raw(), 2)) != .SUCCESS) proc.exit(99);
             self.out.close();
             self.err.close();
-            msg.prog = "flong-launch";
+            msg.prog = "flong launch";
             msg.mode = .cut;
             body(self.ctx);
         }
@@ -82,7 +82,7 @@ fn InChild(comptime C: type, comptime body: fn (C) noreturn) type {
 }
 
 /// Runs `body(ctx)` in a forked child whose stdout and stderr are pipes,
-/// as flong-launch (msg.prog), and returns what it printed and its status.
+/// as flong launch (msg.prog), and returns what it printed and its status.
 fn capture(c: *Captured, ctx: anytype, comptime body: fn (@TypeOf(ctx)) noreturn) !void {
     const o = try opened(fd.pipe());
     defer o.r.close();
@@ -307,19 +307,19 @@ test "canonical refuses what is neither there nor missing, as realpath <path>: <
     const through_file = try s.absAt(&b, "file/x/y");
     try capture(&c, CanonicalOf{ .path = through_file }, CanonicalOf.body);
     try testing.expectEqual(@as(u8, 125), c.status);
-    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "flong-launch: realpath {s}: Not a directory\n", .{through_file}), c.err);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "flong launch: realpath {s}: Not a directory\n", .{through_file}), c.err);
     try testing.expectEqualStrings("", c.out);
 
     // A symlink loop: ELOOP, though its prefix resolves.
     const loop = try s.absAt(&b, "loop");
     try capture(&c, CanonicalOf{ .path = loop }, CanonicalOf.body);
     try testing.expectEqual(@as(u8, 125), c.status);
-    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "flong-launch: realpath {s}: Too many levels of symbolic links\n", .{loop}), c.err);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "flong launch: realpath {s}: Too many levels of symbolic links\n", .{loop}), c.err);
 
     // A relative path with no '/' left to cut at: ENOENT, printed.
     try capture(&c, CanonicalOf{ .path = "flong-prologue-nothing-here" }, CanonicalOf.body);
     try testing.expectEqual(@as(u8, 125), c.status);
-    try testing.expectEqualStrings("flong-launch: realpath flong-prologue-nothing-here: No such file or directory\n", c.err);
+    try testing.expectEqualStrings("flong launch: realpath flong-prologue-nothing-here: No such file or directory\n", c.err);
 
     // A relative path whose prefix exists resolves as the C's would.
     const rel = try s.at(&b, "link/missing");
@@ -395,7 +395,7 @@ test "cacheLock refuses a cache it cannot open, as cache <path>: <strerror>" {
     try capture(&c, CacheLockOf{ .path = file }, CacheLockOf.body);
     try testing.expectEqual(@as(u8, 125), c.status);
     var want: [8192]u8 = undefined;
-    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "flong-launch: cache {s}: Not a directory\n", .{file}), c.err);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "flong launch: cache {s}: Not a directory\n", .{file}), c.err);
 }
 
 /// A sweep of a superseded cache: holds the cache's lock exclusively, says
@@ -544,7 +544,7 @@ test "relaunch with no argv: 75, said, nothing run" {
     var c: Captured = .{ .status = 0, .out = "", .err = "" };
     try capture(&c, Relaunch{ .argv = &.{} }, Relaunch.body);
     try testing.expectEqual(@as(u8, 75), c.status);
-    try testing.expectEqualStrings("flong-launch: the cache /c/cache was swept before this launch locked it\n", c.err);
+    try testing.expectEqualStrings("flong launch: the cache /c/cache was swept before this launch locked it\n", c.err);
     try testing.expectEqualStrings("", c.out);
 }
 
@@ -553,7 +553,7 @@ test "relaunch execs the wrapper with SIGPIPE default, the old mask and the inhe
     var c: Captured = .{ .status = 0, .out = "", .err = "" };
     try capture(&c, Relaunch{ .argv = &.{ driver, "probe", "again" }, .inherited = true }, Relaunch.body);
     try testing.expectEqual(@as(u8, 0), c.status);
-    try testing.expectEqualStrings("flong-launch: the cache /c/cache was swept before this launch locked it; relaunching\n", c.err);
+    try testing.expectEqualStrings("flong launch: the cache /c/cache was swept before this launch locked it; relaunching\n", c.err);
 
     const nl = std.mem.indexOfScalar(u8, c.out, '\n') orelse return error.TestUnexpectedResult;
     const inherited = c.out[0..nl];
@@ -575,8 +575,8 @@ test "relaunch whose exec fails: 125, both lines said" {
     try capture(&c, Relaunch{ .argv = &.{ "/nonexistent-flong/wrapper", "x" } }, Relaunch.body);
     try testing.expectEqual(@as(u8, 125), c.status);
     try testing.expectEqualStrings(
-        "flong-launch: the cache /c/cache was swept before this launch locked it; relaunching\n" ++
-            "flong-launch: exec /nonexistent-flong/wrapper: No such file or directory\n",
+        "flong launch: the cache /c/cache was swept before this launch locked it; relaunching\n" ++
+            "flong launch: exec /nonexistent-flong/wrapper: No such file or directory\n",
         c.err,
     );
 }

@@ -631,7 +631,7 @@ pub fn run(job: *const Job) Error!void {
     }
 
     // 4. Nothing touches the session's mount namespace before bwrap has
-    //    finished it: flong-init writes the ready byte once bwrap has built
+    //    finished it: flong init writes the ready byte once bwrap has built
     //    the whole root, and EOF means bwrap failed before its child was
     //    ready (flong-mount.c:506-519).
     var byte: [1]u8 = undefined;

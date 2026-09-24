@@ -92,7 +92,7 @@ Retired in phase 4: `p5`, the hybrid link (its last version is
 `tests/proofs/p5/` at a7919be), a Zig archive with the shim's settings
 linked by `$CC` with the launcher's flags. The C launcher's build then
 linked `libflong-mount.a` that way until L5 deleted both; the mount helper
-is now a fork body of the Zig `flong-launch` (`src/mount.zig`), which the
+is now a fork body of the Zig `flong launch` (`src/mount.zig`), which the
 full VM suite runs.
 
 Retired in phase 3: `p2`, flong-init's start code as pid 1, whose run as

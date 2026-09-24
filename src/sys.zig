@@ -13,7 +13,7 @@
 //! argv, and the exit; phase 2 the opens and closes of fd.zig, the calls on
 //! a directory (mkdirat, unlinkat, renameat, fstatat, fchmodat,
 //! getdents64), pread, pwrite, fstat, flock, and getrandom for the project
-//! tool's temp names; phase 3 what flong-init calls (setgroups, prctl,
+//! tool's temp names; phase 3 what flong init calls (setgroups, prctl,
 //! capset, the TIOCSCTTY ioctl, rt_sigaction, rt_sigprocmask, chdir,
 //! close_range, execve), each as glibc makes it (flong-init.c:195-238);
 //! phase 4 the mount helper's (flong-mount.c): openat2, the mount API,
@@ -254,7 +254,7 @@ pub fn clockRealtime() timespec {
     return t;
 }
 
-// ---- flong-init (flong-init.c:195-238) ----
+// ---- flong init (flong-init.c:195-238) ----
 
 /// NGROUPS_MAX (linux/limits.h): the most supplementary groups setgroups
 /// takes.
@@ -268,7 +268,7 @@ pub fn setgroups(list: ?[]const u32) Result(void) {
     return result(void, linux.syscall2(.setgroups, n, ptr));
 }
 
-/// prctl(2)'s options flong-init uses (linux/prctl.h).
+/// prctl(2)'s options flong init uses (linux/prctl.h).
 pub const PR = struct {
     pub const CAPBSET_READ = 23;
     pub const CAPBSET_DROP = 24;

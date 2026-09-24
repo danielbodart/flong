@@ -121,9 +121,9 @@ let
       "-T" (spec host) "-U" (spec host) ]
     ++ lib.optional net.hostLoopbackToSession "--host-lo-to-ns-lo";
 
-  # The native launcher: flong-launch, flong-sweeper and flong-init, Zig,
-  # static and without libc (native.nix's launcher set). Built from this
-  # nixpkgs, so its bubblewrap is the host's.
+  # The native launcher: flong, whose subcommands are launch, sweeper and
+  # init, Zig, static and without libc (native.nix's launcher set). Built
+  # from this nixpkgs, so its bubblewrap is the host's.
   flongLauncher = import ./launcher { inherit pkgs; };
 
   # A path as the launcher compares it for the checks below: /var/run is
@@ -643,7 +643,7 @@ let
         declared_binds=(${qs (map (b: norm b.dest) d.binds)})
         masks=(${qs c.masks})
         mask_hosts=(${qs (map (m: let h = maskHost d m; in if h == null then "" else h) c.masks)})
-        launcher=${q "${flongLauncher}/bin/flong-launch"}
+        launcher=${q "${flongLauncher}/bin/flong"}
         cache_tool=${q "${cacheTool}/bin/flong-cache"}
         flock=${q "${pkgs.util-linux}/bin/flock"}
         mkdir=${q "${pkgs.coreutils}/bin/mkdir"}
@@ -957,7 +957,7 @@ let
     ''
     ++ lib.optional (c.guard != "") ''
       flong.${n} has a guard, which is a consistency check and not a gate:
-      the caller can run flong-launch directly, with any spec.
+      the caller can run flong launch directly, with any spec.
     '';
 
   # THE HOLDER: one user unit per caller, whose cgroup every session of
@@ -1001,7 +1001,7 @@ let
       # One session's OOM kill must not stop the unit, and every session
       # with it.
       OOMPolicy = "continue";
-      ExecStart = "${flongLauncher}/bin/flong-sweeper %t/flong";
+      ExecStart = "${flongLauncher}/bin/flong sweeper %t/flong";
     };
   };
 
@@ -1065,7 +1065,7 @@ in
     default = { };
     description = ''
       Ephemeral sessions that run one foreground process as the calling
-      user, through flong-launch and bubblewrap, in user namespaces the
+      user, through flong launch and bubblewrap, in user namespaces the
       caller owns, with no root anywhere. Each starts from a root prepared
       once and cached, rather than booted per session.
 
@@ -1166,7 +1166,7 @@ in
             Shell run as the caller before launch, to check that the launch
             is one this declaration means to make. A consistency check, not
             a gate: the session grants nothing the caller did not already
-            have, and the caller can run flong-launch directly with any spec.
+            have, and the caller can run flong launch directly with any spec.
             Setting it warns, to say so.
 
             Runs *after* `workspace` and `binds`, with their answers in scope:
@@ -1615,7 +1615,7 @@ in
             nothing compiles nothing. A relaunch runs it again.
 
             It needs a tier to act on, and it is a consistency check in the
-            way `guard` is: the caller can run flong-launch with any filter.
+            way `guard` is: the caller can run flong launch with any filter.
           '';
         };
 
@@ -1658,7 +1658,7 @@ in
 
             Its checks -- `workspace`, `binds`, `guard`, the depth rule -- are
             consistency checks, not a boundary: the caller can run
-            flong-launch directly with any spec. flong-launch's own checks and
+            flong launch directly with any spec. flong launch's own checks and
             the session's `seccomp` filter are the boundary against the
             payload, and the prepared root and the records are the caller's,
             as their `~/.bashrc` is. It exits with the payload's

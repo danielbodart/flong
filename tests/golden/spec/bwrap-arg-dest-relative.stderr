@@ -1,1 +1,1 @@
-flong-launch: spec: bwrap-arg --ro-bind-data's destination is not an absolute path: 'f'
+flong launch: spec: bwrap-arg --ro-bind-data's destination is not an absolute path: 'f'

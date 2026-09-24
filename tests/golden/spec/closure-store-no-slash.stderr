@@ -1,1 +1,1 @@
-flong-launch: spec: closure is not under /nix/store/: '/nix/store'
+flong launch: spec: closure is not under /nix/store/: '/nix/store'

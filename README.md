@@ -230,12 +230,12 @@ A launcher has the caller's privilege and no more. The caller holds full
 capability over a session's mounts and namespaces from the host, and owns its
 prepared root and its records, as they own their `~/.bashrc`. So the session
 grants nothing the caller lacks, and `guard` is a check the declaration makes
-on its own launch, not a gate: the caller can run `flong-launch` directly with
+on its own launch, not a gate: the caller can run `flong launch` directly with
 any spec. Setting `guard` warns, to say so. The boundary is between the
 payload and the caller.
 
 The launcher exits with the payload's status, or 128+n when a signal killed
-the payload. It exits 125 when the payload never ran: `flong-launch` refused
+the payload. It exits 125 when the payload never ran: `flong launch` refused
 the spec, `postStart` failed, or the network could not be attached. It exits 75
 when its prepared root was swept and it could not relaunch, and 1 when the
 launcher itself refused, or `workspace`, `binds`, `guard` or `seccompPolicy`
@@ -439,10 +439,10 @@ $ nix flake check
 
 Runs NixOS VM tests of every option, the hook ordering, networking and DNS,
 the launcher's lifecycle and terminal, and each seccomp tier's live filters;
-builds the launcher (`flong-launch`, `flong-init`, `flong-sweeper`), the
-seccomp compiler and the tests' probes and filter dumper in Zig, with their
-unit and property tests, lint and analysis; evaluates each refusal; and
-shellchecks the version script.
+builds the launcher (`flong`, whose subcommands are `launch`, `init` and
+`sweeper`), the seccomp compiler and the tests' probes and filter dumper in
+Zig, with their unit and property tests, lint and analysis; evaluates each
+refusal; and shellchecks the version script.
 `nix build .#bench` times launches in a VM.
 
 ```console

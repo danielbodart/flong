@@ -7,7 +7,7 @@ state
 cache
 /cache
 closure
-@CLOSURE@/bin/flong-launch/x
+@CLOSURE@/bin/flong/x
 uidmap
 0
 100000

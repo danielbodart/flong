@@ -131,7 +131,7 @@ fn golden(name: []const u8, vars: []const [2][]const u8) ![]u8 {
 // ---- the writer ----
 
 test "the record's bytes are tests/golden/records/, locked, linked, removed" {
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     var fx = try Fixture.init("/sys/fs/cgroup/h");
     defer fx.deinit();
     const live = fd.liveCount();
@@ -226,7 +226,7 @@ fn refused(fx: *Fixture, machine: [:0]const u8, post_stop: ?[]const u8, cg: []co
 }
 
 test "a name taken: running, malformed, ended, not a file; a newline; too long" {
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     var fx = try Fixture.init("/sys/fs/cgroup/h");
     defer fx.deinit();
     const live_count = fd.liveCount();
@@ -238,7 +238,7 @@ test "a name taken: running, malformed, ended, not a file; a newline; too long" 
     {
         const said = try refused(&fx, "m", null, "/sys/fs/cgroup/h/c/m");
         defer testing.allocator.free(said);
-        try testing.expectEqualStrings("flong-launch: a session named m is already running\n", said);
+        try testing.expectEqualStrings("flong launch: a session named m is already running\n", said);
     }
     live.remove();
 
@@ -248,8 +248,8 @@ test "a name taken: running, malformed, ended, not a file; a newline; too long" 
     {
         const said = try refused(&fx, "m", null, "/sys/fs/cgroup/h/c/m");
         defer testing.allocator.free(said);
-        try testing.expectEqualStrings("flong-launch: the record of m is removed: it has an unknown, repeated or misplaced line\n" ++
-            "flong-launch: a session named m has ended but cannot be released yet\n", said);
+        try testing.expectEqualStrings("flong launch: the record of m is removed: it has an unknown, repeated or misplaced line\n" ++
+            "flong launch: a session named m has ended but cannot be released yet\n", said);
     }
     try testing.expectError(error.FileNotFound, dir.statFile("m"));
 
@@ -269,19 +269,19 @@ test "a name taken: running, malformed, ended, not a file; a newline; too long" 
     {
         const said = try refused(&fx, "d", null, "/sys/fs/cgroup/h/c/d");
         defer testing.allocator.free(said);
-        try testing.expectEqualStrings("flong-launch: a session named d has ended but cannot be released yet\n", said);
+        try testing.expectEqualStrings("flong launch: a session named d has ended but cannot be released yet\n", said);
     }
 
     // A newline in either value, and a record past REC_MAX.
     {
         const said = try refused(&fx, "n", "/nix/store/x\nleader=1:1", "/sys/fs/cgroup/h/c/n");
         defer testing.allocator.free(said);
-        try testing.expectEqualStrings("flong-launch: a newline is in the postStop path or the cgroup path of n\n", said);
+        try testing.expectEqualStrings("flong launch: a newline is in the postStop path or the cgroup path of n\n", said);
     }
     {
         const said = try refused(&fx, "n", null, "/sys/fs/cgroup/h/c/n\n");
         defer testing.allocator.free(said);
-        try testing.expectEqualStrings("flong-launch: a newline is in the postStop path or the cgroup path of n\n", said);
+        try testing.expectEqualStrings("flong launch: a newline is in the postStop path or the cgroup path of n\n", said);
     }
     {
         // "cgroup=" + value + "\n" is REC_MAX bytes: with its NUL, one too
@@ -291,7 +291,7 @@ test "a name taken: running, malformed, ended, not a file; a newline; too long" 
         @memset(long, 'a');
         const said = try refused(&fx, "n", null, long);
         defer testing.allocator.free(said);
-        try testing.expectEqualStrings("flong-launch: the record of n is too long\n", said);
+        try testing.expectEqualStrings("flong launch: the record of n is too long\n", said);
         var fits = try record.create(fx.state.sessions, &fx.holder, "n", null, long[1..]);
         fits.remove();
     }
@@ -357,7 +357,7 @@ test "a name taken again during the wait: another turn, the loop uncounted" {
     // taken twice: an ended record whose lock is held (the wait), then,
     // during that wait, another ended record under the name (.gone, and
     // another EEXIST), released in turn; the third link takes the name.
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     var fx = try Fixture.init("/sys/fs/cgroup/h");
     defer fx.deinit();
     const live = fd.liveCount();
@@ -382,7 +382,7 @@ test "a name taken again during the wait: another turn, the loop uncounted" {
 // ---- the cache lock ----
 
 test "the cache lock: absent, unprepared, locked, not a directory" {
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
@@ -411,7 +411,7 @@ test "the cache lock: absent, unprepared, locked, not a directory" {
     const r = record.cacheLock(file);
     const text = said.stop();
     try testing.expectError(error.Reported, r);
-    const want = try std.fmt.allocPrint(testing.allocator, "flong-launch: cache {s}: Not a directory\n", .{file});
+    const want = try std.fmt.allocPrint(testing.allocator, "flong launch: cache {s}: Not a directory\n", .{file});
     defer testing.allocator.free(want);
     try testing.expectEqualStrings(want, text);
 }
@@ -433,7 +433,7 @@ fn createRefused(fx: *Fixture, machine: [:0]const u8, limits: []const Limit) ![]
 }
 
 test "the session: made with its leaves, a duplicate refused, a controller missing, a failure undone" {
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     var fx = try Fixture.init("/sys/fs/cgroup/h");
     defer fx.deinit();
     const live = fd.liveCount();
@@ -452,7 +452,7 @@ test "the session: made with its leaves, a duplicate refused, a controller missi
     {
         const said = try createRefused(&fx, "m", &.{});
         defer testing.allocator.free(said);
-        try testing.expectEqualStrings("flong-launch: a session named m is already running (/sys/fs/cgroup/h/c/m exists)\n", said);
+        try testing.expectEqualStrings("flong launch: a session named m is already running (/sys/fs/cgroup/h/c/m exists)\n", said);
     }
 
     // A limit whose controller the holder does not have: refused by name,
@@ -462,7 +462,7 @@ test "the session: made with its leaves, a duplicate refused, a controller missi
     {
         const said = try createRefused(&fx, "m2", &.{.{ .file = "pids.max", .value = "10" }});
         defer testing.allocator.free(said);
-        try testing.expectEqualStrings("flong-launch: the limit pids.max needs the pids controller, which /sys/fs/cgroup/h does not have\n", said);
+        try testing.expectEqualStrings("flong launch: the limit pids.max needs the pids controller, which /sys/fs/cgroup/h does not have\n", said);
     }
     try testing.expectError(error.FileNotFound, fx.tmp.dir.statFile("holder/c/m2"));
 
@@ -474,7 +474,7 @@ test "the session: made with its leaves, a duplicate refused, a controller missi
     {
         const said = try createRefused(&fx, "m2", &.{.{ .file = "pids.max", .value = "10" }});
         defer testing.allocator.free(said);
-        try testing.expectEqualStrings("flong-launch: open cgroup.controllers: No such file or directory\n", said);
+        try testing.expectEqualStrings("flong launch: open cgroup.controllers: No such file or directory\n", said);
     }
     try testing.expectError(error.FileNotFound, fx.tmp.dir.statFile("holder/c/m2"));
     try testing.expect((try fx.tmp.dir.statFile("holder/c")).kind == .directory);

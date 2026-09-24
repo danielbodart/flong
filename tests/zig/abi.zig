@@ -121,7 +121,7 @@ fn iovecLayout() usize {
 }
 
 /// sys.CapHeader and sys.CapData against linux/capability.h's
-/// __user_cap_header_struct and __user_cap_data_struct: flong-init's
+/// __user_cap_header_struct and __user_cap_data_struct: flong init's
 /// capset (phase 3).
 fn capLayout() usize {
     const Pair = struct { []const u8, []const u8 };
@@ -142,7 +142,7 @@ fn capLayout() usize {
 
 /// sys.KSigaction against asm/signal.h's struct sigaction, the kernel's
 /// (x86_64's own, aarch64's asm-generic/signal.h with SA_RESTORER defined):
-/// flong-init's rt_sigaction (phase 3), whose layout strace checks on
+/// flong init's rt_sigaction (phase 3), whose layout strace checks on
 /// x86_64 only.
 fn sigactionLayout() usize {
     const pairs = .{ .{ "handler", "sa_handler" }, .{ "flags", "sa_flags" }, .{ "restorer", "sa_restorer" }, .{ "mask", "sa_mask" } };
@@ -158,7 +158,7 @@ fn sigactionLayout() usize {
     return pairs.len;
 }
 
-/// flong-init's constants in sys.zig against their macros (phase 3).
+/// flong init's constants in sys.zig against their macros (phase 3).
 fn initConstants() usize {
     const pairs = .{
         .{ "ngroups_max", sys.ngroups_max, c.NGROUPS_MAX },
@@ -344,7 +344,7 @@ fn launchConstants() usize {
 fn sameSyscalls() usize {
     const names = .{
         "open_tree", "move_mount", "fsopen",       "fsconfig",       "fsmount",    "mount_setattr", "openat2", "statmount", "statx",         "clone3",  "pidfd_open", "openat",
-        // flong-init's (phase 3)
+        // flong init's (phase 3)
         "setgroups", "prctl",      "rt_sigaction", "rt_sigprocmask", "chdir",      "close_range",   "execve",  "capset",
         // the mount helper's (phase 4)
            "setns",         "unshare", "setresuid",  "setresgid",
@@ -406,7 +406,7 @@ comptime {
 
 test "the kernel ABI matches Zig's bundled headers" {
     std.debug.print("abi: {s}: terminal: termios, winsize and constants {d}\n", .{ report.arch, report.terminal });
-    std.debug.print("abi: {s}: __NR_openat {d}, LINUX_VERSION_CODE {d}, stx_mnt_id at 0x{x}; fields compared: open_how {d}, mount_attr {d}, mnt_id_req {d}, statmount {d}, clone_args {d}, iovec {d}, Statx {d}, capability {d}, sigaction {d}; constants: clone3's {d}, flong-init's {d}, the mount helper's {d}, the launch's {d}; syscalls {d}\n", .{
+    std.debug.print("abi: {s}: __NR_openat {d}, LINUX_VERSION_CODE {d}, stx_mnt_id at 0x{x}; fields compared: open_how {d}, mount_attr {d}, mnt_id_req {d}, statmount {d}, clone_args {d}, iovec {d}, Statx {d}, capability {d}, sigaction {d}; constants: clone3's {d}, flong init's {d}, the mount helper's {d}, the launch's {d}; syscalls {d}\n", .{
         report.arch,       report.openat,     report.version,    report.stx_mnt_id,
         report.open_how,   report.mount_attr, report.mnt_id_req, report.statmount,
         report.clone_args, report.iovec,      report.statx,      report.cap,

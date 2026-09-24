@@ -4,9 +4,10 @@
 //!
 //!   install       -Dset=seccomp (flong-seccomp and its subcommands; needs
 //!                 -Dself, the project key's compiler path), launcher
-//!                 (flong-launch, flong-init and flong-sweeper; needs
-//!                 -Dtini, the tini flong-init execs, and flong-launch's
-//!                 -Dbwrap, -Dinit, -Dpasta, -Dnewuidmap and -Dnewgidmap) or
+//!                 (flong, whose subcommands are launch, init and sweeper;
+//!                 needs -Dself, its own installed path, -Dtini, the tini
+//!                 flong init execs, and flong launch's -Dbwrap, -Dpasta,
+//!                 -Dnewuidmap and -Dnewgidmap) or
 //!                 fixtures (the tests' programs, src/fixtures/: bpfdump,
 //!                 linked with libc and libseccomp; syscall-probe, swapper
 //!                 and ioctl-probe, static and without libc)
@@ -26,10 +27,9 @@
 //!   analyze       zwanzig over src/, and over its planted bugs
 //!                 (tests/zig/analyze/); needs -Ddev=true
 //!   cross         flong-seccomp and bpfdump compiled for aarch64-linux,
-//!                 not linked, flong-init (with a dummy tini),
-//!                 flong-sweeper, syscall-probe, swapper and ioctl-probe
-//!                 built for it (in cross/), flong-launch (with dummy
-//!                 paths) too, and abi's aarch64 half
+//!                 not linked, flong (with dummy paths), syscall-probe,
+//!                 swapper and ioctl-probe built for it (in cross/), and
+//!                 abi's aarch64 half
 //!   integration   the drivers checks.native runs (bin/flong-walker,
 //!                 bin/flong-proc), built only by tests/integration.nix
 //!
@@ -55,11 +55,10 @@ pub fn build(b: *std.Build) void {
     const set = b.option(Set, "set", "What install installs: seccomp, launcher or fixtures");
     // Compiled-in paths have no default: a missing one fails the install
     // that needs it, as flong-init.c:52-54's #error does.
-    const self = b.option([]const u8, "self", "flong-seccomp's own store path, the seccomp derivation's $out");
-    const tini = b.option([]const u8, "tini", "tini's store path, which flong-init execs");
-    // flong-launch's compiled-in programs (FLONG_BWRAP and the rest in the
-    // C launcher): all five, or the launcher set's install fails.
-    const launch_paths = LaunchPaths.read(b);
+    const self = b.option([]const u8, "self", "The set's own installed path: flong-seccomp's store path (seccomp), or flong's (launcher)");
+    // flong's compiled-in programs (FLONG_BWRAP and the rest in the C
+    // launcher): all six, or the launcher set's install fails.
+    const launch_paths = LaunchPaths.read(b, self);
     const abi_plant = b.option(AbiPlant, "abi-plant", "Plant a mismatch in tests/zig/abi.zig: arch, offset") orelse .none;
 
     // ---- install ----
@@ -70,11 +69,10 @@ pub fn build(b: *std.Build) void {
         } else {
             install.dependOn(&b.addFail("-Dset=seccomp needs -Dself=PATH, flong-seccomp's own store path").step);
         },
-        .launcher => if (tini) |path| {
-            b.installArtifact(init(b, target, optimize, path));
-            b.installArtifact(sweeper(b, target, optimize));
+        .launcher => if (launch_paths) |lp| {
+            b.installArtifact(flong(b, target, optimize, lp));
         } else {
-            install.dependOn(&b.addFail("-Dset=launcher needs -Dtini=PATH, tini's store path").step);
+            install.dependOn(&b.addFail("-Dset=launcher needs -Dself, -Dtini, -Dbwrap, -Dpasta, -Dnewuidmap and -Dnewgidmap, flong's programs").step);
         },
         .fixtures => for (fixtures(b, target, optimize, .linked)) |exe| b.installArtifact(exe),
     } else {
@@ -121,8 +119,28 @@ pub fn build(b: *std.Build) void {
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
         {
-            // flong-init's argv parsing, in its root module.
-            const t = b.addTest(.{ .name = "init", .root_module = initModule(b, target, optimize, "/nix/store/test-only/bin/tini") });
+            // flong init's argv parsing, in its own module.
+            const t = b.addTest(.{ .name = "init", .root_module = Launcher.subcommands(b, target, optimize, false, LaunchPaths.dummy("/nix/store/test-only")).init });
+            test_step.dependOn(&b.addRunArtifact(t).step);
+        }
+        {
+            // flong init's argv slots, where dispatch hands them over.
+            const t = b.addTest(.{
+                .name = "init_test",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/zig/init_test.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "init", .module = Launcher.subcommands(b, target, optimize, false, LaunchPaths.dummy("/nix/store/test-only")).init },
+                    },
+                }),
+            });
+            test_step.dependOn(&b.addRunArtifact(t).step);
+        }
+        {
+            // flong's dispatch, in its root module.
+            const t = b.addTest(.{ .name = "main", .root_module = Launcher.flongModule(b, target, optimize, false, LaunchPaths.dummy("/nix/store/test-only")) });
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
         {
@@ -181,8 +199,8 @@ pub fn build(b: *std.Build) void {
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
         {
-            // flong-sweeper's root compiles as a test too.
-            const t = b.addTest(.{ .name = "sweeper", .root_module = sweeperModule(b, target, optimize) });
+            // flong sweeper's module compiles as a test too.
+            const t = b.addTest(.{ .name = "sweeper", .root_module = Launcher.subcommands(b, target, optimize, false, LaunchPaths.dummy("/nix/store/test-only")).sweeper });
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
         const m = modules(b, target, optimize);
@@ -468,22 +486,12 @@ pub fn build(b: *std.Build) void {
     const arm = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu });
     cross_step.dependOn(&seccompUnlinked(b, arm, optimize).step);
     {
-        // flong-init links no libc, so it is built whole; native.nix's
-        // cross-aarch64 reads its ELF header.
-        const arm_init = b.addInstallArtifact(init(b, arm, optimize, "/nix/store/cross-check-only/bin/tini"), .{
+        // flong links no libc, so it is built whole, with dummy paths;
+        // native.nix's cross-aarch64 reads its ELF header.
+        const arm_flong = b.addInstallArtifact(flong(b, arm, optimize, LaunchPaths.dummy("/nix/store/cross-check-only")), .{
             .dest_dir = .{ .override = .{ .custom = "cross" } },
         });
-        cross_step.dependOn(&arm_init.step);
-        // flong-sweeper too, the launcher set's other Zig.
-        const arm_sweeper = b.addInstallArtifact(sweeper(b, arm, optimize), .{
-            .dest_dir = .{ .override = .{ .custom = "cross" } },
-        });
-        cross_step.dependOn(&arm_sweeper.step);
-        // And flong-launch, with dummy paths.
-        const arm_launch = b.addInstallArtifact(launchExe(b, arm, optimize, LaunchPaths.dummy("/nix/store/cross-check-only")), .{
-            .dest_dir = .{ .override = .{ .custom = "cross" } },
-        });
-        cross_step.dependOn(&arm_launch.step);
+        cross_step.dependOn(&arm_flong.step);
         // The fixtures: the three without libc built whole; bpfdump, which
         // needs libseccomp, compiled and not linked, as flong-seccomp.
         for (fixtures(b, arm, optimize, .unlinked)) |exe| {
@@ -542,9 +550,9 @@ pub fn build(b: *std.Build) void {
     // Zig flong-launch into the launcher set (src/launch.zig composing
     // src/launch/'s pieces, spec, ns, cgroup, record, tty and mount; the
     // modules are file-scope `Launcher` and `Terminal`, below); L5 deleted
-    // the C launcher. The steps of this block:
+    // the C launcher; S1 made it flong launch, a subcommand of bin/flong
+    // (installed above). The steps of this block:
     //
-    //   install        (-Dset=launcher) bin/flong-launch
     //   test           (-Ddev=true) spec.zig's and launch.zig's own tests,
     //                  and tests/zig/spec_test.zig: bwrapArgv's golden argv
     //                  per branch, the model property, each single-rule
@@ -578,13 +586,6 @@ pub fn build(b: *std.Build) void {
     //                  hook.env against glibc's setenv
     //   launch-driver  bin/flong-launch-driver (tests/zig/launchdriver.zig),
     //                  built only by tests/integration.nix, for checks.native
-    if (set == .launcher) {
-        if (launch_paths) |lp| {
-            b.installArtifact(launchExe(b, target, optimize, lp));
-        } else {
-            install.dependOn(&b.addFail("-Dset=launcher needs -Dbwrap, -Dinit, -Dpasta, -Dnewuidmap and -Dnewgidmap, flong-launch's programs").step);
-        }
-    }
     {
         if (dev) {
             const m = modules(b, target, optimize);
@@ -662,7 +663,7 @@ pub fn build(b: *std.Build) void {
                     test_step.dependOn(&b.addRunArtifact(t).step);
                 }
                 {
-                    const t = b.addTest(.{ .name = "launch", .root_module = Launcher.launchModule(b, target, optimize, false, LaunchPaths.dummy("/nix/store/test-only")) });
+                    const t = b.addTest(.{ .name = "launch", .root_module = Launcher.subcommands(b, target, optimize, false, LaunchPaths.dummy("/nix/store/test-only")).launch });
                     test_step.dependOn(&b.addRunArtifact(t).step);
                 }
                 {
@@ -929,7 +930,7 @@ pub fn build(b: *std.Build) void {
     // ---- end of launcher (phase 7) ----
 }
 
-// ---- launcher (phase 7): the modules of flong-launch's graph ----
+// ---- launcher (phase 7): the modules of flong launch's graph ----
 
 const Launcher = struct {
     /// src/spec.zig over `m`'s modules.
@@ -949,19 +950,30 @@ const Launcher = struct {
         });
     }
 
-    /// flong-launch's root module (src/launch.zig; ZIG.md, "Per
-    /// binary"), no libc: static, over one set of modules, so every
-    /// module shares fd's one table: the launch's graph
-    /// (`launchModules`), tty, and src/launch/'s pieces, with the
-    /// compiled-in programs as `config`. Stripped for an installed
-    /// artifact; a test's is not (a stripped module in an unstripped
-    /// Debug test crashes the compiler).
-    fn launchModule(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, strip: bool, lp: LaunchPaths) *std.Build.Module {
+    /// The subcommands' modules (src/launch.zig, src/init.zig,
+    /// src/sweeper.zig), no libc, over one launch graph
+    /// (`launchModules`), so every module shares fd's one table and
+    /// msg's prog: flong launch's with tty and src/launch/'s pieces, and
+    /// one `config` for all three, the compiled-in programs and the
+    /// version. Each is a test's root as well as src/main.zig's import.
+    /// Stripped for an installed artifact; a test's is not (a stripped
+    /// module in an unstripped Debug test crashes the compiler).
+    const Subcommands = struct {
+        l: Launch,
+        launch: *std.Build.Module,
+        init: *std.Build.Module,
+        sweeper: *std.Build.Module,
+        config: *std.Build.Module,
+    };
+
+    fn subcommands(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, strip: bool, lp: LaunchPaths) Subcommands {
         const l = launchModules(bb, t, o);
         const m = l.m;
-        const config = bb.addOptions();
-        inline for (@typeInfo(LaunchPaths).@"struct".fields) |f| config.addOption([]const u8, f.name, @field(lp, f.name));
-        return bb.createModule(.{
+        const options = bb.addOptions();
+        inline for (@typeInfo(LaunchPaths).@"struct".fields) |f| options.addOption([]const u8, f.name, @field(lp, f.name));
+        options.addOption([]const u8, "version", @import("build.zig.zon").version);
+        const config = options.createModule();
+        const launch = bb.createModule(.{
             .root_source_file = bb.path("src/launch.zig"),
             .target = t,
             .optimize = o,
@@ -984,7 +996,59 @@ const Launcher = struct {
                 .{ .name = "childpid", .module = childpidModule(bb, m, t, o) },
                 .{ .name = "hook", .module = pieceModule(bb, m, l.spec, "hook", t, o) },
                 .{ .name = "pasta", .module = pieceModule(bb, m, l.spec, "pasta", t, o) },
-                .{ .name = "config", .module = config.createModule() },
+                .{ .name = "config", .module = config },
+            },
+        });
+        // flong init: sys, msg and tini's path compiled in
+        // (flong-init.c:52-54).
+        const init = bb.createModule(.{
+            .root_source_file = bb.path("src/init.zig"),
+            .target = t,
+            .optimize = o,
+            .strip = strip,
+            .single_threaded = true,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "config", .module = config },
+            },
+        });
+        // flong sweeper: record, cgroup, proc, sig, msg.
+        const sweeper = bb.createModule(.{
+            .root_source_file = bb.path("src/sweeper.zig"),
+            .target = t,
+            .optimize = o,
+            .strip = strip,
+            .single_threaded = true,
+            .imports = &.{
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "sig", .module = m.sig },
+                .{ .name = "proc", .module = m.proc },
+                .{ .name = "record", .module = l.record },
+                .{ .name = "cgroup", .module = l.cgroup },
+            },
+        });
+        return .{ .l = l, .launch = launch, .init = init, .sweeper = sweeper, .config = config };
+    }
+
+    /// flong's root module (src/main.zig): the dispatch over the
+    /// subcommands' modules; the settings every installed artifact has
+    /// (DESIGN.md, "Conventions": start code).
+    fn flongModule(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, strip: bool, lp: LaunchPaths) *std.Build.Module {
+        const sc = subcommands(bb, t, o, strip, lp);
+        return bb.createModule(.{
+            .root_source_file = bb.path("src/main.zig"),
+            .target = t,
+            .optimize = o,
+            .strip = strip,
+            .single_threaded = true,
+            .imports = &.{
+                .{ .name = "sys", .module = sc.l.m.sys },
+                .{ .name = "msg", .module = sc.l.m.msg },
+                .{ .name = "launch", .module = sc.launch },
+                .{ .name = "init", .module = sc.init },
+                .{ .name = "sweeper", .module = sc.sweeper },
+                .{ .name = "config", .module = sc.config },
             },
         });
     }
@@ -1200,51 +1264,57 @@ const Terminal = struct {
     }
 };
 
-/// flong-launch's compiled-in programs (flong-launch.c's FLONG_BWRAP,
-/// FLONG_INIT, FLONG_PASTA, FLONG_NEWUIDMAP and FLONG_NEWGIDMAP): options
-/// with no default, as -Dtini.
+/// flong's compiled-in programs (flong-launch.c's FLONG_BWRAP,
+/// FLONG_INIT, FLONG_PASTA, FLONG_NEWUIDMAP and FLONG_NEWGIDMAP, and
+/// flong-init.c's FLONG_TINI): options with no default. `self` is flong's
+/// own installed path, which bwrap runs as `flong init`.
 const LaunchPaths = struct {
     bwrap: []const u8,
-    init: []const u8,
+    self: []const u8,
     pasta: []const u8,
     newuidmap: []const u8,
     newgidmap: []const u8,
+    tini: []const u8,
 
-    /// All five, or null when one is missing.
-    fn read(b: *std.Build) ?LaunchPaths {
-        const bwrap = b.option([]const u8, "bwrap", "bwrap's store path, which flong-launch runs");
-        const init_path = b.option([]const u8, "init", "flong-init's store path, bwrap's payload");
+    /// All six, or null when one is missing. -Dself is build()'s, which
+    /// the seccomp set reads too.
+    fn read(b: *std.Build, self: ?[]const u8) ?LaunchPaths {
+        const bwrap = b.option([]const u8, "bwrap", "bwrap's store path, which flong launch runs");
         const pasta = b.option([]const u8, "pasta", "pasta's store path");
         const newuidmap = b.option([]const u8, "newuidmap", "newuidmap, NixOS's setuid wrapper");
         const newgidmap = b.option([]const u8, "newgidmap", "newgidmap, NixOS's setuid wrapper");
+        const tini = b.option([]const u8, "tini", "tini's store path, which flong init execs");
         return .{
             .bwrap = bwrap orelse return null,
-            .init = init_path orelse return null,
+            .self = self orelse return null,
             .pasta = pasta orelse return null,
             .newuidmap = newuidmap orelse return null,
             .newgidmap = newgidmap orelse return null,
+            .tini = tini orelse return null,
         };
     }
 
     /// Paths under `dir` that exist nowhere: for a build no one runs (the
-    /// cross check, the root's own tests).
+    /// cross check, the modules' own tests).
     fn dummy(comptime dir: []const u8) LaunchPaths {
         return .{
             .bwrap = dir ++ "/bin/bwrap",
-            .init = dir ++ "/bin/flong-init",
+            .self = dir ++ "/bin/flong",
             .pasta = dir ++ "/bin/pasta",
             .newuidmap = dir ++ "/bin/newuidmap",
             .newgidmap = dir ++ "/bin/newgidmap",
+            .tini = dir ++ "/bin/tini",
         };
     }
 };
 
-/// flong-launch (src/launch.zig): static, no libc, stripped, and no stack
-/// size in PT_GNU_STACK, so the start code leaves RLIMIT_STACK to bwrap,
-/// flong-init, tini and the payload (quirk 20), as every installed
-/// artifact.
-fn launchExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, lp: LaunchPaths) *std.Build.Step.Compile {
-    const exe = b.addExecutable(.{ .name = "flong-launch", .root_module = Launcher.launchModule(b, target, optimize, true, lp) });
+/// flong (src/main.zig): static, no libc, stripped, single-threaded, and
+/// no stack size in PT_GNU_STACK, so the start code makes no syscall
+/// before main and leaves RLIMIT_STACK to bwrap, flong init, tini, the
+/// payload and postStop (quirk 20; ZIG.md, "Measured": P2), as every
+/// installed artifact.
+fn flong(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, lp: LaunchPaths) *std.Build.Step.Compile {
+    const exe = b.addExecutable(.{ .name = "flong", .root_module = Launcher.flongModule(b, target, optimize, true, lp) });
     exe.stack_size = 0;
     return exe;
 }
@@ -1460,66 +1530,6 @@ fn seccompUnlinked(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         .name = "flong-seccomp",
         .root_module = seccompModule(b, target, optimize, "/nix/store/cross-check-only"),
     });
-    exe.stack_size = 0;
-    return exe;
-}
-
-/// flong-init's root module (src/init.zig; ZIG.md, "Per binary"): sys,
-/// msg, errno, num, and tini's path compiled in (flong-init.c:52-54). The
-/// settings every installed artifact has, and no libc: static.
-fn initModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, tini: []const u8) *std.Build.Module {
-    const m = modules(b, target, optimize);
-    const config = b.addOptions();
-    config.addOption([]const u8, "tini", tini);
-    return b.createModule(.{
-        .root_source_file = b.path("src/init.zig"),
-        .target = target,
-        .optimize = optimize,
-        .strip = true,
-        .single_threaded = true,
-        .imports = &.{
-            .{ .name = "sys", .module = m.sys },
-            .{ .name = "errno", .module = m.errno },
-            .{ .name = "msg", .module = m.msg },
-            .{ .name = "num", .module = m.num },
-            .{ .name = "config", .module = config.createModule() },
-        },
-    });
-}
-
-fn init(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, tini: []const u8) *std.Build.Step.Compile {
-    const exe = b.addExecutable(.{ .name = "flong-init", .root_module = initModule(b, target, optimize, tini) });
-    // No stack size in PT_GNU_STACK: the start code then leaves RLIMIT_STACK
-    // to bwrap's, tini's and the payload's (quirk 20; ZIG.md, "Measured": P2).
-    exe.stack_size = 0;
-    return exe;
-}
-
-/// flong-sweeper's root module (src/sweeper.zig; ZIG.md, "Per binary"):
-/// record, cgroup, names, proc, sig, fd, sys, msg, errno, num; the
-/// settings every installed artifact has, and no libc: static.
-fn sweeperModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
-    const m = modules(b, target, optimize);
-    return b.createModule(.{
-        .root_source_file = b.path("src/sweeper.zig"),
-        .target = target,
-        .optimize = optimize,
-        .strip = true,
-        .single_threaded = true,
-        .imports = &.{
-            .{ .name = "sys", .module = m.sys },
-            .{ .name = "msg", .module = m.msg },
-            .{ .name = "sig", .module = m.sig },
-            .{ .name = "proc", .module = m.proc },
-            .{ .name = "record", .module = m.record },
-            .{ .name = "cgroup", .module = m.cgroup },
-        },
-    });
-}
-
-fn sweeper(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
-    const exe = b.addExecutable(.{ .name = "flong-sweeper", .root_module = sweeperModule(b, target, optimize) });
-    // As flong-init's: RLIMIT_STACK reaches postStop unchanged (quirk 20).
     exe.stack_size = 0;
     return exe;
 }

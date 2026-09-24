@@ -1,4 +1,4 @@
-//! launch/prologue.zig: the pieces of flong-launch's prologue, ordering
+//! launch/prologue.zig: the pieces of flong launch's prologue, ordering
 //! checkpoint 1 (DESIGN.md; launcher/flong-launch.c:847-925 of 5f1f08e), but
 //! not the prologue itself: the relaunch of a swept launch (quirk 2), the
 //! cache's shared lock, the close of what the wrapper left open, and the

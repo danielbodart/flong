@@ -3,7 +3,7 @@
 //! The launcher's root starts the Spawn this returns, awaits it and judges
 //! its status with `done`; this module starts nothing.
 //!
-//! One module per piece of flong-launch under src/launch/ (hook, pasta,
+//! One module per piece of flong launch under src/launch/ (hook, pasta,
 //! ...), each a set of functions with explicit parameters, where the port's
 //! plan listed one launch.zig: a small deviation, so that each
 //! piece is written and tested apart and launch.zig composes them.
@@ -50,7 +50,7 @@ pub const Hook = struct {
 /// namespace, where pasta's --netns names it by the leader's pid (quirk 4,
 /// kept; pasta.zig).
 pub const Vars = struct {
-    /// bwrap's child, flong-init, the session's pid 1
+    /// bwrap's child, flong init, the session's pid 1
     leader: sys.pid_t,
     /// this process's pid (sys.getpid()), for /proc/<pid>/fd/N
     self_pid: sys.pid_t,
@@ -59,8 +59,8 @@ pub const Vars = struct {
 };
 
 /// run_hook's four setenv calls (flong-launch.c:597-599), made on a copy
-/// of `environ` (the launcher's, sys.environ(); the root passes it, the
-/// lint keeping environ to the roots and proc.zig) as glibc's setenv
+/// of `environ` (the launcher's, which src/main.zig hands flong launch,
+/// the lint keeping environ to the roots and proc.zig) as glibc's setenv
 /// makes them on its own: in the order leader, userns, netns, machine,
 /// each replacing the first entry named `<name>=` in place, or appended at
 /// the end when there is none; a later entry of the same name is left as

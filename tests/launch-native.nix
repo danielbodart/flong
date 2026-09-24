@@ -18,7 +18,7 @@
 #   - the session made with a limit, and an EINVAL limit leaving nothing;
 #     a controller the holder lacks
 #   - a record the driver wrote and closed, swept by the launcher's Zig
-#     flong-sweeper from its watch: postStop once, cgroup and record gone
+#     flong sweeper from its watch: postStop once, cgroup and record gone
 #   - passwd against getent, and the uid form
 #
 # Nothing in it is about time: every wait is for a state, bounded. Each
@@ -63,9 +63,9 @@ in
       # After a refusal only the signalfd is left: every pipe closed, the
       # map programs and U1's child reaped (ordering checkpoint 4).
       nothing_left = ["live: 1", "open: anon_inode:[signalfd]", "pipes: 0", "children: none", "others in the cgroup: 0", "rc=1"]
-      uid_says = ("flong-launch: newuidmap failed (status 1): the caller needs a range of at least 65536 ids "
+      uid_says = ("flong launch: newuidmap failed (status 1): the caller needs a range of at least 65536 ids "
                   "in /etc/subuid (users.users.<name>.subUidRanges)")
-      gid_says = ("flong-launch: newgidmap failed (status 1): the caller needs a range of at least 65536 ids "
+      gid_says = ("flong launch: newgidmap failed (status 1): the caller needs a range of at least 65536 ids "
                   "in /etc/subgid (users.users.<name>.subGidRanges)")
       # Ids outside alice's range: newuidmap refuses, and the launch says
       # which file and option to fix; newgidmap ran as well and is reaped.
@@ -78,13 +78,13 @@ in
           ("0:200000:1000,1000:1000:1", "${gmaps}", "0", [uid_says]),
           ("0:200000:1000,1000:1000:1", "0:200000:100,100:100:1", "0", [uid_says, gid_says]),
           ("${maps}", "${gmaps}", "4294967296",
-           ["flong-launch: write 4294967296 to /proc/sys/user/max_user_namespaces: Invalid argument"]),
+           ["flong launch: write 4294967296 to /proc/sys/user/max_user_namespaces: Invalid argument"]),
       ):
           out = machine.succeed(as_alice(
               "timeout -s KILL 60 flong-launch-driver ns /run/wrappers/bin/newuidmap /run/wrappers/bin/newgidmap "
               f"{uids} {gids} {nested} 2>&1; echo rc=$?")).splitlines()
           print("\n".join(out))
-          assert [l for l in out if l.startswith("flong-launch: ")] == said, out
+          assert [l for l in out if l.startswith("flong launch: ")] == said, out
           assert out[-len(nothing_left):] == nothing_left, out
       # A map program that cannot be exec'd: the spawned child says so,
       # and its 127 is not said again (flong-ns.c:132-139).
@@ -92,7 +92,7 @@ in
           "timeout -s KILL 60 flong-launch-driver ns /nonexistent/newuidmap /run/wrappers/bin/newgidmap "
           "${maps} ${gmaps} 0 2>&1; echo rc=$?")).splitlines()
       print("\n".join(out))
-      assert out == ["flong-launch: exec /nonexistent/newuidmap: No such file or directory"] + nothing_left, out
+      assert out == ["flong launch: exec /nonexistent/newuidmap: No such file or directory"] + nothing_left, out
 
   with subtest("L2 ns: SIGTERM during the U2 wait gives Aborted, no helper or pipe left"):
       out = machine.succeed(as_alice(
@@ -108,7 +108,7 @@ in
       assert sorted(o.split(":")[0] for o in opened) == ["anon_inode", "user"], out
       # The helper finished its handshake with U2's child and found the
       # launcher gone, as the C's does (flong-ns.c:303-306).
-      assert set(l for l in out if l.startswith("flong-launch: ")) <= {"flong-launch: send U2's pid: Broken pipe"}, out
+      assert set(l for l in out if l.startswith("flong launch: ")) <= {"flong launch: send U2's pid: Broken pipe"}, out
       # The driver says what it saw and exits 0.
       assert out[-1] == "rc=0", out
 
@@ -125,7 +125,7 @@ in
       print("\n".join(out))
       import re
       out = [re.sub(r"/proc/[0-9]+/", "/proc/PID/", l) for l in out]
-      assert out[:4] == ["u1 made", "flong-launch: write 70000 70000 1", " to /proc/PID/uid_map: Operation not permitted", "u2: Reported"], out
+      assert out[:4] == ["u1 made", "flong launch: write 70000 70000 1", " to /proc/PID/uid_map: Operation not permitted", "u2: Reported"], out
       assert out[4:] == ["live: 2"] + [l for l in out if l.startswith("open: ")] + ["pipes: 0", "children: none", "others in the cgroup: 0", "rc=0"], out
       assert sorted(o.split(":")[0] for o in [l for l in out if l.startswith("open: ")][0].split()[1:]) == ["anon_inode", "user"], out
 
@@ -136,7 +136,7 @@ in
       out = machine.succeed(as_alice(
           "unshare --user --map-root-user --mount sh -c "
           "'mount -t tmpfs none /sys/fs/cgroup && flong-launch-driver nsdelegate' 2>&1; echo rc=$?"))
-      assert out == "flong-launch: cgroup2 is not mounted at /sys/fs/cgroup: sessions need the unified hierarchy\nrc=1\n", out
+      assert out == "flong launch: cgroup2 is not mounted at /sys/fs/cgroup: sessions need the unified hierarchy\nrc=1\n", out
       # cgroup2 has one superblock, so a mount of it in a namespace of
       # alice's still says nsdelegate: the refusal without it is held by
       # test-libc's differential over mountinfo text (libc_launch.zig).
@@ -158,8 +158,8 @@ in
       M = out[0].split("=", 1)[1]
       assert M.endswith("/user.slice/user-1000.slice/user@1000.service"), out
       assert out[1:] == [
-          f"flong-launch: the holder's cgroup {M}/l2-holder does not exist, and there is no way to start it", "rc=1",
-          "flong-launch: starting the holder failed (/run/current-system/sw/bin/false exited 1)", "rc=1",
+          f"flong launch: the holder's cgroup {M}/l2-holder does not exist, and there is no way to start it", "rc=1",
+          "flong launch: starting the holder failed (/run/current-system/sw/bin/false exited 1)", "rc=1",
           f"holder: {M}/l2-holder", "rc=0",
           f"holder: {M}/l2-holder", "rc=0",
       ], out
@@ -183,10 +183,10 @@ in
       print("\n".join(out))
       assert "pids" in out[0].split(), out
       assert out[1:] == [
-          "flong-launch: write bogus to pids.max: Invalid argument", "rc=1",
+          "flong launch: write bogus to pids.max: Invalid argument", "rc=1",
           "session gone",
           "container kept",
-          "flong-launch: the limit hugetlb.2MB.max needs the hugetlb controller, which CG/h does not have",
+          "flong launch: the limit hugetlb.2MB.max needs the hugetlb controller, which CG/h does not have",
           "session gone",
           "session: CG/h/c/m",
           "sandbox pids.max: 10",
@@ -194,11 +194,11 @@ in
           "leaves: hooks pasta sandbox",
       ], out
 
-  with subtest("L2 record: created, closed, and swept by the Zig flong-sweeper from its watch"):
+  with subtest("L2 record: created, closed, and swept by the Zig flong sweeper from its watch"):
       out = machine.succeed(as_alice(
           "cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); H=$cg/h2; S=/tmp/l2-state; "
           "rm -rf $S /tmp/l2-ps.log; mkdir -m 0700 $S; mkdir -p $H/supervisor; "
-          "(echo $BASHPID > $H/supervisor/cgroup.procs; exec ${launcher}/bin/flong-sweeper $S) 2>/tmp/l2-sweeper.err & swp=$!; "
+          "(echo $BASHPID > $H/supervisor/cgroup.procs; exec ${launcher}/bin/flong sweeper $S) 2>/tmp/l2-sweeper.err & swp=$!; "
           "blocked() { local s fd; read -r s fd _ </proc/$swp/syscall 2>/dev/null || return 1; "
           "[ \"$s\" = 0 ] && [ \"$(readlink /proc/$swp/fd/$((fd)))\" = anon_inode:inotify ]; }; "
           "for i in $(seq 600); do blocked && break; sleep 0.05; done; blocked && echo watching; "
@@ -223,7 +223,7 @@ in
           "cgroup gone",
           "poststop: m m",
           "sweeper 143",
-          "flong-sweeper: released 1 dead session",
+          "flong sweeper: released 1 dead session",
       ], out
 
   with subtest("L2 passwd: /etc/passwd against getent, and the uid form"):
@@ -232,8 +232,8 @@ in
           name = machine.succeed(f"getent passwd {uid} | cut -d: -f1").strip()
           assert name in ("alice", "root"), name
           assert out == (f"name: {name}\n"
-                         f"flong-launch: no user manager for {name}: set users.users.{name}.linger = true\n"), out
+                         f"flong launch: no user manager for {name}: set users.users.{name}.linger = true\n"), out
       machine.fail("getent passwd 4242")
       out = machine.succeed(as_alice("flong-launch-driver passwd 4242 2>&1"))
-      assert out == "name: none\nflong-launch: no user manager for uid 4242: set users.users.<name>.linger = true\n", out
+      assert out == "name: none\nflong launch: no user manager for uid 4242: set users.users.<name>.linger = true\n", out
 ''

@@ -28,7 +28,7 @@
 //!
 //! A copy the launcher kept of a write end would hide bwrap's death from
 //! the info and ready readers, and one of the gate's read end would never
-//! let flong-init see EOF (:397-399).
+//! let flong init see EOF (:397-399).
 
 const std = @import("std");
 const fd = @import("fd");
@@ -38,12 +38,13 @@ const spec = @import("spec");
 
 const Allocator = std.mem.Allocator;
 
-/// The two programs bwrap's argv names, compiled in (-Dbwrap and -Dinit,
-/// FLONG_BWRAP and FLONG_INIT in the C): the root reads its build options
-/// and passes them (DESIGN.md, "The native launcher").
+/// The two programs bwrap's argv names, compiled in (-Dbwrap and -Dself,
+/// FLONG_BWRAP and FLONG_INIT in the C): launch.zig reads its build
+/// options and passes them (DESIGN.md, "The native launcher"). `self` is
+/// the flong binary, which bwrap runs as `flong init`.
 pub const Paths = struct {
     bwrap: [*:0]const u8,
-    init: [*:0]const u8,
+    self: [*:0]const u8,
 };
 
 /// Checkpoint 2's list: every descriptor bwrap alone needs, which the
@@ -81,7 +82,7 @@ pub const Spawned = struct {
 /// environment (:379-391). It inherits U1 (`outer`, any userns handle), U2,
 /// its ends of the three pipes, the seccomp descriptors and the keep-fds,
 /// and nothing else (:364-377). `relay` is a relayed pty's: a session of
-/// its own, flong-init's ctty.
+/// its own, flong init's ctty.
 ///
 /// On a failure it has said why (`open seccomp program P: <text>`,
 /// `pipe: <text>`, `malloc: <text>` as the C; a failed clone3 as
@@ -158,7 +159,7 @@ fn start(
         .seccomp = ends.seccomp,
         .gate_r = ends.gate_r.?,
         .ready_w = ends.ready_w.?,
-    }, relay, paths.init) catch return msg.fail(.NOMEM, "realloc", .{});
+    }, relay, paths.self) catch return msg.fail(.NOMEM, "realloc", .{});
     for (ends.keep) |h| sp.keepInherited(h) catch return msg.fail(.NOMEM, "malloc", .{});
     sp.stdio = stdio;
     sp.cgroup = cgroup;

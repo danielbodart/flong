@@ -1,1 +1,1 @@
-flong-launch: spec: state is not an absolute path: '--'
+flong launch: spec: state is not an absolute path: '--'

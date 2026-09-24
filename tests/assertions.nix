@@ -290,7 +290,7 @@ let
         in
         lib.all (l: lib.hasInfix l text) [
           "Type=exec" "Slice=app.slice" "Delegate=yes" "DelegateSubgroup=supervisor"
-          "OOMPolicy=continue" "/bin/flong-sweeper %t/flong"
+          "OOMPolicy=continue" "/bin/flong sweeper %t/flong"
         ]) || throw "assertions: the holder unit is missing or wrong")
       (! (configWith { flong = lib.mkForce { }; }).systemd.user.units ? "flong-sessions.service"
         || throw "assertions: the holder unit exists with no declaration")

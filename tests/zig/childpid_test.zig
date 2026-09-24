@@ -161,7 +161,7 @@ const Outcome = union(enum) {
 var errbuf: [4096]u8 = undefined;
 
 fn run(s: *Script) !Outcome {
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     msg.mode = .cut;
     const cap = try Capture.begin();
     const r = childpid.wait(s);
@@ -181,11 +181,11 @@ fn run(s: *Script) !Outcome {
     return .{ .pid = pid };
 }
 
-/// The launcher's line for a body in `parts`: "flong-launch: ", the body,
+/// The launcher's line for a body in `parts`: "flong launch: ", the body,
 /// all cut at 1022 bytes, then the newline (msg.zig's cut mode,
 /// flong-util.c:67-79).
 fn line(buf: []u8, parts: []const []const u8) []const u8 {
-    const prefix = "flong-launch: ";
+    const prefix = "flong launch: ";
     @memcpy(buf[0..prefix.len], prefix);
     var n: usize = prefix.len;
     for (parts) |p| {
@@ -214,8 +214,8 @@ fn cString(b: []const u8) []const u8 {
     return b[0 .. std.mem.indexOfScalar(u8, b, 0) orelse b.len];
 }
 
-const failed = "flong-launch: bwrap failed before it made the sandbox\n";
-const read_failed = "flong-launch: read bwrap's info: Input/output error\n";
+const failed = "flong launch: bwrap failed before it made the sandbox\n";
+const read_failed = "flong launch: read bwrap's info: Input/output error\n";
 
 /// What the loop must answer for `data` then `end`, from the whole input,
 /// whatever the chunking: the pid if one is whole within the bound; else
@@ -315,13 +315,13 @@ test "the refusals, each with the C's message" {
         .{ .data = "{\n    \"child-pid\": 5", .end = .exit, .said = failed },
         .{ .data = "", .end = .fail, .said = read_failed },
         .{ .data = "{\n    \"child-pid\": 5", .end = .fail, .said = read_failed },
-        .{ .data = "{}\n", .end = .eof, .said = "flong-launch: bwrap reported no child pid: {}\n\n" },
-        .{ .data = "{\"child-pid\": -1,", .end = .eof, .said = "flong-launch: bwrap reported no child pid: {\"child-pid\": -1,\n" },
-        .{ .data = "{\"child-pid\" = 1,", .end = .exit, .said = "flong-launch: bwrap reported no child pid: {\"child-pid\" = 1,\n" },
-        .{ .data = "{\"child-pid\": 1234567890}", .end = .eof, .said = "flong-launch: bwrap reported no child pid: {\"child-pid\": 1234567890}\n" },
-        .{ .data = "{\"child-pid\": 0,", .end = .eof, .said = "flong-launch: bwrap reported no child pid: {\"child-pid\": 0,\n" },
+        .{ .data = "{}\n", .end = .eof, .said = "flong launch: bwrap reported no child pid: {}\n\n" },
+        .{ .data = "{\"child-pid\": -1,", .end = .eof, .said = "flong launch: bwrap reported no child pid: {\"child-pid\": -1,\n" },
+        .{ .data = "{\"child-pid\" = 1,", .end = .exit, .said = "flong launch: bwrap reported no child pid: {\"child-pid\" = 1,\n" },
+        .{ .data = "{\"child-pid\": 1234567890}", .end = .eof, .said = "flong launch: bwrap reported no child pid: {\"child-pid\": 1234567890}\n" },
+        .{ .data = "{\"child-pid\": 0,", .end = .eof, .said = "flong launch: bwrap reported no child pid: {\"child-pid\": 0,\n" },
         .{ .data = "{\"child-pid\": 12", .end = .eof, .said = "" },
-        .{ .data = "{\"child-\x00pid\": 12,", .end = .eof, .said = "flong-launch: bwrap reported no child pid: {\"child-\n" },
+        .{ .data = "{\"child-\x00pid\": 12,", .end = .eof, .said = "flong launch: bwrap reported no child pid: {\"child-\n" },
     };
     for (cases) |c| {
         var s = script(c.data, &.{}, c.end);
@@ -338,7 +338,7 @@ test "the refusals, each with the C's message" {
 test "a malformed info is refused at once, quoting only what was read" {
     // The key's colon is missing in the first write: nothing more is read.
     var s = script("{\"child-pid\"; and more to come", &.{ 13, 5 }, .eof);
-    try testing.expectEqualStrings("flong-launch: bwrap reported no child pid: {\"child-pid\";\n", try saidOf(try check(&s)));
+    try testing.expectEqualStrings("flong launch: bwrap reported no child pid: {\"child-pid\";\n", try saidOf(try check(&s)));
     try testing.expectEqual(@as(usize, 1), s.reads);
 }
 
@@ -499,7 +499,7 @@ fn anyFault(seed: u64) !void {
     var s = script(bad, drawCuts(r, &cut_buf), .eof);
     const got = try check(&s);
     try testing.expect(got == .said);
-    try testing.expect(std.mem.startsWith(u8, try saidOf(got), "flong-launch: bwrap reported no child pid: "));
+    try testing.expect(std.mem.startsWith(u8, try saidOf(got), "flong launch: bwrap reported no child pid: "));
 }
 
 test "property: a malformed or oversize info is refused with the C's message, under any chunking" {

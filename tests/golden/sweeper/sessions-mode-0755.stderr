@@ -1,1 +1,1 @@
-flong-sweeper: state/sessions must be a directory of the caller's with mode 0700 (it is uid @CALLER@, mode 0755)
+flong sweeper: state/sessions must be a directory of the caller's with mode 0700 (it is uid @CALLER@, mode 0755)

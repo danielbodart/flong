@@ -6,7 +6,7 @@
 # writeShellApplication runs it under errexit, nounset and pipefail. It works
 # out what only the launch can know -- the caller, the workspace and binds,
 # the project's seccomp policy, the maps, the prepared root and the payload's
-# identity -- and execs flong-launch with the spec.
+# identity -- and execs flong launch with the spec.
 #
 # The warm path of a default declaration runs bash builtins only: every fork
 # is on the cold path or in a snippet the declaration chose. So there is no
@@ -14,7 +14,7 @@
 # function or a list ending in a false test is a failure under errexit.
 #
 # Everything checked here is a consistency check. The caller can run
-# flong-launch with any spec it likes, and the launcher's own checks are the
+# flong launch with any spec it likes, and the launcher's own checks are the
 # boundary against the payload.
 
 # The body's own names, un-exported for the reason the header's are: a name
@@ -292,7 +292,7 @@ if [[ ! -d $P ]]; then
 	fi
 	"$mkdir" -p -- "$cache"
 	# The cache's shared lock is held across the prepare and kept open into
-	# flong-launch, which takes its own before this one closes: no sweep
+	# flong launch, which takes its own before this one closes: no sweep
 	# renames the cache under a prepare or between the two locks. A launch of
 	# another generation may have swept it since the mkdir.
 	if ! { exec {cfd}<"$cache"; } 2>/dev/null; then
@@ -330,7 +330,7 @@ fi
 # ---- the payload's identity, from the prepared root
 # On the warm path nothing is locked yet, so a launch of another generation
 # may sweep this cache between the test above and these opens. The wrapper
-# then starts over and prepares the root afresh, as flong-launch's own
+# then starts over and prepares the root afresh, as flong launch's own
 # relaunch does. Once open, the files are read whole whatever happens to
 # their names.
 if ! { exec {pw}<"$P/etc/passwd" {gr}<"$P/etc/group"; } 2>/dev/null; then
@@ -350,7 +350,7 @@ if [[ -z $uid ]]; then die "$user is not a user in $P/etc/passwd"; fi
 if [[ $uid != "$cuid" || $gid != "$cgid" ]]; then
 	die "$user is $uid:$gid in the prepared root, and the declaration says $cuid:$cgid"
 fi
-# The primary group first, then every group naming the user. flong-init sets
+# The primary group first, then every group naming the user. flong init sets
 # exactly these, so the caller's host groups never reach the payload.
 groups=("$gid")
 while IFS=: read -r _ _ g m; do
@@ -454,4 +454,4 @@ done
 if [[ -n ${COLORTERM:-} ]]; then spec+=(bwrap-arg --setenv bwrap-arg COLORTERM bwrap-arg "$COLORTERM"); fi
 if [[ -n ${FLONG_TRACE:-} ]]; then spec+=(trace); fi
 
-exec "$launcher" "${spec[@]}" -- "$payload" "$workspace" "${launcher_args[@]}"
+exec "$launcher" launch "${spec[@]}" -- "$payload" "$workspace" "${launcher_args[@]}"

@@ -1,1 +1,1 @@
-flong-launch: spec: mount: unknown kind 'bind'
+flong launch: spec: mount: unknown kind 'bind'

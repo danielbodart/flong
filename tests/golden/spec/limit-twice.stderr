@@ -1,1 +1,1 @@
-flong-launch: spec: limit pids.max given more than once
+flong launch: spec: limit pids.max given more than once

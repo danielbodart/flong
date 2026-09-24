@@ -1,1 +1,1 @@
-flong-sweeper: not in a holder unit's supervisor cgroup (in @OWN@): run the sweeper in a unit with DelegateSubgroup=supervisor
+flong sweeper: not in a holder unit's supervisor cgroup (in @OWN@): run the sweeper in a unit with DelegateSubgroup=supervisor

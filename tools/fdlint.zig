@@ -27,9 +27,10 @@
 //!   raw-number     .raw, a descriptor's number. Not in the syscall layer,
 //!                  src/seccomp/scmp.zig, tests
 //!   argv           sys.argv, sys.argvSlots, sys.environ. Not in the roots
-//!                  (src/seccomp/main.zig, init.zig, sweeper.zig,
-//!                  launch.zig, and the fixtures' four in src/fixtures/),
-//!                  src/proc.zig (Spawn's default envp), tests
+//!                  (src/main.zig, which hands them to its subcommands,
+//!                  src/seccomp/main.zig, and the fixtures' four in
+//!                  src/fixtures/), src/proc.zig (Spawn's default envp),
+//!                  tests
 //!   handle-guts    .slot, .gen: a handle's fields. Not in src/fd.zig, tests
 //!   adopt-foreign  .adoptForeign, which went with the C launcher's
 //!                  mount-helper shim (the Zig port's L5). Not in tests
@@ -45,8 +46,9 @@ const Tag = std.zig.Token.Tag;
 
 const syscall_layer = [_][]const u8{ "src/sys.zig", "src/fd.zig", "src/proc.zig", "src/sig.zig" };
 const roots = [_][]const u8{
-    "src/seccomp/main.zig",     "src/init.zig",           "src/sweeper.zig",          "src/launch.zig",
-    "src/fixtures/bpfdump.zig", "src/fixtures/probe.zig", "src/fixtures/swapper.zig", "src/fixtures/ioctl_probe.zig",
+    "src/main.zig",             "src/seccomp/main.zig",
+    "src/fixtures/bpfdump.zig", "src/fixtures/probe.zig",
+    "src/fixtures/swapper.zig", "src/fixtures/ioctl_probe.zig",
 };
 
 const Rule = enum {

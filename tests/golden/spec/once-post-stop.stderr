@@ -1,1 +1,1 @@
-flong-launch: spec: post-stop given more than once
+flong launch: spec: post-stop given more than once

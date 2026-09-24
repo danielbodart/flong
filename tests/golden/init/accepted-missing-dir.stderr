@@ -1,1 +1,1 @@
-flong-init: setgroups: Operation not permitted
+flong init: setgroups: Operation not permitted

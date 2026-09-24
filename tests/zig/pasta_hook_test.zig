@@ -423,7 +423,7 @@ test "Pasta.start closes /dev/null whether or not pasta started" {
     const h = try Handles.open();
     defer h.close();
     const s = specWith(&.{}, true, &.{}, false);
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     msg.mode = .cut;
     var p = (try pasta.build(arena_state.allocator(), &s, pasta_program, sys.getpid(), h.userns, leader, null, h.leaf)).?;
     const dev_null = p.dev_null;
@@ -434,7 +434,7 @@ test "Pasta.start closes /dev/null whether or not pasta started" {
     var buf: [1024]u8 = undefined;
     const err = try cap.end(&buf);
     try testing.expectError(error.Reported, r);
-    try testing.expect(std.mem.startsWith(u8, err, "flong-launch: clone3 " ++ pasta_program ++ ": "));
+    try testing.expect(std.mem.startsWith(u8, err, "flong launch: clone3 " ++ pasta_program ++ ": "));
     try testing.expect(!dev_null.isLive());
     try testing.expect(p.pid_file.isLive());
 }
@@ -442,16 +442,16 @@ test "Pasta.start closes /dev/null whether or not pasta started" {
 // ---- after the reap ----
 
 test "done: the refusals rootless.nix asserts, and nothing on success" {
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     msg.mode = .cut;
     const Case = struct { f: *const fn (u8) msg.Error!void, status: u8, want: []const u8 };
     for ([_]Case{
-        .{ .f = hook.done, .status = 1, .want = "flong-launch: postStart failed (status 1); the payload does not run\n" },
-        .{ .f = hook.done, .status = 127, .want = "flong-launch: postStart failed (status 127); the payload does not run\n" },
-        .{ .f = hook.done, .status = 143, .want = "flong-launch: postStart failed (status 143); the payload does not run\n" },
+        .{ .f = hook.done, .status = 1, .want = "flong launch: postStart failed (status 1); the payload does not run\n" },
+        .{ .f = hook.done, .status = 127, .want = "flong launch: postStart failed (status 127); the payload does not run\n" },
+        .{ .f = hook.done, .status = 143, .want = "flong launch: postStart failed (status 143); the payload does not run\n" },
         .{ .f = hook.done, .status = 0, .want = "" },
-        .{ .f = pasta.done, .status = 1, .want = "flong-launch: pasta failed (status 1); the payload does not run\n" },
-        .{ .f = pasta.done, .status = 137, .want = "flong-launch: pasta failed (status 137); the payload does not run\n" },
+        .{ .f = pasta.done, .status = 1, .want = "flong launch: pasta failed (status 1); the payload does not run\n" },
+        .{ .f = pasta.done, .status = 137, .want = "flong launch: pasta failed (status 137); the payload does not run\n" },
         .{ .f = pasta.done, .status = 0, .want = "" },
     }) |c| {
         const cap = try Capture.begin();
@@ -464,7 +464,7 @@ test "done: the refusals rootless.nix asserts, and nothing on success" {
 }
 
 test "done: the trace stages, when tracing" {
-    msg.prog = "flong-launch";
+    msg.prog = "flong launch";
     msg.mode = .cut;
     msg.tracing = true;
     defer msg.tracing = false;
