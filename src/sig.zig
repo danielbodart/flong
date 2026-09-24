@@ -140,6 +140,56 @@ pub fn awaitFd(h: anytype, events: i16) Error!void {
     }
 }
 
+/// What ended awaitFdOrExit's wait.
+pub const Woke = enum {
+    /// `h` is readable, at EOF, or in error: the caller's next read says
+    /// which
+    ready,
+    /// the child exited first, `h` not ready
+    exited,
+};
+
+/// await_or_bwrap (flong-launch.c:414-448): waits, with no timeout, until
+/// `h` is readable or `child`'s process exits, or a terminating signal
+/// arrives on `fd`. bwrap's child can outlive bwrap until it has exec'd
+/// flong-init, holding the write ends of the info and ready pipes, so
+/// neither pipe says EOF: bwrap's pidfd is watched too (:414-420).
+///
+/// The C's epoll over {fd, bwrap's pidfd}, waited on through fl_await, is
+/// one poll over {h, child, fd} here (quirk 23, mechanism). As in awaitFd,
+/// the signal is looked at first, one per wake-up, the others dropped; and
+/// `h`'s POLLHUP and POLLERR count as ready, as epoll always reports them
+/// (:422-438). `h` wins a tie: what the child did before it exited still
+/// counts (:440-444). `h` is any handle; `child` is the child's pidfd.
+pub fn awaitFdOrExit(h: anytype, child: fdt.Fd(.pidfd)) Error!Woke {
+    const with_sig = if (fd) |s| s.isLive() else false;
+    var p = [3]sys.pollfd{
+        .{ .fd = h.raw(), .events = sys.POLL.IN, .revents = 0 },
+        .{ .fd = child.raw(), .events = sys.POLL.IN, .revents = 0 },
+        .{ .fd = if (with_sig) fd.?.raw() else -1, .events = sys.POLL.IN, .revents = 0 },
+    };
+    const n: usize = if (with_sig) 3 else 2;
+    const ready = sys.POLL.IN | sys.POLL.HUP | sys.POLL.ERR;
+    while (true) {
+        switch (sys.poll(p[0..n], -1)) {
+            .ok => {},
+            .err => |e| if (e == .INTR) continue else return msg.fail(e, "poll", .{}),
+        }
+        if (n == 3 and p[2].revents != 0) {
+            if (p[2].revents & sys.POLL.NVAL != 0) return msg.fail(.BADF, "poll signalfd", .{});
+            // One signal per wake-up: any behind it make the next poll
+            // return at once.
+            const s = try next();
+            if (terminating(s)) return abort(s);
+        }
+        for (p[0..2]) |q| {
+            if (q.revents & sys.POLL.NVAL != 0) return msg.fail(.BADF, "poll {d}", .{q.fd});
+        }
+        if (p[0].revents & ready != 0) return .ready;
+        if (p[1].revents & ready != 0) return .exited;
+    }
+}
+
 // ---- tests ----
 
 const testing = std.testing;

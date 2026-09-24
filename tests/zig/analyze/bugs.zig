@@ -3,7 +3,7 @@
 //! there are no pipes yet) and phase 2's B9-B11, written against src/fd.zig
 //! as flong's code calls it: an open's result through msg.check.
 //! zwanzig reads syntax and matches methods by name, so this is analysed,
-//! never compiled. Each function is one bug (B12-B26 one per minting
+//! never compiled. Each function is one bug (B12-B28 one per minting
 //! function); `ok*` are controls that must stay quiet. B4 (a leak) and B5 (a
 //! stale copy in a struct) are beyond zwanzig: the table and the property
 //! test (tests/zig/fd_props.zig) catch those.
@@ -288,4 +288,34 @@ pub fn ok9OutOnce() !void {
     const o = try msg.check(fd.reopenOut(), "x", .{});
     _ = o.write("x");
     o.close();
+}
+
+// ---- B27-B28: bwrap's spawn (phase 7 L4, src/launch/bwrap.zig) ----
+// Measured: both are reported with `spawn`'s open model or without it (the
+// close models alone find a double close); the model is there by the rule,
+// one per minting function (ZIG.md, "Lint and analysis").
+
+const bwrap = @import("bwrap");
+
+// B27: bwrap's Child released twice
+pub fn b27BwrapReleasedTwice(a: anytype, s: anytype, u1: anytype, ends: anytype) !void {
+    const b = try bwrap.spawn(a, s, .{ .bwrap = "/b", .init = "/i" }, u1, false, .{ null, null, null }, null, ends);
+    b.child.release();
+    b.child.release();
+}
+
+// B28: the gate's write end closed twice
+pub fn b28GateClosedTwice(a: anytype, s: anytype, u1: anytype, ends: anytype) !void {
+    const b = try bwrap.spawn(a, s, .{ .bwrap = "/b", .init = "/i" }, u1, false, .{ null, null, null }, null, ends);
+    b.gate_w.close();
+    b.gate_w.close();
+}
+
+// ok10: each of spawn's handles ended once
+pub fn ok10BwrapOnce(a: anytype, s: anytype, u1: anytype, ends: anytype) !void {
+    const b = try bwrap.spawn(a, s, .{ .bwrap = "/b", .init = "/i" }, u1, false, .{ null, null, null }, null, ends);
+    b.gate_w.close();
+    b.ready_r.close();
+    b.info_r.close();
+    b.child.release();
 }

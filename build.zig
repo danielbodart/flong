@@ -504,9 +504,11 @@ pub fn build(b: *std.Build) void {
                 "bugs.zig:263:12: error: [store-violations-engine] double-close", // B24, openPtmx
                 "bugs.zig:270:9: error: [store-violations-engine] use after close", // B25, openSlave
                 "bugs.zig:277:9: error: [store-violations-engine] use after close", // B26, reopenOut
+                "bugs.zig:304:20: error: [store-violations-engine] double-close", // B27, bwrap.spawn's Child
+                "bugs.zig:311:19: error: [store-violations-engine] double-close", // B28, its gate
             }) |want| run.addCheck(.{ .expect_stdout_match = want });
-            // And those twenty-five only: the ok* controls stay quiet.
-            run.addCheck(.{ .expect_stdout_match = "Found 25 issue(s):\n" });
+            // And those twenty-seven only: the ok* controls stay quiet.
+            run.addCheck(.{ .expect_stdout_match = "Found 27 issue(s):\n" });
             run.addCheck(.{ .expect_term = .{ .Exited = 1 } });
             analyze_step.dependOn(&run.step);
         }
@@ -650,6 +652,16 @@ pub fn build(b: *std.Build) void {
     //
     //   test        (-Ddev=true) tests/zig/prologue_test.zig, against the
     //               spawn probe (flong-proc) for relaunch's exec
+    //
+    // L4's pieces, written ahead of the launch, each a module under
+    // src/launch/ with its own test, not yet built into the launcher:
+    //
+    //   test        (-Ddev=true) tests/zig/bwrap_test.zig: launch/bwrap.zig's
+    //               spawn against flong-fake-bwrap (tests/zig/fakebwrap.zig),
+    //               its argv per branch and what it holds, checkpoint 2's
+    //               list; sig.awaitFdOrExit
+    //   analyze     (-Ddev=true) B27 and B28 in tests/zig/analyze/bugs.zig,
+    //               bwrap.spawn's planted bugs (the `spawn` model)
     {
         const Branch = struct {
             /// src/spec.zig over `m`'s modules.
@@ -824,6 +836,38 @@ pub fn build(b: *std.Build) void {
                 });
             }
 
+            /// src/launch/bwrap.zig over `m`'s modules and `spec`.
+            fn bwrapModule(bb: *std.Build, m: Modules, spec: *std.Build.Module, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+                return bb.createModule(.{
+                    .root_source_file = bb.path("src/launch/bwrap.zig"),
+                    .target = t,
+                    .optimize = o,
+                    .imports = &.{
+                        .{ .name = "fd", .module = m.fd },
+                        .{ .name = "msg", .module = m.msg },
+                        .{ .name = "proc", .module = m.proc },
+                        .{ .name = "spec", .module = spec },
+                    },
+                });
+            }
+
+            /// flong-fake-bwrap (tests/zig/fakebwrap.zig): bwrap's stand-in
+            /// for bwrap_test. Static, no libc, stripped.
+            fn fakeBwrap(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+                const exe = bb.addExecutable(.{
+                    .name = "flong-fake-bwrap",
+                    .root_module = bb.createModule(.{
+                        .root_source_file = bb.path("tests/zig/fakebwrap.zig"),
+                        .target = t,
+                        .optimize = o,
+                        .strip = true,
+                        .single_threaded = true,
+                    }),
+                });
+                exe.stack_size = 0;
+                return exe;
+            }
+
             /// A directory in the store that exists wherever this builds:
             /// the one holding the zig that runs it. Null outside a store.
             fn storeDir(bb: *std.Build) ?[]const u8 {
@@ -870,6 +914,33 @@ pub fn build(b: *std.Build) void {
                 }
                 {
                     const t = b.addTest(.{ .name = "launch", .root_module = Branch.launchModule(b, target, optimize, false) });
+                    test_step.dependOn(&b.addRunArtifact(t).step);
+                }
+                {
+                    // launch/bwrap.zig and sig.awaitFdOrExit, over one set
+                    // of modules, so the test and the piece share fd's table.
+                    const m = modules(b, target, optimize);
+                    const spec_module = Branch.specModule(b, m, target, optimize);
+                    const opts = b.addOptions();
+                    opts.addOptionPath("fake_bwrap", Branch.fakeBwrap(b, target, optimize).getEmittedBin());
+                    const t = b.addTest(.{
+                        .name = "bwrap_test",
+                        .root_module = b.createModule(.{
+                            .root_source_file = b.path("tests/zig/bwrap_test.zig"),
+                            .target = target,
+                            .optimize = optimize,
+                            .imports = &.{
+                                .{ .name = "sys", .module = m.sys },
+                                .{ .name = "fd", .module = m.fd },
+                                .{ .name = "msg", .module = m.msg },
+                                .{ .name = "sig", .module = m.sig },
+                                .{ .name = "proc", .module = m.proc },
+                                .{ .name = "spec", .module = spec_module },
+                                .{ .name = "bwrap", .module = Branch.bwrapModule(b, m, spec_module, target, optimize) },
+                                .{ .name = "options", .module = opts.createModule() },
+                            },
+                        }),
+                    });
                     test_step.dependOn(&b.addRunArtifact(t).step);
                 }
                 {
