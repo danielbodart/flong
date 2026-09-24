@@ -64,10 +64,12 @@ Declare the container with NixOS's own option, then name it in `flong`:
   flong.sandbox = {
     user = "alice";                  # the account inside; everything runs as it
     command = [ "cargo" ];           # the launcher's arguments are appended
-    binds = ''                       # more of the caller's directories, read-only unless :rw
-      [ -d "$workspace/../shared-crates" ] && printf '%s:rw\n' "$workspace/../shared-crates"
-      printf '%s\n' /srv/reference
-    '';
+    binds = [                        # commands printing more directories, read-only unless :rw
+      [ "${pkgs.writeShellScript "binds" ''
+        if [ -d "$workspace/../shared-crates" ]; then printf '%s:rw\n' "$workspace/../shared-crates"; fi
+        printf '%s\n' /srv/reference
+      ''}" ]
+    ];
   };
 }
 ```
@@ -121,9 +123,11 @@ over its network namespace and none over the host's.
 {
   flong.agent = {
     path = [ pkgs.nftables ];
-    postStart = ''
-      nsenter --user="$userns" --net="$netns" nft -f ${./egress.nft}
-    '';
+    postStart = [
+      [ "${pkgs.writeShellScript "egress" ''
+        nsenter --user="$userns" --net="$netns" nft -f ${./egress.nft}
+      ''}" ]
+    ];
   };
 }
 ```
@@ -245,22 +249,26 @@ failed. Its message says which.
 
 All under `flong.<name>`. What is known at evaluation is data: `command` is an
 argument list, and every mount known then (`bindMounts`, `tmpfs`) belongs on
-the `containers.<name>` declaration. Hooks are shell snippets, run as the
-caller under `set -euo pipefail`, for what is known only at launch.
-Every hook is `lines`, like systemd's: several modules' snippets concatenate,
-ordered with `mkBefore` and `mkAfter`.
+the `containers.<name>` declaration. Hooks are commands, for what is known
+only at launch: each an argument list, `[ program arg... ]`, run as the
+caller with the launcher's arguments after its own, and never read by a
+shell. A hook that wants a shell names a script, `pkgs.writeShellScript`.
+Every hook but `workspace` is a list of commands, run in order: several
+modules' lists concatenate, ordered with `mkBefore` and `mkAfter`.
+`workspace` is one command, or `null` for the directory the launcher starts
+in. Each declaration is also written, as data, to `/etc/flong/<name>.zon`.
 
 | option | default | meaning |
 |---|---|---|
 | `container` | `<name>` | The `containers.<name>` declaration to run. |
 | `user` | *required* | Account inside the container that everything in the session runs as. Its uid and its primary group's gid must be declared in the container's `config`; its home is read from the prepared root's `/etc/passwd`. It is mapped onto the caller whatever its uid. Both must be at most 65535. |
 | `command` | *required* | The payload's argument list, e.g. `[ "cargo" ]` or `[ (lib.getExe pkgs.hello) ]`. The launcher's arguments are appended, and it is exec'd as `user` in the workspace, with the container's `PATH` and variables from its `/etc/set-environment`. No element is read by a shell. |
-| `workspace` | `pwd` | Prints the directory to bind-mount at its own path and `cd` into: `PATH`, read-write, or `PATH:ro`. |
-| `binds` | `""` | Prints more directories to bind-mount, each at its own path, one per line: `PATH`, read-only, or `PATH:rw`. |
-| `guard` | `""` | Checks that the launch is one the declaration means to make. Non-zero exit refuses. A check, not a gate; setting it warns. |
-| `seccompPolicy` | `""` | Prints a project's `allow NAME...` and `deny NAME...` lines for the syscall filter, compiled at launch and cached by content. Non-zero exit refuses. Needs a `seccomp.tier`. |
-| `postStart` | `""` | Configures the session once its namespaces exist, before `network` is attached and before the payload starts. Non-zero exit ends the session. |
-| `postStop` | `""` | Releases what `postStart` made, after the session ends. |
+| `workspace` | `null` | A command printing the directory to bind-mount at its own path and `cd` into: `PATH`, read-write, or `PATH:ro`. `null` is the directory the launcher starts in. |
+| `binds` | `[ ]` | Commands printing more directories to bind-mount, each at its own path, one per line: `PATH`, read-only, or `PATH:rw`. Their outputs are concatenated. |
+| `guard` | `[ ]` | Commands checking that the launch is one the declaration means to make. Each must exit 0; the first that does not refuses. A check, not a gate; setting it warns. |
+| `seccompPolicy` | `[ ]` | Commands printing a project's `allow NAME...` and `deny NAME...` lines for the syscall filter, concatenated, compiled at launch and cached by content. Non-zero exit refuses. Needs a `seccomp.tier`. |
+| `postStart` | `[ ]` | Commands configuring the session once its namespaces exist, before `network` is attached and before the payload starts. The first non-zero exit ends the session. |
+| `postStop` | `[ ]` | Commands releasing what `postStart` made, after the session ends, with `$machine` and no arguments. |
 | `overlays` | `{ }` | `{ target = lower; }`: an overlayfs whose writes go to an upper layer that goes with the session. |
 | `masks` | `[ ]` | Paths replaced by an empty node nobody can read, to carve a file out of a bound directory. **Use with care**: it is a denylist, the path must exist at launch, a file renamed over a masked one on the host shows through, and a mask two or more levels below the root of a writable bind is refused. Bind only what is needed where you can. |
 | `network` | `null` | User-mode networking through pasta, run as the caller. |

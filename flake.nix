@@ -56,6 +56,19 @@
           integration = pkgs.linkFarm "integration"
             (import ./tests/integration.nix { inherit pkgs; });
 
+          # Every VM test's declarations as module.nix renders them to
+          # /etc/flong/<name>.zon, parsed by src/decl.zig's own parser
+          # (tests/decl-render.nix). Their nodes are evaluated, not built.
+          decl-render = import ./tests/decl-render.nix {
+            inherit pkgs;
+            nodes = {
+              basic = self.checks.${system}.basic-a.nodes.machine;
+              rootless = self.checks.${system}.rootless-a.nodes.machine;
+              parity = self.checks.${system}.parity.nodes.machine;
+              bench = self.packages.${system}.bench.nodes.machine;
+            };
+          };
+
           # The native launcher set: flong, one binary whose subcommands are
           # launch, init and sweeper, Zig, static, without libc (native.nix).
           launcher = import ./launcher { inherit pkgs; };

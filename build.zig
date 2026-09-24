@@ -34,6 +34,8 @@
 //!                 bin/flong-proc), built only by tests/integration.nix
 //!   schema        decl-options.json at the package root, rewritten from
 //!                 src/decl.zig's fields and their doc comments
+//!   decl-parse    bin/flong-decl-parse, decl.zig's parse over files, for
+//!                 the host, built only by tests/decl-render.nix
 //!
 //! Every path a step reads is a lazy b.path, so an install set's derivation,
 //! which holds build.zig, build.zig.zon and its own sources only, configures
@@ -514,6 +516,32 @@ pub fn build(b: *std.Build) void {
         const update = b.addUpdateSourceFiles();
         update.addCopyFileToSource(b.addRunArtifact(exe).captureStdOut(), "decl-options.json");
         schema_step.dependOn(&update.step);
+    }
+
+    // ---- decl-parse: the rendered declarations' parse ----
+    // tests/zig/declparse.zig, for the host: decl.load over each file it is
+    // given, for the decl-render check (tests/decl-render.nix), until
+    // `flong check` runs in each declaration's derivation.
+    const decl_parse_step = b.step("decl-parse", "Build bin/flong-decl-parse, decl.zig's parse over files");
+    {
+        const m = modules(b, b.graph.host, .Debug);
+        const d = declModules(b, m, b.graph.host, .Debug, b.path("src/decl.zig"));
+        const exe = b.addExecutable(.{
+            .name = "flong-decl-parse",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/zig/declparse.zig"),
+                .target = b.graph.host,
+                .optimize = .Debug,
+                .strip = true,
+                .single_threaded = true,
+                .imports = &.{
+                    .{ .name = "sys", .module = m.sys },
+                    .{ .name = "msg", .module = m.msg },
+                    .{ .name = "decl", .module = d.decl },
+                },
+            }),
+        });
+        decl_parse_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
 
     // ---- integration: the drivers checks.native runs ----

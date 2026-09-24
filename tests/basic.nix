@@ -317,9 +317,11 @@ in
 
       # Releases what postStart made, and says so. Keyed on $machine alone,
       # because on the sweep's path that is all there is.
+      # Two commands, run in order.
       postStop = hook "poststop" ''
         pkill -f "hook-sock-$machine" || true
         rm -f "${hookDir}/hook-file-$machine" "${hookDir}/hook-sock-$machine"
+      '' ++ hook "poststop-after" ''
         echo "$machine" >> /tmp/stopped
       '';
 
@@ -464,9 +466,12 @@ in
       container = "netless";
       user = "alice";
       workspace = ws ''realpath /srv/work'';
+      # The first command refuses, so the second never runs.
       postStart = hook "poststart" ''
         echo "the hook refuses this session" >&2
         exit 1
+      '' ++ hook "poststart-after" ''
+        touch "/tmp/badhook-after-$machine"
       '';
       command = [ "sleep" "300" ];
     };
@@ -515,9 +520,11 @@ in
 
       # Resolved with $workspace in scope, which is what lets a consumer pair
       # directories rather than name a fixed set.
-      # One read-write because it says so, one read-only by default.
+      # One read-write because it says so, one read-only by default, each
+      # from a command of its own: their outputs are concatenated in order.
       binds = hook "binds" ''
         [ "$workspace" = /srv/work ] && printf '%s:rw\n' /srv/companion
+      '' ++ hook "binds-after" ''
         printf '%s\n' /srv/reference
       '';
 
@@ -595,7 +602,10 @@ in
       container = "demo";
       user = "alice";
       workspace = ws ''realpath /srv/work'';
-      binds = hook "binds" ''
+      # After one that succeeds, whose output is not mounted alone either.
+      binds = hook "binds-before" ''
+        printf '%s\n' /srv/companion
+      '' ++ hook "binds" ''
         printf '%s\n' /srv/reference
         false
       '';
@@ -615,17 +625,19 @@ in
 
     # Guards that would each subvert the launch if they ran in the launcher's
     # own shell: one ends early with success, which must allow the launch and
-    # not end it with nothing launched; the other reassigns the workspace it
-    # has just judged, which must not change what gets mounted.
+    # not end it with nothing launched -- nor end the guards after it, each a
+    # process of its own, which must still run and pass; the other reassigns
+    # the workspace it has just judged, which must not change what gets
+    # mounted.
     flong.guardexit = {
       container = "demo";
       user = "alice";
       workspace = ws ''realpath /srv/work'';
-      # Conditional, as an early allow is in practice: a bare `exit 0` in the
-      # launcher's own shell leaves the rest of it unreachable, which
-      # shellcheck would refuse before any test ran.
       guard = hook "guard" ''
         if [ -n "$workspace" ]; then exit 0; fi
+        exit 1
+      '' ++ hook "guard-after" ''
+        printf '%s\n' "$*" > /tmp/guardexit-after
       '';
       command = [ "bash" "-c" ];
     };
@@ -633,16 +645,15 @@ in
       container = "demo";
       user = "alice";
       workspace = ws ''realpath /srv/work'';
-      # Through eval, because shellcheck reads a plain assignment in a
-      # subshell as the mistake it is and refuses to build the launcher.
-      guard = hook "guard" ''eval workspace=/srv/reference'';
+      guard = hook "guard" ''
+        workspace=/srv/reference
+        export workspace
+      '';
       command = [ "bash" "-c" ];
     };
 
-    # A third over the same container, taking the DEFAULT workspace. It exists
-    # so that the default snippet is built -- and therefore shellchecked --
-    # rather than only the overrides the other two declare, which is how a
-    # `$PWD` inside it once reached a release unlinted.
+    # A third over the same container, taking the DEFAULT workspace, null: no
+    # command runs, and the launch takes the directory it was started in.
     flong.defaultworkspace = {
       container = "demo";
       user = "alice";
@@ -1339,6 +1350,8 @@ in
           # in its namespace and nobody left to install it.
           err = machine.fail(by_caller("${badHook} 2>&1"))
           assert "the hook refuses this session" in err, err
+          # The failing command was the first of two: the rest never ran.
+          machine.fail("ls /tmp/badhook-after-*")
           machine.succeed(NO_SESSIONS)
           machine.succeed(NO_SESSION_CGROUPS)
 
@@ -1552,8 +1565,12 @@ in
 
       @test("a guard's exit 0 allows the launch rather than ending it")
       def _():
+          machine.succeed("rm -f /tmp/guardexit-after")
           out = machine.succeed(by_caller("${guardExit} 'echo the-payload-ran'"))
           assert "the-payload-ran" in out, out
+          # The guard after it ran too, with the launcher's arguments.
+          after = machine.succeed("cat /tmp/guardexit-after").strip()
+          assert after == "echo the-payload-ran", after
 
       @test("a guard cannot change the workspace it judged")
       def _():

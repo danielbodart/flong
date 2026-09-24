@@ -50,9 +50,9 @@ The wrapper works out what only the launch can know:
 10. Wait for the session. Then kill its cgroup, run `postStop` and release
     the rest.
 
-On the warm path the wrapper forks nothing but the snippets the declaration
+On the warm path the wrapper forks nothing but the commands the declaration
 chose: every test is a builtin, and there is no command substitution outside
-a snippet. A bash launcher measured 61 ms and a python one 106 ms, against
+one that runs them. A bash launcher measured 61 ms and a python one 106 ms, against
 the C launcher's 19 ms, which is why everything after the spec is native
 code. The Zig launcher that replaced the C is within the runs' spread of it
 (`packages.bench`, [What the port measured](#what-the-port-measured)).
@@ -77,18 +77,27 @@ So nothing is declared by running a command:
   records they are. There is no hook before the session starts, because
   nothing a session is given at start is unknown at evaluation except the
   caller's directories, which `workspace` and `binds` compute.
-- **`postStart` and `postStop` are `types.lines`**, exactly as systemd's are.
-  They are what a module such as frisket's adapter generates into, and several
-  modules' snippets merge, ordered with `mkBefore` and `mkAfter`.
-- **`workspace`, `binds`, `guard` and `seccompPolicy` are shell** because what
-  they answer is known only at launch (the repository around the caller's
-  working directory, what travels with it, a project's own syscall policy) or
-  is a judgement on this launch.
+- **The hooks are commands, never shell.** `workspace`, `binds`, `guard` and
+  `seccompPolicy` run at launch because what they answer is known only then
+  (the repository around the caller's working directory, what travels with
+  it, a project's own syscall policy) or is a judgement on this launch;
+  `postStart` and `postStop` because they act on the session. Each is an
+  argument list run as it is, with the launcher's arguments after its own
+  (STANDALONE.md, "Decided": snippets become commands), and all but
+  `workspace` are lists of them, which a module such as frisket's adapter
+  adds to: several modules' lists merge, ordered with `mkBefore` and
+  `mkAfter`. flong runs no shell of its own; a hook that wants one names a
+  script.
 
 The wrapper itself is the same text for every declaration. `module.nix`
 generates a header of quoted assignments in front of `rootless-wrapper.bash`,
 and the header is the only place a declaration reaches bash: a name, a path or
-a snippet is data there, and the body decides what runs. Every name the
+a command's word is data there, and the body decides what runs. A list of
+commands is one flat array, each command's length and then its words. The
+launcher's spec takes one `post-start` and one `post-stop` program, so
+module.nix composes each list into one program that runs its commands in
+order and stops at the first that fails, until S3 moves the list into
+`flong launch`. Every name the
 header assigns is un-exported, since an assignment to a name the caller's
 environment exports keeps it exported, into the launcher and the hooks.
 
@@ -281,9 +290,9 @@ configures the session enters its namespaces (see
 [postStart](#poststart-the-gate-and-readiness)); nothing is done as host root.
 
 `workspace` runs first, in the directory the caller chose. A consumer's
-snippet commonly runs `git` there, which reads configuration from the
+command commonly runs `git` there, which reads configuration from the
 repository it is pointed at; as the caller, that grants nothing the caller
-lacked. The default, `pwd`, is taken without a fork. The printed path is
+lacked. The default, `null`, is taken without a fork. The printed path is
 resolved to its physical path before it is checked, so what is checked is
 what is mounted. `binds` runs next, the same way, with `$workspace` exported
 so it can name what travels with that directory.
@@ -869,7 +878,7 @@ leader=<pid>:<starttime>    appended once bwrap reports its child
 - **The record exists before the cgroup and before the hook**, so `postStop`
   runs even for a launcher killed mid-hook, and must be idempotent.
 - **Each session records its own `postStop`.** Several launchers can drive one
-  container, and a rebuild changes the snippet, so the sweep runs the store
+  container, and a rebuild changes the commands, so the sweep runs the store
   path in the record, not the current one.
 
 ### Liveness

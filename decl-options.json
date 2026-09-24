@@ -85,7 +85,7 @@
     },
     "default": [],
     "required": false,
-    "doc": "Commands run as the caller after a session ends, in order, to\nrelease whatever `postStart` made outside it. `$machine` is in the\nenvironment, and nothing else is.\n\nThey run on two paths: from the launcher once the session has\nstopped, and -- for a session whose launcher was SIGKILLed --\nfrom the sweeper in the caller's holder unit, within moments,\nwhere the machine name is all that survives. Each session records\nits own `postStop`, so the one belonging to the session is run,\neven after a rebuild.\n\nSo each must depend on `$machine` alone and succeed when what it\nreleases is already gone. `path` is on `PATH`; a non-zero exit is\nreported and otherwise ignored, because flong's own release\nfollows it.",
+    "doc": "Commands run as the caller after a session ends, in order, to\nrelease whatever `postStart` made outside it. `$machine` is in the\nenvironment, and nothing else is; nothing follows a command's own\narguments.\n\nThey run on two paths: from the launcher once the session has\nstopped, and -- for a session whose launcher was SIGKILLed --\nfrom the sweeper in the caller's holder unit, within moments,\nwhere the machine name is all that survives. Each session records\nits own `postStop`, so the one belonging to the session is run,\neven after a rebuild.\n\nSo each must depend on `$machine` alone and succeed when what it\nreleases is already gone. `path` is on `PATH`; a non-zero exit is\nreported and otherwise ignored, because flong's own release\nfollows it.",
     "merge": "ordered",
     "nixOption": true
   },
@@ -682,6 +682,101 @@
     "required": false,
     "doc": "What the container mounts, from its `bindMounts`, `tmpfs` and\n`allowedDevices`, one entry each, in the launcher's words. The\nlaunch sorts them, parents first, so their order does not matter.",
     "merge": "ordered",
+    "nixOption": false
+  },
+  {
+    "path": "name",
+    "type": {
+      "type": "string"
+    },
+    "default": null,
+    "required": true,
+    "doc": "The declaration's own name, `<name>` in `flong.<name>`: what every\nrefusal the launch makes starts with, `<name>: ...`, and the name\nof its command.",
+    "merge": "single",
+    "nixOption": false
+  },
+  {
+    "path": "payload",
+    "type": {
+      "type": "string"
+    },
+    "default": null,
+    "required": true,
+    "doc": "The program that runs `command` inside the session, as `user`: it\ntakes the workspace, changes into it, sources the container's\n`/etc/set-environment` and execs `command` with the launcher's\narguments after it. module.nix builds it from `command`\n(`mkPayload`); the launch hands it to `flong init` as the payload.",
+    "merge": "single",
+    "nixOption": false
+  },
+  {
+    "path": "seccompTierFilter",
+    "type": {
+      "type": "string",
+      "nullable": true
+    },
+    "default": null,
+    "required": false,
+    "doc": "The compiled filter of `seccomp`'s tier, its loosenings, `allow`\nand `deny`, installed first; null when `seccomp.tier` is null. A\nproject's policy (`seccompPolicy`) replaces it at launch with one\ncompiled from `seccompProject`.",
+    "merge": "single",
+    "nixOption": false
+  },
+  {
+    "path": "seccompFixedFilters",
+    "type": {
+      "type": "list",
+      "of": {
+        "type": "string"
+      }
+    },
+    "default": [],
+    "required": false,
+    "doc": "The fixed filters, compiled, each installed after the tier's in\nthis order: the audit mask, the tty filter and, unless\n`seccomp.nestedSandbox`, the namespace mask.",
+    "merge": "ordered",
+    "nixOption": false
+  },
+  {
+    "path": "seccompProject",
+    "type": {
+      "type": "struct",
+      "fields": [
+        {
+          "path": "seccompProject.dump",
+          "type": {
+            "type": "string"
+          },
+          "default": null,
+          "required": true,
+          "doc": "The file of the groups systemd lists, as `systemd-analyze\nsyscall-filter` prints them: what `@known` and every `@group` in a\nproject's lines mean.",
+          "merge": "single",
+          "nixOption": false
+        },
+        {
+          "path": "seccompProject.names",
+          "type": {
+            "type": "string"
+          },
+          "default": null,
+          "required": true,
+          "doc": "The file of the declaration's own names -- its tier, its\nloosenings, `allow`, and `deny` as `-name` -- which a project's\nlines apply to.",
+          "merge": "single",
+          "nixOption": false
+        },
+        {
+          "path": "seccompProject.deny",
+          "type": {
+            "type": "string"
+          },
+          "default": null,
+          "required": true,
+          "doc": "What a call in `@known` the filter does not allow gets: an errno's\nnumber (`1`, `13` or `38`, for `seccomp.errno`), or `log` for\n`seccomp.log`.",
+          "merge": "single",
+          "nixOption": false
+        }
+      ],
+      "nullable": true
+    },
+    "default": null,
+    "required": false,
+    "doc": "What a project's policy is compiled against, at launch, by\n`flong-seccomp project DUMP NAMES DENY DIR`; null when\n`seccompPolicy` is empty, and nothing is compiled.",
+    "merge": "single",
     "nixOption": false
   }
 ]

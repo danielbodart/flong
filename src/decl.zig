@@ -175,7 +175,8 @@ pub const Declaration = struct {
 
     /// Commands run as the caller after a session ends, in order, to
     /// release whatever `postStart` made outside it. `$machine` is in the
-    /// environment, and nothing else is.
+    /// environment, and nothing else is; nothing follows a command's own
+    /// arguments.
     ///
     /// They run on two paths: from the launcher once the session has
     /// stopped, and -- for a session whose launcher was SIGKILLed --
@@ -360,11 +361,43 @@ pub const Declaration = struct {
     /// launch sorts them, parents first, so their order does not matter.
     containerMounts: []const ContainerMount = &.{},
 
+    /// The declaration's own name, `<name>` in `flong.<name>`: what every
+    /// refusal the launch makes starts with, `<name>: ...`, and the name
+    /// of its command.
+    name: []const u8,
+
+    /// The program that runs `command` inside the session, as `user`: it
+    /// takes the workspace, changes into it, sources the container's
+    /// `/etc/set-environment` and execs `command` with the launcher's
+    /// arguments after it. module.nix builds it from `command`
+    /// (`mkPayload`); the launch hands it to `flong init` as the payload.
+    payload: []const u8,
+
+    /// The compiled filter of `seccomp`'s tier, its loosenings, `allow`
+    /// and `deny`, installed first; null when `seccomp.tier` is null. A
+    /// project's policy (`seccompPolicy`) replaces it at launch with one
+    /// compiled from `seccompProject`.
+    seccompTierFilter: ?[]const u8 = null,
+
+    /// The fixed filters, compiled, each installed after the tier's in
+    /// this order: the audit mask, the tty filter and, unless
+    /// `seccomp.nestedSandbox`, the namespace mask.
+    seccompFixedFilters: []const []const u8 = &.{},
+
+    /// What a project's policy is compiled against, at launch, by
+    /// `flong-seccomp project DUMP NAMES DENY DIR`; null when
+    /// `seccompPolicy` is empty, and nothing is compiled.
+    seccompProject: ?SeccompProject = null,
+
     /// The fields Nix works out rather than takes as options, in
     /// declaration order: `decl-options.json` lists them with
     /// `nixOption` false, and module.nix generates no option for them.
     /// `container` keeps an option, written by hand in module.nix.
-    pub const computed = [_][]const u8{ "container", "closure", "cuid", "cgid", "steps8", "containerMounts" };
+    pub const computed = [_][]const u8{
+        "container",       "closure", "cuid",    "cgid",              "steps8",
+        "containerMounts", "name",    "payload", "seccompTierFilter", "seccompFixedFilters",
+        "seccompProject",
+    };
 
     /// The strings that must match a pattern (Nix's `strMatching`), by
     /// field; a list's pattern is its elements'.
@@ -553,6 +586,24 @@ pub const ContainerMount = struct {
 
 pub const MountKind = enum { bind_ro, bind_rw, dev, tmpfs };
 
+/// `seccompProject`: the arguments of `flong-seccomp project` other than
+/// its cache directory, which the launch names. The compiler itself is
+/// compiled into flong, never named here.
+pub const SeccompProject = struct {
+    /// The file of the groups systemd lists, as `systemd-analyze
+    /// syscall-filter` prints them: what `@known` and every `@group` in a
+    /// project's lines mean.
+    dump: []const u8,
+    /// The file of the declaration's own names -- its tier, its
+    /// loosenings, `allow`, and `deny` as `-name` -- which a project's
+    /// lines apply to.
+    names: []const u8,
+    /// What a call in `@known` the filter does not allow gets: an errno's
+    /// number (`1`, `13` or `38`, for `seccomp.errno`), or `log` for
+    /// `seccomp.log`.
+    deny: []const u8,
+};
+
 /// The largest declaration `load` reads. A rendered one is a few
 /// kilobytes; the bound is on what a caller can make the launcher allocate.
 pub const max_bytes = 1 << 20;
@@ -678,6 +729,15 @@ const full =
     \\        .{ .kind = .tmpfs, .dest = "/scratch", .mode = "1777", .size = "64m" },
     \\        .{ .kind = .dev, .dest = "/dev/fuse", .src = "/dev/fuse", .mode = "rwm" },
     \\    },
+    \\    .name = "agent-trusted",
+    \\    .payload = "/nix/store/x-payload/bin/flong-payload-agent-trusted",
+    \\    .seccompTierFilter = "/nix/store/x-tier/flong-seccomp.bpf",
+    \\    .seccompFixedFilters = .{ "/nix/store/x-audit.bpf", "/nix/store/x-tty.bpf" },
+    \\    .seccompProject = .{
+    \\        .dump = "/nix/store/x-flong-seccomp-groups",
+    \\        .names = "/nix/store/x-flong-seccomp-names",
+    \\        .deny = "log",
+    \\    },
     \\}
 ;
 
@@ -691,6 +751,8 @@ const minimal =
     \\    .cuid = 1000,
     \\    .cgid = 100,
     \\    .steps8 = "0123abcd",
+    \\    .name = "agent",
+    \\    .payload = "/nix/store/x-payload/bin/flong-payload-agent",
     \\}
 ;
 
@@ -795,7 +857,7 @@ test "an unknown field is refused at its line" {
 
     // A Nix name translated, the way STANDALONE.md forbids.
     const r = try refusal(a, minimal[0 .. minimal.len - 1] ++ "    .post_start = .{},\n}");
-    try testing.expectEqual(9, r.line);
+    try testing.expectEqual(11, r.line);
     try testing.expectEqualStrings("unexpected field 'post_start'", r.text);
 
     // And one inside a section.
@@ -829,7 +891,7 @@ test "a wrong type is refused at its line" {
         "    .containerMounts = .{.{ .kind = .overlay, .dest = \"/x\" }},\n}",
     }) |line| {
         const r = try refusal(a, try std.mem.concatWithSentinel(a, u8, &.{ minimal[0 .. minimal.len - 1], line }, 0));
-        try testing.expectEqual(9, r.line);
+        try testing.expectEqual(11, r.line);
     }
 }
 

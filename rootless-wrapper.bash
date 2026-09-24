@@ -2,14 +2,19 @@
 # front of it (name, container, user, closure, cuid, cgid, closure8, steps8,
 # static, declared_dests, declared_binds, masks, mask_hosts, launcher,
 # cache_tool, flock, mkdir, payload, post_start, network, dns_forward4,
-# dns_forward6, the seccomp filters and tool, and the four snippets) and
+# dns_forward6, the seccomp filters and tool, and the caller's commands) and
 # writeShellApplication runs it under errexit, nounset and pipefail. It works
 # out what only the launch can know -- the caller, the workspace and binds,
 # the project's seccomp policy, the maps, the prepared root and the payload's
 # identity -- and execs flong launch with the spec.
 #
+# The caller's commands are arrays: workspace_command one command, or empty
+# for none; binds_commands, guard_commands and seccomp_policy_commands a
+# list of them, flat, as module.nix's flatCommands writes one -- each
+# command's length, then its words.
+#
 # The warm path of a default declaration runs bash builtins only: every fork
-# is on the cold path or in a snippet the declaration chose. So there is no
+# is on the cold path or in a command the declaration chose. So there is no
 # command substitution outside those, and every test is an `if`, because a
 # function or a list ending in a false test is a failure under errexit.
 #
@@ -32,7 +37,7 @@ if [[ -n ${FLONG_TRACE:-} ]]; then printf 'T %s wrapper-start\n' "${EPOCHREALTIM
 # it, and execv searches no PATH, so the path is made absolute.
 self=$0
 if [[ $self != /* ]]; then self=$PWD/$self; fi
-# Every snippet, the payload and postStart see the launcher's own arguments,
+# Every command, the payload and postStart see the launcher's own arguments,
 # and "$@" inside a function would be the function's.
 launcher_args=("$@")
 nl='
@@ -43,10 +48,20 @@ die() {
 	exit "${2:-1}"
 }
 
-# A caller's snippet, run as the caller, who is already who this runs as. The
-# same shell and options on every snippet, with the launcher's arguments.
+# run_as_caller N WORD... runs each command of a flat list in order, as the
+# caller, who is already who this runs as: its words, then the launcher's
+# arguments, exec'd as they are and never read by a shell. The first that
+# fails ends this shell, with 1: the wrapper's own, where a guard's refusal
+# refuses the launch, or a command substitution's, whose failure the caller
+# of it turns into the same exit.
 run_as_caller() {
-	"$BASH" -euo pipefail -c "$1" flong "${launcher_args[@]}"
+	local n
+	while (($# > 0)); do
+		n=$1
+		shift
+		"${@:1:n}" "${launcher_args[@]}" || exit 1
+		shift "$n"
+	done
 }
 
 # ---- the caller
@@ -87,7 +102,7 @@ state=$rt/flong
 # directory, by cd -P and $PWD rather than a realpath fork. The ./ keeps
 # `cd -P -- -` from meaning $OLDPWD, and the empty CDPATH keeps cd from
 # searching and printing. The caller's directory is restored, since the
-# snippets, the hooks and the launcher run in it.
+# commands, the hooks and the launcher run in it.
 cwd=$PWD
 canon() {
 	local p=$1
@@ -115,13 +130,12 @@ refuse_path() {
 	done
 }
 
-# The default "pwd" is the caller's directory, taken without a fork. Any other
-# snippet runs as the caller and prints the directory, with an optional :ro
-# or :rw.
-if [[ -z $workspace_snippet ]]; then
+# No command is the caller's directory, taken without a fork. A command runs
+# as the caller and prints the directory, with an optional :ro or :rw.
+if ((${#workspace_command[@]} == 0)); then
 	workspace_raw=$cwd
 else
-	workspace_raw=$(run_as_caller "$workspace_snippet") || exit 1
+	workspace_raw=$(run_as_caller "${#workspace_command[@]}" "${workspace_command[@]}") || exit 1
 fi
 case $workspace_raw in
 *:ro) workspace_mode=ro workspace_raw=${workspace_raw%:ro} ;;
@@ -140,10 +154,11 @@ export workspace workspace_mode
 # the workspace is. A path named twice is bound once, writable if either line
 # says so. A bind of the workspace itself is the workspace, which it makes
 # writable when it says rw, since the launcher refuses a destination twice.
+# The commands' outputs are concatenated, in order, in one substitution.
 bind_paths=() bind_modes=()
 binds=
-if [[ -n $binds_snippet ]]; then
-	raw=$(run_as_caller "$binds_snippet") || exit 1
+if ((${#binds_commands[@]} > 0)); then
+	raw=$(run_as_caller "${binds_commands[@]}") || exit 1
 	while IFS= read -r line; do
 		if [[ -z $line ]]; then continue; fi
 		case $line in
@@ -180,17 +195,17 @@ fi
 export binds
 
 # ---- the guard
-# It runs as the caller, so it is a consistency check and not a gate. It sees
-# $workspace, $workspace_mode and $binds as they will be mounted. A relaunch
-# runs it again.
-if [[ -n $guard_snippet ]]; then
-	run_as_caller "$guard_snippet" || exit 1
+# It runs as the caller, so it is a consistency check and not a gate. Each
+# command sees $workspace, $workspace_mode and $binds as they will be
+# mounted, and must pass, in order. A relaunch runs them again.
+if ((${#guard_commands[@]} > 0)); then
+	run_as_caller "${guard_commands[@]}"
 fi
 
 # ---- the project's seccomp policy
 # It runs as the caller after the guard, with what the guard sees, and prints
 # `allow X...` and `deny X...` lines that change the declaration's allow-list.
-# A failing snippet refuses the launch. A policy that says nothing compiles
+# A failing command refuses the launch. A policy that says nothing compiles
 # nothing, so the warm path stays builtins-only; one already seen is a hash
 # and a cached filter under $state/seccomp, where no session can write. A
 # relaunch runs it again, as it runs the guard. It sees $machine, the name
@@ -199,8 +214,8 @@ fi
 machine=$container-$$-$RANDOM
 export machine
 tier_bpf=$seccomp_tier
-if [[ -n $seccomp_policy_snippet ]]; then
-	policy=$(run_as_caller "$seccomp_policy_snippet") || exit 1
+if ((${#seccomp_policy_commands[@]} > 0)); then
+	policy=$(run_as_caller "${seccomp_policy_commands[@]}") || exit 1
 	if [[ -n ${policy//[[:space:]]/} ]]; then
 		tier_bpf=$("${seccomp_project[@]}" "$state/seccomp" <<<"$policy") ||
 			die "the project's seccomp policy was refused"
@@ -282,7 +297,7 @@ cache=$state/$container-$closure8-$steps8-$key
 P=$cache/prepared
 
 if [[ ! -d $P ]]; then
-	# Cold: the only path with forks besides the snippets, and the only one
+	# Cold: the only path with forks besides the commands, and the only one
 	# that collects garbage. mkdir is the header's, by store path, so a
 	# caller outside a NixOS login, or on a host whose running system lacks
 	# coreutils, still finds it. $rt exists, so only $state may need making;

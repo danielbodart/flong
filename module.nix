@@ -69,6 +69,43 @@ let
     '';
   };
 
+  # A HOOK IS A LIST OF COMMANDS, each an argument list run as it is, never
+  # read by a shell. Bash has no array of arrays, so a list goes into one as
+  # a flat run of words: each command's length, then its words. A count,
+  # not a separator, because a word may hold any byte a Nix string can.
+  flatCommands = cmds: lib.concatMap (cmd: [ (toString (lib.length cmd)) ] ++ cmd) cmds;
+
+  # postStart and postStop are ordered lists of commands, and the launcher's
+  # spec names one program for each, so each list is composed into ONE
+  # program here: it runs the commands in order, each with the hook's
+  # environment and the hook's arguments after its own, and stops at the
+  # first that fails, exiting with its status. Temporary: S3 moves the list
+  # into flong launch itself (STANDALONE.md).
+  #
+  # postStart's arguments are the launcher's. postStop's one argument is the
+  # session's name, which the launcher and the sweeper pass: it is exported
+  # as $machine, and a postStop command gets no arguments of its own, since
+  # on the sweeper's path the name is all that survives. `path` is on PATH
+  # for both, as it is for every hook.
+  mkHookProgram = name: kind: c: pkgs.writeShellApplication {
+    name = "flong-${kind}-${name}";
+    runtimeInputs = [ pkgs.coreutils pkgs.util-linux ] ++ c.path;
+    text = ''
+      ${lib.optionalString (kind == "poststop") ''
+        export machine=$1
+        set --
+      ''}
+      # shellcheck disable=SC2016,SC2054
+      commands=(${lib.escapeShellArgs (flatCommands (if kind == "poststop" then c.postStop else c.postStart))})
+      i=0
+      while ((i < ''${#commands[@]})); do
+        n=''${commands[i]}
+        "''${commands[@]:i+1:n}" "$@" || exit
+        i=$((i + 1 + n))
+      done
+    '';
+  };
+
   # A declared tmpfs entry is written for the container module, which hands
   # it to nspawn as a --tmpfs argument: PATH[:OPTIONS], where the path may
   # escape a ':' or a '\' with a backslash. The path is needed on its own,
@@ -519,13 +556,116 @@ let
   # bwrap ran under 16.
   nestedUserNamespaces = 128;
 
+  # A declaration's compiled seccomp filters, as store paths: the tier's (null
+  # with no tier), the fixed ones in the order they are installed, and what
+  # `flong-seccomp project` compiles a project's policy against (null with no
+  # seccompPolicy, or no tier for it to act on, which an assertion refuses).
+  # The wrapper's header and the rendered declaration both take them from
+  # here.
+  seccompFiltersOf = c:
+    let s = c.seccomp; in
+    {
+      tier = if s.tier == null then null else "${seccomp.filterFor s}";
+      fixed = map toString ([ seccomp.fixed.audit seccomp.fixed.tty ]
+        ++ lib.optional (! s.nestedSandbox) seccomp.fixed.nsmask);
+      project = if c.seccompPolicy == [ ] || s.tier == null then null else {
+        dump = "${seccomp.dump}";
+        names = "${seccomp.namesFor s}";
+        deny = seccomp.deny s;
+      };
+    };
+
+  # THE DECLARATION AS DATA: `flong.<name>` as the value src/decl.zig's
+  # Declaration types, field for field under the option's own name, and the
+  # computed fields beside them (Declaration.computed). Rendered to ZON by
+  # nix/to-zon.nix and installed as /etc/flong/<name>.zon.
+  toZon = import ./nix/to-zon.nix { inherit lib; };
+
+  declValueOf = name: c:
+    let
+      d = declarationOf name c;
+      inherit (d) declared;
+      l = c.limits;
+      f = seccompFiltersOf c;
+      # decl.MemSize and decl.Tasks: `infinity` a tag, a number or a size
+      # the union's other fields.
+      memSize = v:
+        if v == null then null
+        else if v == "infinity" then toZon.tag "infinity"
+        else if builtins.isInt v then { bytes = v; }
+        else { size = v; };
+      tasks = v:
+        if v == null then null
+        else if v == "infinity" then toZon.tag "infinity"
+        else { count = v; };
+    in
+    {
+      inherit (c) user command workspace binds guard postStart postStop masks protect seccompPolicy;
+      network = if c.network == null then null else {
+        forwardPorts =
+          if c.network.forwardPorts == "auto" then toZon.tag "auto"
+          else {
+            ports = map (p: { inherit (p) protocol hostPort containerPort; }) c.network.forwardPorts;
+          };
+        inherit (c.network) hostLoopbackToSession hostPorts;
+      };
+      overlays = lib.mapAttrsToList (target: lower: { inherit target; lower = toString lower; }) c.overlays;
+      limits = {
+        MemoryMax = memSize l.MemoryMax;
+        MemoryHigh = memSize l.MemoryHigh;
+        MemorySwapMax = memSize l.MemorySwapMax;
+        TasksMax = tasks l.TasksMax;
+        inherit (l) CPUQuota CPUWeight oomGroup;
+      };
+      seccomp = { inherit (c.seccomp) tier debug nestedSandbox allow deny errno log; };
+
+      # Computed.
+      inherit (c) container;
+      closure = "${declared.path}";
+      inherit (d) cuid cgid;
+      inherit steps8 name;
+      containerMounts =
+        lib.mapAttrsToList
+          (_: m: {
+            kind = if m.isReadOnly then "bind_ro" else "bind_rw";
+            dest = m.mountPoint;
+            src = if m.hostPath == null then m.mountPoint else m.hostPath;
+          })
+          declared.bindMounts
+        ++ map
+          (t: {
+            kind = "tmpfs";
+            dest = t.path;
+            inherit (t) mode;
+            size = if t.size == "" then null else t.size;
+            ownerUser = t.owner == "user";
+          })
+          d.tmpfs
+        ++ map (x: { kind = "dev"; dest = x.node; src = x.node; mode = x.modifier; }) d.devices;
+      payload = lib.getExe (mkPayload name c);
+      seccompTierFilter = f.tier;
+      seccompFixedFilters = f.fixed;
+      seccompProject = f.project;
+    };
+
+  # The rendered file, /etc/flong/<name>.zon.
+  declFileOf = name: c: pkgs.writeTextFile {
+    name = "flong-${name}.zon";
+    text = toZon.toZON toZon.enumPaths (declValueOf name c);
+    # S2 chunk B: `flong check "$target"` goes here, so that a declaration
+    # flong refuses fails the build with its line and column. Until then the
+    # decl-render check (tests/decl-render.nix) parses the test
+    # declarations' files with src/decl.zig's own parser.
+    checkPhase = "";
+  };
+
   # THE LAUNCHER: a header of assignments, generated here, then
   # rootless-wrapper.bash, the same text for every declaration. The header is
   # the only place a declaration reaches bash, and every value in it is
-  # quoted, so a name, a path or a snippet is data there and never code. It
-  # runs nothing and expands nothing; the body decides what runs.
+  # quoted, so a name, a path or a command's word is data there and never
+  # code. It runs nothing and expands nothing; the body decides what runs.
   #
-  # `c.path` is on PATH for the caller's snippets only. The body calls its
+  # `c.path` is on PATH for the caller's commands only. The body calls its
   # own tools by the store paths the header gives it.
   mkLauncher = name: c:
     let
@@ -535,42 +675,16 @@ let
       qs = lib.escapeShellArgs;
       closure = "${declared.path}";
       s = c.seccomp;
+      f = seccompFiltersOf c;
 
-      # TEMPORARY (S2 chunk C; chunk D replaces it, with the wrapper running
-      # the commands itself): the hooks are command lists now, and the
-      # wrapper still takes shell. Each command becomes one line of it, run
-      # with the arguments the snippet was (the launcher's, in "$@"; none
-      # for postStop, whose `$1` is the machine) and under the snippet's
-      # `set -euo pipefail`, so a failing one ends the rest, as a guard's or
-      # a policy's must. The last is exec'd, so a one-command hook is the
-      # process it was when it was the snippet. An empty list is an empty
-      # snippet, which runs nothing, as "" did.
-      hookScript = withArgs: cmds: lib.concatImapStrings
-        (i: cmd: "${lib.optionalString (i == lib.length cmds) "exec "}${qs cmd}${lib.optionalString withArgs " \"$@\""}\n") cmds;
-
-      # The hook programs, rather than snippets spliced into the wrapper,
-      # because the launcher runs them with the environment it gives them:
-      # shellcheck cannot see where postStart's $leader, $netns or
-      # $workspace come from, so SC2154 is off there. postStop is not always
-      # run by THIS launcher either: a SIGKILLed launcher's session is
-      # released by the holder's sweeper, which runs the program the
-      # session's record names -- a superseded generation's included, whose
-      # code this launcher no longer carries.
-      postStartScript = pkgs.writeShellApplication {
-        name = "flong-poststart-${name}";
-        runtimeInputs = [ pkgs.coreutils pkgs.util-linux ] ++ c.path;
-        excludeShellChecks = [ "SC2154" ];
-        text = hookScript true c.postStart;
-      };
-      postStopScript = pkgs.writeShellApplication {
-        name = "flong-poststop-${name}";
-        runtimeInputs = [ pkgs.coreutils pkgs.util-linux ] ++ c.path;
-        text = ''
-          # Exported, so a helper the snippet calls sees it as well.
-          export machine=$1
-          ${hookScript false c.postStop}
-        '';
-      };
+      # The hook programs the launcher's spec names, each composed of its
+      # list of commands (mkHookProgram). postStop is not always run by THIS
+      # launcher: a SIGKILLed launcher's session is released by the holder's
+      # sweeper, which runs the program the session's record names -- a
+      # superseded generation's included, whose commands this launcher no
+      # longer carries.
+      postStartScript = mkHookProgram name "poststart" c;
+      postStopScript = mkHookProgram name "poststop" c;
 
       # systemd's names for the limits, as the cgroup files they are written
       # to. systemd spells unlimited `infinity` and the kernel `max`.
@@ -631,8 +745,8 @@ let
         "static" "declared_dests" "declared_binds" "masks" "mask_hosts"
         "launcher" "cache_tool" "flock" "mkdir" "payload" "post_start"
         "network" "dns_forward4" "dns_forward6"
-        "workspace_snippet" "binds_snippet" "guard_snippet"
-        "seccomp_tier" "seccomp_fixed" "seccomp_project" "seccomp_policy_snippet"
+        "workspace_command" "binds_commands" "guard_commands"
+        "seccomp_tier" "seccomp_fixed" "seccomp_project" "seccomp_policy_commands"
       ];
 
       # One group, so one directive covers it: a `$`, a quote, a backslash
@@ -664,14 +778,14 @@ let
         network=${if c.network == null then "0" else "1"}
         dns_forward4=${q dnsForward4}
         dns_forward6=${q dnsForward6}
-        workspace_snippet=${q (if c.workspace == null then "" else hookScript true [ c.workspace ])}
-        binds_snippet=${q (hookScript true c.binds)}
-        guard_snippet=${q (hookScript true c.guard)}
-        seccomp_tier=${q (if s.tier == null then "" else "${seccomp.filterFor s}")}
-        seccomp_fixed=(${qs ([ seccomp.fixed.audit seccomp.fixed.tty ] ++ lib.optional (! s.nestedSandbox) seccomp.fixed.nsmask)})
-        seccomp_project=(${qs (lib.optionals (c.seccompPolicy != [ ])
-          [ "${seccompCompiler}/bin/flong-seccomp" "project" "${seccomp.dump}" "${seccomp.namesFor s}" (seccomp.deny s) ])})
-        seccomp_policy_snippet=${q (hookScript true c.seccompPolicy)}
+        workspace_command=(${qs (if c.workspace == null then [ ] else c.workspace)})
+        binds_commands=(${qs (flatCommands c.binds)})
+        guard_commands=(${qs (flatCommands c.guard)})
+        seccomp_tier=${q (if f.tier == null then "" else f.tier)}
+        seccomp_fixed=(${qs f.fixed})
+        seccomp_project=(${qs (lib.optionals (f.project != null)
+          [ "${seccompCompiler}/bin/flong-seccomp" "project" f.project.dump f.project.names f.project.deny ])})
+        seccomp_policy_commands=(${qs (flatCommands c.seccompPolicy)})
         export -n ${lib.concatStringsSep " " names}
         }
       '';
@@ -1185,6 +1299,11 @@ in
   config = lib.mkIf (cfg != { }) {
     # The sessions' holder, in every user's manager.
     systemd.user.services.flong-sessions = holderUnit;
+
+    # Each declaration as src/decl.zig reads one: /etc/flong/<name>.zon.
+    environment.etc = lib.mapAttrs'
+      (n: c: lib.nameValuePair "flong/${n}.zon" { source = declFileOf n c; })
+      cfg;
 
     warnings = lib.concatLists (lib.mapAttrsToList warningsFor cfg);
 
