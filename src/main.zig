@@ -1,6 +1,6 @@
 //! flong's root (DESIGN.md, "The native launcher"): one static binary
 //! without libc, whose subcommands are the programs that were flong-launch,
-//! flong-init and flong-sweeper (STANDALONE.md, S1).
+//! flong-init and flong-sweeper (DESIGN.md, "One binary").
 //!
 //!   flong launch DECL.zon|NAME [-- ARGS...]
 //!   flong init GATE READY GROUPS TTY TRACE DIR -- COMMAND...
@@ -24,7 +24,7 @@
 //! argv from its word on, so its argv[0] is the word wherever it came from,
 //! and the kernel's own slots are what flong init rewrites for tini. A
 //! basename that is neither a subcommand nor "flong" is a declaration's
-//! name (STANDALONE.md, "The declaration's command"): the link runs what
+//! name (DESIGN.md, "The declaration's command"): the link runs what
 //! `flong launch NAME -- ARGS` does, NAME.zon from the directories
 //! launch/lookup.zig names, /etc/flong first.
 //!
@@ -124,7 +124,7 @@ const usage =
 ;
 
 /// `flong help`: the usage, then each subcommand, for a reader who has
-/// flong and not its source, nor Nix (STANDALONE.md, "Decided": `--help`
+/// flong and not its source, nor Nix (DESIGN.md, "The declaration": `--help`
 /// assumes no Nix store). The declaration's fields are `flong help
 /// decl`'s, from decl_docs.zig's walk, never here.
 const help_text = usage ++

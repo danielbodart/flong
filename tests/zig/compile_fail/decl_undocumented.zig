@@ -1,5 +1,5 @@
 // Must not compile: a declaration field with no doc comment, which is the
-// option's only description (STANDALONE.md, "The declaration"). The build
+// option's only description (DESIGN.md, "The declaration"). The build
 // harvests decl_undocumented/decl.zig in src/decl.zig's place.
 const std = @import("std");
 const decl_docs = @import("decl_docs");

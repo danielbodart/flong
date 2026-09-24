@@ -5,9 +5,9 @@
 //! protected paths made canonical (quirk 21). launch.zig's `launch` calls
 //! them in the C's order, one linear function; none of them decides that
 //! order. The part of the prologue that does rootless-wrapper.bash's work
-//! (launch/assemble.zig, STANDALONE.md, S3) shares three things here:
-//! exit_refused, relaunchSelf (the wrapper's `exec "$self"`) and
-//! kernelName (quirk 21's readlink, which launch/workspace.zig's canon
+//! (launch/assemble.zig, DESIGN.md, "Launch sequence") shares three
+//! things here: exit_refused, relaunchSelf (the wrapper's `exec "$self"`)
+//! and kernelName (quirk 21's readlink, which launch/workspace.zig's canon
 //! uses).
 //!
 //! A small deviation from the port's plan, which had flong-launch's
@@ -39,10 +39,10 @@ const path_max = sys.path_max;
 /// A launch that did not reach its payload (flong-launch.c:43-45).
 pub const exit_not_run = 125;
 /// A refusal of `flong launch DECL.zon`'s own prologue, the part that
-/// stands in for rootless-wrapper.bash (STANDALONE.md, S3): the wrapper's
-/// die (:41-44) printed "$name: <text>" and exited 1, and its callers
-/// assert both. Its modules (caller, workspace, cmd, binds, identity,
-/// prepare) say a refusal through msg with msg.prog set to the
+/// stands in for rootless-wrapper.bash (DESIGN.md, "Launch sequence"): the
+/// wrapper's die (:41-44) printed "$name: <text>" and exited 1, and its
+/// callers assert both. Its modules (caller, workspace, cmd, binds,
+/// identity, prepare) say a refusal through msg with msg.prog set to the
 /// declaration's name, and pass error.Reported up; the prologue exits
 /// with this. The launcher's own refusals, after it, keep "flong launch:"
 /// and 125.
@@ -148,7 +148,7 @@ pub fn relaunchSwept(
 /// wrapper's was: it execs this very binary, readlink(/proc/self/exe), with
 /// `argv`, the process's whole argv as the kernel gave it, argv[0]
 /// untouched, so a declaration's symlink name is looked up again
-/// (STANDALONE.md, "The declaration's command"), and with `envp`, the
+/// (DESIGN.md, "The declaration's command"), and with `envp`, the
 /// environment it started with. SIGPIPE's default is put back, and the
 /// mask `old_mask` when there is one, as relaunchSwept does (quirk 2). It
 /// returns only when it could not exec, having said why: error.Reported,

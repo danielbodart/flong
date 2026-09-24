@@ -5,10 +5,10 @@
 //! `flong launch DECL.zon|NAME` builds the spec in process from the
 //! declaration and what only the launch can know (launch/assemble.zig), and
 //! hands it to `validate` before anything is in the descriptor table
-//! (ordering checkpoint 1). Until STANDALONE.md's S3 the spec was
-//! rootless-wrapper.bash's argv, a sequence of keywords each followed by
-//! its fields; that parser went with the wrapper, and its checks are
-//! `validate`'s, run over the value.
+//! (ordering checkpoint 1). Until STANDALONE.md's phase S3 (in git at
+//! bed8750) the spec was rootless-wrapper.bash's argv, a sequence of
+//! keywords each followed by its fields; that parser went with the wrapper,
+//! and its checks are `validate`'s, run over the value.
 //!
 //! Every refusal names the field in the words the argv spec used for it
 //! (`uidmap`, `user's home`, `mount bind-ro source`, `post-stop`...), since

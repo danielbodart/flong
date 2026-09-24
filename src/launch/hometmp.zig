@@ -1,6 +1,6 @@
 //! hometmp.zig: whether $home/tmp gets a private tmpfs
 //! (rootless-wrapper.bash:362-374), for `flong launch`'s prologue
-//! (STANDALONE.md, "flong launch DECL.zon -- ARGS"). Pure: the paths are
+//! (DESIGN.md, "Launch sequence"). Pure: the paths are
 //! values.
 //!
 //! A private tmpfs, unless it would land on the host through a bind, where

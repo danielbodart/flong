@@ -57,8 +57,10 @@ On the warm path the prologue forks nothing but the commands the
 declaration chose, as the bash wrapper, whose every test was a builtin, did
 before it. A bash launcher measured 61 ms and a python one 106 ms, against
 the C launcher's 19 ms, which is why everything after the spec was native
-code, and why the prologue is now too (STANDALONE.md, S3). The Zig launcher that replaced the C is within the runs' spread of it
-(`packages.bench`, [What the port measured](#what-the-port-measured)).
+code, and why the prologue is now too. The Zig launcher that replaced the C
+is within the runs' spread of it, and moving the wrapper's work into it took
+a warm launch from 14.3–15.3 ms to 11.2–11.9 ms (`packages.bench`, [What the
+port measured](#what-the-port-measured)).
 
 ## Data is data; shell is for what only launch knows
 
@@ -86,7 +88,8 @@ So nothing is declared by running a command:
   it, a project's own syscall policy) or is a judgement on this launch;
   `postStart` and `postStop` because they act on the session. Each is an
   argument list run as it is, with the launcher's arguments after its own
-  (STANDALONE.md, "Decided": snippets become commands), and all but
+  (they were shell snippets until the declaration became data; see [The
+  declaration](#the-declaration)), and all but
   `workspace` are lists of them, which a module such as frisket's adapter
   adds to: several modules' lists merge, ordered with `mkBefore` and
   `mkAfter`. flong runs no shell of its own; a hook that wants one names a
@@ -1370,16 +1373,17 @@ its default seccomp tier (`strict`), timed by a loop inside one
 `systemd-run --user` unit, so `systemd-run`'s own cost is in none of its
 numbers. nspawn (the root engine flong replaced, for comparison) launches from
 the test's root shell, and through `sudo -n` for its own row. The flong column
-is reproduced by `packages.bench`; the nspawn column is from the same bench at
+is reproduced by `packages.bench`, and is its run at b197e54, the first
+without the bash wrapper; the nspawn column is from the same bench at
 d48ad97, while both engines existed.
 
 | | flong | nspawn, root |
 |---|---|---|
-| no network | 14.6–14.9 ms | 97.0–97.2 ms |
+| no network | 11.2–11.9 ms | 97.0–97.2 ms |
 | no network, via sudo as a user | — | 101.8–107.5 ms |
-| pasta network + nft hook | 25.1–25.4 ms | 106.0–110.2 ms |
-| network + nft hook + fixed `forwardPorts`, waiting for pasta to free it | 45.8–46.1 ms | 107.4–108.4 ms |
-| cold (prepare included), no network | 160.3–163.6 ms | 308.7–316.2 ms |
+| pasta network + nft hook | 23.9–24.6 ms | 106.0–110.2 ms |
+| network + nft hook + fixed `forwardPorts`, waiting for pasta to free it | 42.1–45.0 ms | 107.4–108.4 ms |
+| cold (prepare included), no network | 156.9–162.9 ms | 308.7–316.2 ms |
 
 - The nft hook is the same rule for both: a table, an output chain and one
   reject rule, entered as U1's root for flong and as root for nspawn.
@@ -1389,9 +1393,12 @@ d48ad97, while both engines existed.
   the same footing. It includes at least one fork of `ss`, not measured
   apart.
 - Cold removes the prepared root before each launch, untimed.
-- p10–p90 for flong: no network 14.4–17.1 ms, network 24.5–28.4 ms, forwarded
-  port 39.9–55.0 ms, cold 157.2–170.6 ms. No launch failed. A fork and exec of
-  `true` took 1.2–1.4 ms in the same invocations.
+- p10–p90 for flong: no network 11.1–13.5 ms, network 23.2–28.6 ms, forwarded
+  port 37.8–53.0 ms, cold 154.7–167.6 ms. No launch failed. A fork and exec of
+  `true` took 1.3–1.4 ms in the same invocations.
+- With the bash wrapper in front (c83dcde), the same bench gave 14.3–15.3,
+  27.1–27.5, 47.0 and 167.3–170.3 ms ([What the port
+  measured](#what-the-port-measured)).
 
 Component costs are quoted in their sections, with their harness.
 
@@ -1401,23 +1408,21 @@ Two programs and the tests' fixtures, all Zig 0.15.2: `flong-seccomp`, the
 policy compiler, with its `expand`, `render` and `project` subcommands, which
 links libc through libseccomp; and `flong`, static, stripped and without
 libc, whose subcommands are `launch`, `init` (pid 1 in the session),
-`sweeper` (the holder unit's process), `version` and `help`. `src/main.zig`
-picks the subcommand from `argv[0]`'s basename, then from `argv[1]`, as
-busybox does, and makes no syscall doing it; a basename that is no
-subcommand is a declaration's name, which `flong launch` looks up
-(`src/launch/lookup.zig`: `/etc/flong`, then `$XDG_CONFIG_HOME/flong`, or
-`$HOME/.config/flong`; the system's first, so a caller's file never shadows
-a declaration the system installs), and `flong list` lists. Until the
-one binary (S1 of `STANDALONE.md`), `flong launch`, `flong init` and
-`flong sweeper` were three, `flong-launch`, `flong-init` and
-`flong-sweeper`, and the measurements below that name those are of the
-three. The programs `flong launch` runs (bwrap, pasta, its own binary as
+`sweeper` (the holder unit's process), `check`, `schema`, `list`, `version`
+and `help`. `src/main.zig` picks the subcommand from `argv[0]`'s basename,
+then from `argv[1]`, as busybox does, and makes no syscall doing it; a
+basename that is no subcommand is a declaration's name ([The declaration's
+command](#the-declarations-command)). Until the one binary ([One
+binary](#one-binary)), `flong launch`, `flong init` and `flong sweeper` were
+three, `flong-launch`, `flong-init` and `flong-sweeper`, and the
+measurements below that name those are of the three. The programs `flong
+launch` runs (bwrap, pasta, its own binary as
 `flong init`, `/run/wrappers/bin/newuidmap` and `newgidmap`) and the tini
 `flong init` execs are compiled in, as build options with no default
 (`-Dbwrap`, `-Dpasta`, `-Dself`, `-Dnewuidmap`, `-Dnewgidmap`, `-Dtini`;
 `build.zig`'s `LaunchPaths`), so no caller can point the launcher at
 another bwrap, and a build that forgets one fails. So are the two its
-prologue runs (STANDALONE.md, S3): `-Dcache`, the cache tool
+prologue runs: `-Dcache`, the cache tool
 (`cache.nix`), and `-Dseccomp`, `flong-seccomp`;
 `flong version` prints every one, `NAME=PATH` a line.
 
@@ -1431,7 +1436,13 @@ port was done and in git at e717355. `build.zig` and the modules the seccomp
 set is built from (`src/seccomp/`, `sys`, `fd`, `msg`, `errno`, `num`) still
 cite `ZIG.md` by section: editing them, even a comment, moves the seccomp
 set's store path and with it every project cache key (quirk 36), so they
-change with the next edit that moves it anyway.
+change with the next edit that moves it anyway. Likewise the phases S1 to
+S4, and the chunks of S2 (0, A to E) and S3, are those of the plan that made
+the three one binary, the declaration data and the bash wrapper Zig,
+`STANDALONE.md`, deleted when it landed and in git at bed8750; `build.zig`
+still cites it by section, for the same reason. `rootless-wrapper.bash`,
+which `src/launch/`'s comments cite by line, is in git until b197e54
+deleted it.
 
 ### Why Zig, and what it cost
 
@@ -1524,7 +1535,8 @@ measured](#what-the-port-measured):
 
 Measured on the development host (32 cores, kernel 6.18.51, Zig 0.15.2,
 x86_64, ReleaseSafe) unless named; the code cites these rows. The
-binary sizes and closures are the tree's after L5; the timings are L4's.
+binary sizes and closures are the tree's after L5 and the timings L4's,
+unless a row names its phase or commit.
 
 | what | value |
 |---|---|
@@ -1546,11 +1558,135 @@ binary sizes and closures are the tree's after L5; the timings are L4's.
 | a sweeper's `waitEmpty` | can wait forever when another process of the user removes the cgroup inside the kernel's 10 ms `cgroup.events` delay, as the C could; kept |
 | derivations, `nix build --rebuild`, empty Zig cache | seccomp 10.9–11.6 s, launcher 19.6 s, fixtures 8.5–9.3 s, each bit-identical; `native-test` 15.7 s Debug, 26.9 s ReleaseSafe; `native-analyze` 76–88 s; `native-lint` 4.5–8 s; `cross-aarch64` 7–19 s |
 | `flong`, S1 | 513,200 bytes, stripped and static as the three were, against their sum of 629,032: the shared modules, std and the start code are in it once |
+| `flong`, S2 to S4 | 521,976 bytes before `flong check` and `flong schema`, 1,254,968 with them (the ZON parser, the schema's walk and its doc comments); 1,474,040 with the prologue beside the argv spec (41e2607), 1,398,936 once the argv spec went (b197e54); 1,417,640 with `flong help` (bed8750). Its closure, which holds the cache tool and flong-seccomp it runs, is 112,295,408 bytes |
+| `packages.bench`, before and after S3, medians of 20 over three runs, ms | the bash wrapper (c83dcde): no network 14.3–15.3, pasta and an nft hook 27.1–27.5, a forwarded port 47.0, cold 167.3–170.3; `flong launch NAME` (41e2607): 11.0–11.4, 23.4–24.9, 41.9–43.0, 156.7–158.7; with the wrapper gone (b197e54): 11.2–11.9, 23.9–24.6, 42.1–45.0, 156.9–162.9 |
+| `flong check` | a megabyte of masks and binds in about a second, every lookup a search of a sorted list; before `decl.notZon`, a file of 100,000 `.{` or `-` overflowed `std.zon.parse`'s stack and ended it with SIGSEGV |
 | binaries, stripped | flong-launch 446,448 bytes, flong-init 40,312, flong-sweeper 142,272, static, no INTERP, `PT_GNU_STACK` size 0; flong-seccomp 144,784 (libc, libseccomp); fixtures bpfdump 43,872, syscall-probe 22,104, swapper 20,584, ioctl-probe 19,080 |
 | closures | the launcher set 44,256,760 bytes (54,318,016 with the C, before phase 3); flong-seccomp 38,057,520 (48,454,728 with the C); the fixtures 38,019,032 |
 | `packages.bench`, C against Zig, medians of 20 over three runs, ms | flong-init: no network C 31.0–31.8, Zig 29.5–33.5; flong-launch (6acfa9b against a103e76's tree): no network 32.5–33.6 against 30.8–34.0, pasta and an nft hook 53.1–60.1 against 52.5–59.3, a forwarded port 72.0–79.0 against 71.4–73.9, cold 355.7–358.2 against 374.7–382.0, and in an earlier pair cold 368.2–379.4 against 352.9–374.0 |
 | a project's policy compiled at launch | cold 31.6 ms, warm 3.4 ms (the bash: 85.8 and 42.4 ms), medians of 21 on the host |
 | CI | one `nix flake check` job: 5 min 55 s before the port, 7 min 49 s to 14 min 53 s during it; a matrix of one job per check: see [Why Zig](#why-zig-and-what-it-cost) |
+
+### One binary
+
+The libc-free programs became one (2026-09-24), so that flong is one static
+file with no libc, which a release outside Nix can ship as it is, and the
+shared modules, std and the start code are in it once. The seccomp
+compiler stays a program of its own, `flong-seccomp`, for two reasons:
+
+- **It links glibc**, for libseccomp and its byte-identical filters ([Why
+  Zig](#why-zig-and-what-it-cost)). In `flong` it would put libc's start
+  code into every session's pid 1, which undoes "no syscall before `main`"
+  ([What the port measured](#what-the-port-measured): start code).
+- **The project cache key hashes its store path** (quirk 36). Apart, that
+  path moves only with the seccomp set's own sources and the files every
+  set shares ([The build](#the-build)), so a launcher edit orphans no
+  project's cache.
+
+`flong init` reads its words after `init`, so each of the kernel's argv
+slots it reuses for tini's argv moved by one; `init.words` and
+`init.tiniArgv` are pure, and `tests/zig/init_test.zig` pins the slots.
+Messages say `flong launch:`, `flong init:` and `flong sweeper:`.
+
+**No compatibility layer.** flong's only consumers are its own: chase,
+frisket and nix-config. A change of interface updates module.nix, the tests
+and those consumers together, and leaves no old-name link, no shim script
+and no translated field behind: anything left on an old interface fails
+loudly, so that it is fixed rather than carried. `flong-launch` and its
+siblings left no link behind, and a declaration that spells a field the
+old way is refused (`tests/golden/decl/an-unknown-field.zon`).
+
+### The declaration
+
+A declaration is a value of `src/decl.zig`'s `Declaration`, and its file is
+ZON, as capsper's configuration is. The static half of a session, what
+module.nix rendered into the bash wrapper's header, is one typed value
+with one parser:
+
+- **The type is the schema.** Each field is named as its Nix option,
+  camelCase and `MemoryMax` alike, with no translation. Its type is what
+  `std.zon.parse` can hold a file to: enums, `u16` ports, optionals, and a
+  tagged union where Nix has an either (`forwardPorts` is `.auto` or
+  `.{ .ports = ... }`, a memory size `.infinity`, `.{ .bytes = N }` or
+  `.{ .size = "8G" }`). What the parse cannot check, a type's `patterns`
+  and `ranges` say. An unknown field or a wrong type is a parse error at
+  its line and column. The computed fields (`Declaration.computed`: the
+  closure, the ids, the filters, `commandPath`, the hook programs) are
+  worked out by module.nix from `containers.<name>`; a configuration made
+  without Nix writes them itself.
+- **One description, the doc comment.** Each field's doc comment is its
+  only description, and a field without one does not compile
+  (`tests/zig/compile_fail/decl_undocumented.zig`).
+  `build/gen_decl_docs.zig` harvests them with `std.zig.Ast`, as capsper's
+  `gen_config_docs.zig` does, and `src/decl_docs.zig` walks the type into
+  three things: `decl-options.json` (`flong schema`: each field's path,
+  type, default, doc comment and merge kind), from which module.nix builds
+  every typed option with `builtins.fromJSON` (`nix/decl-options.nix`), so
+  there is no import from a derivation and the NixOS manual and
+  `nixos-option` read the same text; `flong help decl`; and
+  `docs/declaration.md`, its `--markdown`. The ordered sequences, the hooks
+  and the caller's commands, merge as ordered lists, so a module's
+  `mkBefore` and `mkAfter` still order them. `decl-options-fresh` and
+  `reference-fresh` fail on a stale file, and `nix run .#update-options`
+  rewrites both. Only the options Nix alone has (`container`, `path`,
+  `scopeConfig`, `launcher`) keep prose in module.nix.
+- **Rendered, not interpreted.** module.nix renders each declaration with
+  `nix/to-zon.nix`, adapted from capsper's, to `/etc/flong/<name>.zon`.
+  `flong launch` reads that file with the parser `flong check` judges it
+  with at build time, so the two cannot read it differently.
+- **One validator.** `flong check` (`src/check.zig`) runs in each
+  declaration file's derivation and replaced module.nix's assertions of
+  what the file says and `tests/golden/paths.txt`, the mirror that kept
+  them in step with the launcher's; a refused declaration fails
+  `nixos-rebuild` in its words ([Tests](#tests)). Assertions of NixOS
+  itself, a container or a user that exists, stay in Nix.
+- **The trust boundary does not move.** Any caller can run `flong launch`
+  with any file, as it could run the old launcher with any spec, so the
+  parser is a boundary: `decl.load` reads at most 1 MiB into one arena,
+  `decl.notZon` refuses a `{` past 32 deep, two `-` in a row and any token
+  no declaration holds before `std.zon.parse`'s recursion sees them, every
+  parse error is a refusal and never a panic, and `decl.parse` and
+  `check.validate` are fuzzed over a checked-in corpus
+  (`tests/zig/corpus/decl-parse/`).
+- **Commands, not snippets.** The hooks and the caller's commands were
+  shell text flong ran; each is now an argument list, and flong runs no
+  shell of its own ([Data is data](#data-is-data-shell-is-for-what-only-launch-knows)).
+- **The spec is a value.** `flong launch` does the wrapper's work in its
+  order (`src/launch/assemble.zig`) and hands the launch a `spec.Spec`
+  ([The input contract](#the-input-contract)). The argv spec, keywords such
+  as `mount`, `uidmap` and `keep-fd`, was an interface that existed only
+  because the wrapper was bash, and it went with the wrapper. Each step was
+  ported beside the bash, and a transition check (`tests/transition.nix`,
+  deleted with it) found the value spec, rendered as argv, the wrapper's for
+  every declaration of the basic and rootless tests over 13 caller-side
+  outcomes.
+
+`--help`, messages and paths assume no Nix store, for a release outside
+Nix, which is [PLAN.md](PLAN.md)'s.
+
+### The declaration's command
+
+Each declaration's command is a link, `NAME -> flong`, with no script
+(module.nix's `mkLauncher`). flong reads `argv[0]`'s basename, the name the
+caller typed, finds no subcommand by it, and does what `flong launch NAME
+-- ARGS` does, which is how the docs describe the link. A name is looked up
+(`src/launch/lookup.zig`) in `/etc/flong`, which module.nix fills through
+`environment.etc`, then in `$XDG_CONFIG_HOME/flong` (`$HOME/.config/flong`
+when that is unset or not absolute):
+
+- **The system's first**, so a declaration the system installs is the one
+  its name runs, whatever the caller's configuration holds.
+- **A fixed directory**, rather than a file beside the link in its store
+  path, so the lookup is obvious: `ls /etc/flong` lists every declaration,
+  `flong list` prints each name once as it runs and its file, `ls -l
+  $(command -v NAME)` shows the link, and no chain of links is followed.
+- **A missing one names every path looked for**, `flong: no declaration
+  "NAME" (looked for ...)`, and exits 2.
+- **Resolving by name moves no trust boundary**: a caller can run `flong
+  launch` with any file anyway.
+
+A relaunch execs `/proc/self/exe` with the launch's own argv, argv[0] as it
+came, so the lookup repeats (quirk 30).
 
 ### The build
 
@@ -1597,9 +1733,10 @@ build fail fetching it. After a `build.zig.zon` change, the hash is set to
 | `test` | unit and property tests (minish), Debug or ReleaseSafe with `-Drelease=true`; the fuzz targets with their corpus replayed first; the launch's pieces against stand-ins (`flong-fake-bwrap`, the spawn probe); needs `-Ddev=true` |
 | `test-libc` | Zig against what it ports: `errno.zig` against glibc, `num.zig` against `strtoull`, `scmp.zig` against `seccomp.h`, `cfmakeraw` against glibc's, the fixtures' number readers, `sys.O_TMPFILE` against `fcntl.h`, the hook's environment against `setenv`, and `abi` for the host |
 | `abi` | every kernel struct and constant of `sys.zig` against Zig's bundled headers through translate-c, x86_64 and aarch64, each asserting it read its own arch's; `-Dabi-plant` must fail it |
-| `compile-fail` | 14 files in `tests/zig/compile_fail/` that must fail, each with its message |
+| `compile-fail` | 15 files in `tests/zig/compile_fail/` that must fail, each with its message, one of them over a planted `decl.zig` missing a doc comment |
 | `lint` | `tools/fdlint.zig` over `src/` and `tests/zig/`, and over its planted files |
 | `fmt` | `zig fmt --check` |
+| `schema` | writes `decl-options.json` and `docs/declaration.md` from `src/decl.zig`, as `nix run .#update-options` does |
 | `analyze` | zwanzig over `src/`, and the 27 planted bugs of `tests/zig/analyze/bugs.zig` it must report, and no more; needs `-Ddev=true` |
 | `cross` | aarch64: flong (dummy paths) and the three static fixtures built, flong-seccomp and bpfdump compiled unlinked, `abi`'s half |
 | `integration`, `launch-driver`, `test-launch` | the drivers `checks.native` runs (`flong-walker`, `flong-proc`, `flong-tty`, `flong-launch-driver`) and the record writer against `tests/golden/records/`, built only by `tests/integration.nix` |
@@ -1636,8 +1773,9 @@ stop and decide, never update.
 
 **Running them.** `nix run .#gate` builds every x86_64 check through
 nix-fast-build (parallel evaluators, each check built as soon as it
-evaluates, those a binary cache has skipped), six evaluators by default,
-each restarted past 6 GiB, so one gate at a time on a machine. `nix run
+evaluates, those a binary cache has skipped), one evaluator per 10 GiB of
+the host's memory, each restarted past 6 GiB, so one gate at a time on a
+machine. `nix run
 .#gate-aarch64` evaluates aarch64's checks without building them. The dev
 shell has `zig_0_15`, libseccomp and strace, for `zig build test -Ddev=true`
 and the like. **CI** (`.github/workflows/ci.yml`) lists the checks, builds
@@ -1746,6 +1884,7 @@ ports.
 | `src/record.zig` | the state directory, records and `leader=`, liveness, the sweep, `postStop`, the watch |
 | `src/tty.zig` | the foreground wait, the pty relay or passthrough, raw mode, the watchdog, `^]^]^]`, the wait for bwrap |
 | `src/main.zig` | `flong`'s root: the dispatch, the start settings and the one panic handler; each subcommand's `main` is handed argv from its word on; `flong help`'s text |
+| `src/decl.zig`, `src/check.zig` | the declaration's type, its parse and `load`, and `notZon`; `flong check`, every refusal of a declaration |
 | `src/decl_docs.zig` | the walk of the declaration's type and doc comments: `flong schema` (`decl-options.json`) and `flong help decl` (`docs/declaration.md`, with `--markdown`) |
 | `src/mount.zig` | the mount helper, a fork body of `flong launch`'s: sources, the walker, masks, overlays, `/sys`, `/run` read-only; checkpoint 7 |
 | `src/launch.zig` | `flong launch`: `main` (its words), the declaration loaded and judged, `launch` (the prologue), `run` and `teardown`, the order of a launch; checkpoints 1, 2, 3, 5 and 6 |

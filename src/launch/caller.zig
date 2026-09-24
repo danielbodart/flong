@@ -1,6 +1,6 @@
 //! launch/caller.zig: the caller and the runtime directory
 //! (rootless-wrapper.bash:52-82), for `flong launch DECL.zon`'s prologue
-//! (STANDALONE.md, "`flong launch DECL.zon -- ARGS`": the caller, the
+//! (DESIGN.md, "Launch sequence": the caller, the
 //! runtime directory).
 //!
 //! In the wrapper's order: uid 0 refused; the caller's name from

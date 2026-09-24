@@ -1,5 +1,5 @@
 //! launch/subid.zig: the maps (rootless-wrapper.bash:234-275), for
-//! `flong launch` (STANDALONE.md, "`flong launch DECL.zon -- ARGS`": the
+//! `flong launch` (DESIGN.md, "Launch sequence": the
 //! maps). Two parts, both pure:
 //!
 //!   find      the caller's entry in /etc/subuid or /etc/subgid, as the

@@ -1,7 +1,7 @@
 //! gen_decl_docs.zig: the declaration's descriptions, harvested out of
 //! src/decl.zig at build time, as capsper's build/gen_config_docs.zig
-//! harvests its settings' (STANDALONE.md, "Decided": one source for every
-//! description).
+//! harvests its settings' (DESIGN.md, "The declaration": one description,
+//! the doc comment).
 //!
 //!   gen-decl-docs DECL.zig OUT.zig
 //!

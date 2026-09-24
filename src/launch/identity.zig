@@ -1,6 +1,6 @@
 //! launch/identity.zig: the payload's identity, from the prepared root
 //! (rootless-wrapper.bash:330-360), for `flong launch DECL.zon`'s
-//! prologue (STANDALONE.md, "`flong launch DECL.zon -- ARGS`": the
+//! prologue (DESIGN.md, "Launch sequence": the
 //! payload's identity).
 //!
 //!   open  $P/etc/passwd and $P/etc/group, read whole; or swept (:331-339)

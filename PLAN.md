@@ -3,12 +3,14 @@
 What is not built yet, in order. What is built, and why, is in
 [DESIGN.md](DESIGN.md).
 
-The native code is Zig; the port is done, and what it established is in
-DESIGN.md's [The native launcher](DESIGN.md#the-native-launcher). The next
-plan has its own file, [STANDALONE.md](STANDALONE.md): the
-libc-free programs become one `flong` binary, declarations become ZON
-checked by the same parser at build time and at launch, the bash wrapper
-goes, and later flong ships as a native binary that needs no Nix.
+The native code is Zig, the libc-free programs are one `flong` binary,
+declarations are ZON checked by the same parser at build time and at
+launch, and the bash wrapper is gone. What the port and that plan
+established is in DESIGN.md's [The native
+launcher](DESIGN.md#the-native-launcher), [One
+binary](DESIGN.md#one-binary) and [The
+declaration](DESIGN.md#the-declaration); the plan itself, `STANDALONE.md`,
+is in git at bed8750. What it left, a release outside Nix, is §5.
 
 ## 1. A uid range per session
 
@@ -63,7 +65,7 @@ must state it.
 
 If built: off by default, opt-in per launcher, refused in a session with a
 `postStart` hook. A read-only bind of `/nix/var/nix/daemon-socket` (a
-`mount bind-ro` in the spec), and a read-write bind of a caller-owned profile
+`bind-ro` mount in the spec), and a read-write bind of a caller-owned profile
 directory kept per container, such as
 `$XDG_STATE_HOME/flong/<container>/profiles`, at `/nix/var/nix/profiles`,
 plus the matching `gcroots`, created by the launcher as the caller so a warm
@@ -74,6 +76,21 @@ toolchain survives.
 - **frisket's steer and connect as one process.** Each re-executes under
   `nsenter --user --net`, and frisket's hook costs about 38 ms of each
   launch. One nsenter'd process doing both cuts into that.
+- **The seccomp set's own build file.** flong-seccomp's store path is part
+  of every project cache key (quirk 36), and its fileset includes
+  `build.zig`, so an edit to `build.zig` for the launcher alone moves every
+  project's key and orphans its cache, as S1's and S3's edits did. Give
+  the seccomp set a build file of its own, so its path moves only with its
+  own sources.
+- **The hook programs.** `flong-poststart-<name>` and
+  `flong-poststop-<name>` (the declaration's `postStartProgram` and
+  `postStopProgram`) exist only to put `path` on `PATH` and to drop the
+  machine name the record appends to a `postStop` command. They can go once
+  the launch and the sweeper put the declaration's `commandPath` on `PATH`
+  themselves.
+- **flong's size.** flong grew from 513,200 bytes as one binary (S1) to
+  1,417,640 with the ZON parser, the schema's walk and the doc comments'
+  text, and it is every session's pid 1, as `flong init`.
 
 Only if someone asks:
 
@@ -85,6 +102,41 @@ Only if someone asks:
   not pasta, to be the one killed.
 - **`hostGroups`**, for a consumer that needs a group-gated device without a
   logind ACL. Audio works through the ACL while the caller holds the seat.
+
+## 5. Outside Nix, only if pursued
+
+Nix stays the first-class way to use flong, and nothing here may make the
+Nix path worse. `--help`, messages and paths already assume no Nix store,
+and the declaration is documented (`docs/declaration.md`). What a native
+release needs that Nix supplies today:
+
+- **Paths compiled in.** `-Dbwrap`, `-Dpasta`, `-Dtini`, `-Dnewuidmap`,
+  `-Dnewgidmap`, `-Dcache` and `-Dseccomp` (DESIGN.md, [The native
+  launcher](DESIGN.md#the-native-launcher)) become optional fields of the
+  configuration. A missing one is looked up on `PATH` at `flong check`'s
+  time, never silently at launch.
+- **The root.** A session's root is a NixOS container closure and a
+  prepared root (`cache.nix`: `prepareInner`, `cacheTool`). Outside Nix a
+  root must come from somewhere else: a directory, an image, or the host
+  read-only. It is decided first, and only if a release outside Nix is
+  pursued, by whoever that release is for; the current lean is a
+  directory.
+- **The sweeper's unit.** A documented systemd user unit running `flong
+  sweeper %t/flong`, as module.nix's `flong-sessions` unit does.
+- **Seccomp.** `flong-seccomp` could ship static against musl and a static
+  libseccomp: it is not pid 1, so libc's start code is acceptable there.
+  The BPF golden files (`tests/golden/seccomp/*.bpf`) prove the bytes
+  unchanged.
+- **Release artifacts.** CI builds `flong` and `flong-seccomp` for x86_64
+  and aarch64 (`cross-aarch64` already cross-builds them) and attaches them
+  to the release each trunk push publishes (`.github/workflows/ci.yml`),
+  with a README section on using flong without Nix.
+
+More of the tooling may move into Zig over time: the prepared root and the
+cache tool are bash, which `flong launch` calls unchanged. The direction is
+that the fiddly parts, the ones easy to get wrong that nobody should need to
+edit, become typed code in the binary; each move is its own decision, made
+when it is due.
 
 ## Tests
 

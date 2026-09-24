@@ -1,4 +1,4 @@
-//! launch/lookup.zig: where a declaration's name leads (STANDALONE.md,
+//! launch/lookup.zig: where a declaration's name leads (DESIGN.md,
 //! "The declaration's command"). A declaration's command is a link
 //! `NAME -> flong`, and `flong launch NAME` does what the link does: flong
 //! loads NAME.zon from the first of these directories that has it.
@@ -14,8 +14,8 @@
 //! installs is the one its name runs whatever the caller's configuration
 //! holds; a caller's file of the same name is shadowed, and `flong list`
 //! does not show it. Nothing here moves a trust boundary: a caller can
-//! run `flong launch` with any file anyway (STANDALONE.md, "The trust
-//! boundary does not move").
+//! run `flong launch` with any file anyway (DESIGN.md, "The declaration":
+//! the trust boundary does not move).
 //!
 //! A name is a file name: a basename, with no '/', neither "." nor "..".
 //! One that is none of the directories' says every path it looked for.

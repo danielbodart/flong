@@ -1,6 +1,6 @@
 //! launch/binds.zig: the caller's binds (rootless-wrapper.bash:138-180),
-//! for `flong launch DECL.zon`'s prologue (STANDALONE.md, "`flong launch
-//! DECL.zon -- ARGS`": the caller's binds), from the binds commands'
+//! for `flong launch DECL.zon`'s prologue (DESIGN.md, "Launch
+//! sequence": the caller's binds), from the binds commands'
 //! output (cmd.outputOf).
 //!
 //! One PATH (read-only), PATH:ro or PATH:rw per line, each resolved and

@@ -1,6 +1,6 @@
 //! launch/groups.zig: the payload's groups, from the prepared root's
 //! /etc/group (rootless-wrapper.bash:353-358), for `flong launch`
-//! (STANDALONE.md, "`flong launch DECL.zon -- ARGS`": the payload's
+//! (DESIGN.md, "Launch sequence": the payload's
 //! identity). flong-init sets exactly these, so the caller's host groups
 //! never reach the payload.
 //!

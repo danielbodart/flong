@@ -1,7 +1,7 @@
 //! resolv.zig: a networked session's /etc/resolv.conf and pasta's
 //! --dns-forward words, from the host's (rootless-wrapper.bash:404-442),
-//! for `flong launch`'s prologue (STANDALONE.md, "flong launch DECL.zon --
-//! ARGS"). Pure: the host's file is text the caller read, once, as pasta
+//! for `flong launch`'s prologue (DESIGN.md, "Launch
+//! sequence"). Pure: the host's file is text the caller read, once, as pasta
 //! reads it once, so a host that moves networks keeps a live session on
 //! the old resolver (:410-411). A file the caller cannot read is the empty
 //! text (:414).

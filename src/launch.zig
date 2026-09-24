@@ -4,8 +4,9 @@
 //! ARGS...]`, or a declaration's link `NAME -> flong` (src/main.zig), loads
 //! the declaration and judges it as flong check does; launch/assemble.zig
 //! then does, in its order, what rootless-wrapper.bash did before
-//! STANDALONE.md's S3 and builds the spec as a value (DESIGN.md, "The
-//! input contract"). `launch` is ordering checkpoint 1, that prologue and
+//! STANDALONE.md's phase S3 (in git at bed8750), and builds the spec as a
+//! value (DESIGN.md, "The input contract"). `launch` is ordering
+//! checkpoint 1, that prologue and
 //! steps 1-5 of DESIGN.md's "The launch, in order", then
 //! `proc.exit(teardown(&l, run(&l)))`: `run` is steps 6-18, returning at
 //! the first failure, and `teardown` step 19, undoing whatever exists
@@ -172,7 +173,7 @@ fn isFile(w: []const u8) bool {
     return std.mem.indexOfScalar(u8, w, '/') != null or std.mem.endsWith(u8, w, ".zon");
 }
 
-/// A declaration's link, `NAME -> flong` (STANDALONE.md, "The
+/// A declaration's link, `NAME -> flong` (DESIGN.md, "The
 /// declaration's command"): argv[0]'s basename is its name, and every
 /// argument after it is the launcher's, as `flong launch NAME -- ARGS`.
 pub fn named(argv: []const [*:0]const u8, name: []const u8, envp: []const [*:0]const u8) noreturn {

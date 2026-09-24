@@ -1,4 +1,4 @@
-// A Nix name translated, which STANDALONE.md forbids.
+// A Nix name translated, which no compatibility layer allows.
 .{
     .user = "u",
     .command = .{"true"},

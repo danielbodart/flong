@@ -1,7 +1,7 @@
 # The prepared root's two programs, moved out of module.nix unchanged so
 # that native.nix can compile the cache tool's path into flong (-Dcache,
-# STANDALONE.md, S3) while module.nix names the same store paths: steps8,
-# the cache's name, is a hash of cacheTool's path.
+# DESIGN.md, "The native launcher") while module.nix names the same store
+# paths: steps8, the cache's name, is a hash of cacheTool's path.
 #
 # pkgs defaults to the flake's locked nixpkgs, as native.nix's does.
 {

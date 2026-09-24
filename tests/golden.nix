@@ -219,7 +219,8 @@ let
       };
     };
 
-    # Recorded from flong of 2026-09-24 (src/main.zig, STANDALONE.md S4):
+    # Recorded from flong of 2026-09-24 (src/main.zig, STANDALONE.md's phase
+    # S4, in git at bed8750):
     # `flong help`'s text, whole, which describes flong launch as S3
     # delivers it; flong alone and a word that is no subcommand, each the
     # usage and 2; flong help's topics refused, 2. `flong help decl` has

@@ -1,6 +1,6 @@
 //! launch/refuse.zig: refuse_path (rootless-wrapper.bash:100-116), what a
-//! workspace or a caller's bind cannot be, for `flong launch` (STANDALONE.md,
-//! "`flong launch DECL.zon -- ARGS`": the workspace and the caller's binds).
+//! workspace or a caller's bind cannot be, for `flong launch` (DESIGN.md,
+//! "Launch sequence": the workspace and the caller's binds).
 //!
 //! Three refusals, tested in the wrapper's order: a ':' or a newline, which
 //! would make $binds and FLONG_BINDS ambiguous to anything that splits them,
@@ -12,8 +12,8 @@
 //!
 //! Pure: the answer is a value, and the caller prints it. Its text is the
 //! wrapper's, byte for byte, without the "$name: " that die (:41-44) puts
-//! in front and the exit status 1 it leaves with (STANDALONE.md: asserted
-//! strings and exit codes stay).
+//! in front and the exit status 1 it leaves with (DESIGN.md, "Exit
+//! codes").
 
 const std = @import("std");
 

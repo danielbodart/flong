@@ -111,7 +111,7 @@ pub fn spawn(
 
     // The session's /etc/resolv.conf, whole, in a memfd bwrap reads from
     // its start: a value where the wrapper handed over a here-string's
-    // descriptor (STANDALONE.md, S3).
+    // descriptor (STANDALONE.md's phase S3, in git at bed8750).
     if (s.resolv_conf) |text| {
         const f = try msg.check(fd.memfd("resolv.conf"), "memfd_create", .{});
         ends.resolv = f;

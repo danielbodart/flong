@@ -336,7 +336,7 @@ let
     '';
   };
 
-  # THE LAUNCHER: a link NAME -> flong, and nothing else (STANDALONE.md, "The
+  # THE LAUNCHER: a link NAME -> flong, and nothing else (DESIGN.md, "The
   # declaration's command"). flong reads its argv[0]'s basename, finds no
   # subcommand by that name, and launches /etc/flong/NAME.zon, which
   # environment.etc installs from declFileOf: exactly what `flong launch

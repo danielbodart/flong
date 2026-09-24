@@ -1,6 +1,6 @@
 //! decl_docs.zig: the declaration's fields, their types, defaults and
-//! descriptions, in one walk (STANDALONE.md, "The declaration": generated
-//! options), as capsper's src/shared/config_docs.zig walks its settings.
+//! descriptions, in one walk (DESIGN.md, "The declaration": one
+//! description), as capsper's src/shared/config_docs.zig walks its settings.
 //!
 //! decl.zig holds the type, and the doc comment beside each field holds its
 //! description. `@typeInfo` sees the first and not the second, so
@@ -52,10 +52,10 @@
 //! quota are patterns too and neither is a path.
 //!
 //! `writeReference` is the same fields for a reader writing ZON by hand
-//! (STANDALONE.md, S4): `flong help decl` in text, and with `--markdown`
-//! docs/declaration.md, which the reference-fresh check holds to it. Its
-//! rows, `rows`, come from the same helpers at comptime, with types and
-//! defaults spelt as ZON writes them.
+//! (DESIGN.md, "The declaration"): `flong help decl` in text, and with
+//! `--markdown` docs/declaration.md, which the reference-fresh check holds
+//! to it. Its rows, `rows`, come from the same helpers at comptime, with
+//! types and defaults spelt as ZON writes them.
 
 const std = @import("std");
 const decl = @import("decl");

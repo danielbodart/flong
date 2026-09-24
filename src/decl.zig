@@ -1,11 +1,11 @@
 //! decl.zig: a declaration, the static half of a session, as a type
-//! (STANDALONE.md, "The declaration"). The NixOS module renders each
+//! (DESIGN.md, "The declaration"). The NixOS module renders each
 //! `flong.<name>` to a `.zon` file of this shape; `flong check` reads it at
 //! build time and `flong launch` at launch, through `parse` here, so the two
 //! cannot read it differently.
 //!
 //! The type is the schema. A field's name is the Nix option's, camelCase and
-//! all, with no translation (STANDALONE.md, "Decided": no compatibility
+//! all, with no translation (DESIGN.md, "One binary": no compatibility
 //! layer); its doc comment is the option's description, and the only one:
 //! `build/gen_decl_docs.zig` harvests it, and `decl_docs.zig` walks this type
 //! into `decl-options.json`, which module.nix builds its options from. A
@@ -24,7 +24,7 @@
 //! `containers.<name>` and the closure it builds, and renders them beside the
 //! options; a non-Nix config writes them itself.
 //!
-//! The parser is a trust boundary (STANDALONE.md, "The declaration": any
+//! The parser is a trust boundary (DESIGN.md, "The declaration": any
 //! caller can launch any file), so `load` reads at most `max_bytes`, into one
 //! arena, and every parse error is a refusal with a line and column, never a
 //! panic.
@@ -968,7 +968,7 @@ test "an unknown field is refused at its line" {
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
-    // A Nix name translated, the way STANDALONE.md forbids.
+    // A Nix name translated, which no compatibility layer allows.
     const r = try refusal(a, minimal[0 .. minimal.len - 1] ++ "    .post_start = .{},\n}");
     try testing.expectEqual(11, r.line);
     try testing.expectEqualStrings("unexpected field 'post_start'", r.text);

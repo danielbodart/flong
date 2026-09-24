@@ -3,7 +3,7 @@
 # flong
 
 Ephemeral rootless containers for [NixOS](https://nixos.org/) that start in
-about 15 ms, run one foreground process as the user who started them, and
+about 12 ms, run one foreground process as the user who started them, and
 leave nothing behind.
 
 > A *flong* is the papier-mâché mould a printer takes from composed type. It is
@@ -19,8 +19,8 @@ namespaces the caller owns. The container is an ordinary
 declaration; flong replaces only how it starts. Its `container@` unit never
 runs.
 
-In a NixOS VM (4 cores, kernel 6.18.51), a warm launch of `true` takes 15 ms,
-25 ms with a network and a firewall hook, and 160 ms when the root must be
+In a NixOS VM (4 cores, kernel 6.18.51), a warm launch of `true` takes 12 ms,
+24 ms with a network and a firewall hook, and 160 ms when the root must be
 prepared first.
 
 **Terms.** The **prepared root** is the container's rootfs after its activation
@@ -463,8 +463,8 @@ $ nix flake check
 
 Runs NixOS VM tests of every option, the hook ordering, networking and DNS,
 the launcher's lifecycle and terminal, and each seccomp tier's live filters;
-builds the launcher (`flong`, whose subcommands are `launch`, `init` and
-`sweeper`), the seccomp compiler and the tests' probes and filter dumper in
+builds the launcher (`flong`, whose subcommands are `launch`, `init`,
+`sweeper`, `check`, `schema`, `list`, `version` and `help`), the seccomp compiler and the tests' probes and filter dumper in
 Zig, with their unit and property tests, lint and analysis; evaluates each
 refusal; and shellchecks the version script.
 `nix build .#bench` times launches in a VM.
@@ -485,7 +485,7 @@ $ nix run .#gate-aarch64
 each check built as soon as it evaluates, and those a binary cache already has
 skipped. It exits non-zero if any check fails to evaluate or build; its
 arguments go to nix-fast-build, and `GATE_EVAL_WORKERS` sets the evaluators
-(6, at up to about 4.6 GB each). `gate-aarch64` evaluates aarch64's checks
+(by default one per 10 GiB of the host's memory, at up to about 3 GB each). `gate-aarch64` evaluates aarch64's checks
 without building them. CI builds each check in its own job, `nix build
 .#checks.x86_64-linux.<name>`, against the `danielbodart` Cachix cache.
 

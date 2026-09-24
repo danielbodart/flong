@@ -5,8 +5,9 @@
 #
 # Phase 1 has the seccomp set, which seccomp/default.nix imports; phase 3
 # adds launcher, which launcher/default.nix imports (phase 5 adds
-# flong-sweeper to it, phase 7's L4 the Zig flong-launch, and S1 makes the
-# three one binary, flong); phase 6 fixtures, which tests/parity/default.nix and tests/probes.nix import.
+# flong-sweeper to it, phase 7's L4 the Zig flong-launch, and the one
+# binary, flong, the three: DESIGN.md, "One binary"); phase 6 fixtures,
+# which tests/parity/default.nix and tests/probes.nix import.
 # tests/integration.nix builds phase 0's proofs with the same zigSet.
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:10-19
@@ -188,16 +189,15 @@ let
   cacheTool = "${(import ./cache.nix { inherit pkgs; }).cacheTool}/bin/flong-cache";
   seccompTool = "${seccomp}/bin/flong-seccomp";
 
-  # flong, one binary whose subcommands are launch, init, sweeper, check and schema
-  # (src/main.zig), static and without libc: -Dtini is
-  # flong init's compiled-in tini, and flong launch's programs are -Dbwrap,
-  # -Dpasta, -Dnewuidmap, -Dnewgidmap, -Dcache, -Dseccomp and -Dself, the
-  # flong in this $out, which bwrap runs as `flong init`. The cache tool and
-  # flong-seccomp join its closure once the code that runs them is in the
-  # binary (S3's prologue); until then Zig emits neither path. The fileset
-  # holds src/ but for the seccomp set's and the
-  # fixtures' own sources (DESIGN.md, "The build"): the fixtures' edits never
-  # move it, and the seccomp set's only through -Dseccomp's path. Its size is
+  # flong, one binary whose subcommands are launch, init, sweeper, check,
+  # schema, list, version and help (src/main.zig), static and without libc:
+  # -Dtini is flong init's compiled-in tini, and flong launch's programs are
+  # -Dbwrap, -Dpasta, -Dnewuidmap, -Dnewgidmap, -Dcache, -Dseccomp and
+  # -Dself, the flong in this $out, which bwrap runs as `flong init`. The
+  # cache tool and flong-seccomp are in its closure, since its prologue runs
+  # them. The fileset holds src/ but for the seccomp set's and the fixtures'
+  # own sources (DESIGN.md, "The build"): the fixtures' edits never move it,
+  # and the seccomp set's only through -Dseccomp's path. Its size is
   # printed, never gated (DESIGN.md, "What the port measured": binaries).
   launcher = zigSet {
     pname = "flong-launcher";

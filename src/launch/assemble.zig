@@ -1,9 +1,10 @@
-//! launch/assemble.zig: `flong launch DECL.zon`'s prologue (STANDALONE.md,
-//! S3), which does what rootless-wrapper.bash did, in its order, and
-//! assembles the spec as a value (spec.Spec) for launch.zig to hand to
-//! ordering checkpoint 1: no argv spec, no exec. `run` is that order, one
-//! linear function with numbered comments, each step one of the wrapper's
-//! sections (its line numbers are the wrapper's as it stood before S3):
+//! launch/assemble.zig: `flong launch DECL.zon`'s prologue (DESIGN.md,
+//! "Launch sequence"), which does what rootless-wrapper.bash did, in its
+//! order, and assembles the spec as a value (spec.Spec) for launch.zig to
+//! hand to ordering checkpoint 1: no argv spec, no exec. `run` is that
+//! order, one linear function with numbered comments, each step one of the
+//! wrapper's sections (its line numbers are the wrapper's as it stood
+//! before S3):
 //!
 //!   1  the caller and the runtime directory (:67-97)    caller.zig
 //!   2  the workspace (:99-150)                          workspace.zig

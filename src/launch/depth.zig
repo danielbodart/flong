@@ -1,6 +1,6 @@
 //! depth.zig: the depth rule for the workspace and the caller's writable
 //! binds (rootless-wrapper.bash:210-232), for `flong launch`'s prologue
-//! (STANDALONE.md, "flong launch DECL.zon -- ARGS"). Pure: the roots and
+//! (DESIGN.md, "Launch sequence"). Pure: the roots and
 //! the masks are values, and the answer is the first mask refused, for
 //! the caller to print as `refusal` says.
 //!

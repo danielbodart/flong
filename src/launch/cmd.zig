@@ -1,18 +1,20 @@
 //! launch/cmd.zig: a declaration's command, run as the caller, for
-//! `flong launch DECL.zon`'s prologue (STANDALONE.md, "Commands, not
-//! snippets"): the workspace, binds, guard and seccompPolicy commands.
+//! `flong launch DECL.zon`'s prologue (DESIGN.md, "Data is data; shell
+//! is for what only launch knows"): the workspace, binds, guard and
+//! seccompPolicy commands.
 //!
 //! The wrapper ran each snippet as `"$BASH" -euo pipefail -c "$1" flong
 //! "${launcher_args[@]}"` (rootless-wrapper.bash:46-50). A command is an
-//! argv list instead, and flong runs no shell: the program is argv[0],
-//! its arguments the rest of the command's argv and then the launcher's
-//! own arguments (STANDALONE.md, S2's user decisions). It runs as the
-//! caller, who is already who this runs as, in the caller's working
-//! directory, with the caller's stdin and stderr, and an environment
-//! built by `environ`: the caller's, with the names the wrapper exported
-//! set (XDG_RUNTIME_DIR, workspace, workspace_mode, binds, machine, as
-//! each call site has them). proc.Spawn starts it: every signal's default
-//! and an empty mask, and no descriptor of flong's but its stdio.
+//! argv list instead, and flong runs no shell: the program is argv[0], its
+//! arguments the rest of the command's argv and then the launcher's own
+//! arguments (DESIGN.md, "The declaration": commands, not snippets). It
+//! runs as the caller, who is already who this runs as, in the caller's
+//! working directory, with the caller's stdin and stderr, and an
+//! environment built by `environ`: the caller's, with the names the wrapper
+//! exported set (XDG_RUNTIME_DIR, workspace, workspace_mode, binds,
+//! machine, as each call site has them). proc.Spawn starts it: every
+//! signal's default and an empty mask, and no descriptor of flong's but its
+//! stdio.
 //!
 //! argv[0] is given to execve as it is: no PATH search. Nix writes it
 //! absolute. A relative one is found from the caller's working directory,

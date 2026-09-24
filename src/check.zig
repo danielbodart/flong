@@ -1,4 +1,4 @@
-//! flong check (STANDALONE.md, "The declaration"): judges a declaration
+//! flong check (DESIGN.md, "The declaration"): judges a declaration
 //! file before anything launches it, as each declaration's derivation does,
 //! so a bad one fails the build with a line number rather than a launch.
 //!
@@ -47,7 +47,7 @@ const refused = 1;
 const usage = "usage: flong check DECL.zon";
 
 /// Names a declaration cannot have: its command is a link to flong named
-/// after it (STANDALONE.md, "The declaration's command"), and flong reads
+/// after it (DESIGN.md, "The declaration's command"), and flong reads
 /// argv[0]'s basename as a subcommand first, so the link would run the
 /// subcommand. `flong` itself reads its first argument instead. main.zig's
 /// tests hold every subcommand to being here.
