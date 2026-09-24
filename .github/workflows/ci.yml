@@ -19,9 +19,9 @@ on:
 # lets Nix schedule them.
 #
 # The binary cache is Cachix's danielbodart (public, free tier, 5 GB).
-# Every job that builds reads it; a leg pushes only when CACHIX_AUTH_TOKEN
-# is set, which it is not for a fork's pull request, so there the cache is
-# read-only.
+# Every job that builds reads it; a leg that is not a VM test pushes, and
+# only when CACHIX_AUTH_TOKEN is set, which it is not for a fork's pull
+# request, so there the cache is read-only.
 
 jobs:
   list:
@@ -93,8 +93,16 @@ jobs:
       # what cache.nixos.org has, so nixpkgs' packages are not pushed
       # either. Run on a failure too, so what did build is there for the
       # rerun.
+      #
+      # Not from a VM test, named in the list below (every check that boots
+      # a VM, runNixOSTest in flake.nix): what it builds of flong's own is
+      # what the launcher, seccomp, native-test-*, golden and integration
+      # legs build and push anyway, and the step cost it the check's
+      # evaluation again, 17-52 s in run 35963498671. It still reads the
+      # cache. A VM test missing from the list costs that time, not cache
+      # space: the allow-list below matches none of a VM test's own paths.
       - name: Push flong's own outputs to Cachix
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !contains(fromJSON('["basic", "rootless", "parity", "native"]'), matrix.check) }}
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
           CHECK: ${{ matrix.check }}
