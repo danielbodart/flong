@@ -643,6 +643,13 @@ pub fn build(b: *std.Build) void {
     //               chunking, the 4095-byte bound, each refusal's message,
     //               and the fuzz with its corpus
     //               (tests/zig/corpus/launch-childpid/)
+    //
+    // L4, the prologue's pieces: src/launch/prologue.zig (relaunch,
+    // cacheLock, closeUntracked, canonical and protectPaths), not yet built
+    // into the launcher.
+    //
+    //   test        (-Ddev=true) tests/zig/prologue_test.zig, against the
+    //               spawn probe (flong-proc) for relaunch's exec
     {
         const Branch = struct {
             /// src/spec.zig over `m`'s modules.
@@ -797,6 +804,26 @@ pub fn build(b: *std.Build) void {
                 });
             }
 
+            /// src/launch/prologue.zig over the launch's modules (record
+            /// from `l`, as launchModules requires): checkpoint 1's pieces
+            /// (L4).
+            fn prologueModule(bb: *std.Build, l: Launch, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+                const m = l.m;
+                return bb.createModule(.{
+                    .root_source_file = bb.path("src/launch/prologue.zig"),
+                    .target = t,
+                    .optimize = o,
+                    .imports = &.{
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "fd", .module = m.fd },
+                        .{ .name = "msg", .module = m.msg },
+                        .{ .name = "sig", .module = m.sig },
+                        .{ .name = "proc", .module = m.proc },
+                        .{ .name = "record", .module = l.record },
+                    },
+                });
+            }
+
             /// A directory in the store that exists wherever this builds:
             /// the one holding the zig that runs it. Null outside a store.
             fn storeDir(bb: *std.Build) ?[]const u8 {
@@ -809,6 +836,32 @@ pub fn build(b: *std.Build) void {
         };
 
         if (dev) {
+            {
+                // The prologue's pieces, each in a forked child where it
+                // would touch the test's own descriptors, signals or stderr.
+                const l = Branch.launchModules(b, target, optimize);
+                const m = l.m;
+                const opts = b.addOptions();
+                opts.addOptionPath("driver", procDriver(b, target, optimize).getEmittedBin());
+                const t = b.addTest(.{
+                    .name = "prologue_test",
+                    .root_module = b.createModule(.{
+                        .root_source_file = b.path("tests/zig/prologue_test.zig"),
+                        .target = target,
+                        .optimize = optimize,
+                        .imports = &.{
+                            .{ .name = "sys", .module = m.sys },
+                            .{ .name = "fd", .module = m.fd },
+                            .{ .name = "msg", .module = m.msg },
+                            .{ .name = "sig", .module = m.sig },
+                            .{ .name = "proc", .module = m.proc },
+                            .{ .name = "prologue", .module = Branch.prologueModule(b, l, target, optimize) },
+                            .{ .name = "options", .module = opts.createModule() },
+                        },
+                    }),
+                });
+                test_step.dependOn(&b.addRunArtifact(t).step);
+            }
             if (b.lazyDependency("minish", .{ .target = target, .optimize = optimize })) |minish| {
                 {
                     const m = modules(b, target, optimize);

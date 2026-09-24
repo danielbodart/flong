@@ -782,9 +782,34 @@ pub fn retainOnly(keep: []const AnyFd) ?CloseRangeFailure {
         } else false;
         if (!wanted) release(s);
     }
+    return closeGaps(kept[0..n]);
+}
+
+/// closeUntracked (flong-launch.c:907-925): closes every descriptor from 3
+/// up that the table does not hold. Every handle stays live: the table is
+/// what is kept. For the launcher's prologue, whose table at that step is
+/// the C's keep list exactly (the keep-fds, adopted; the signalfd; the
+/// state and sessions directories; the cache): what the wrapper left open
+/// and bwrap-args do not name goes. A reserved slot is not live and holds
+/// no number. Allocates nothing.
+pub fn closeUntracked() ?CloseRangeFailure {
+    var kept: [capacity]sys.fd_t = undefined;
+    var n: usize = 0;
+    for (slots) |s| {
+        if (s.raw < 0) continue;
+        kept[n] = s.raw;
+        n += 1;
+    }
+    return closeGaps(kept[0..n]);
+}
+
+/// fl_close_from(3, kept) (flong-util.c:154-165): one close_range per gap
+/// between kept numbers, the last up to ~0U, in the C's order (next_kept,
+/// not a sort).
+fn closeGaps(kept: []const sys.fd_t) ?CloseRangeFailure {
     var low: u32 = 3;
     while (true) {
-        const next = nextKept(low, kept[0..n]);
+        const next = nextKept(low, kept);
         const last: u32 = if (next) |k| k -% 1 else std.math.maxInt(u32);
         if (next == null or next.? != low) {
             switch (sys.closeRange(low, last, 0)) {
