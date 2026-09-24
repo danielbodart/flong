@@ -242,6 +242,9 @@ fn escapeAgrees(case: anytype) !void {
 
 /// How many cases had three ^] at one instant, and how many completed the
 /// escape: the controls that the property's plain reading is not vacuous.
+/// Over the two runs, instants land near 1050 and completions near 8400,
+/// so the bars sit at half of each: a random seed can fall a little short
+/// of either figure, never of half of it.
 var instants: usize = 0;
 var completions: usize = 0;
 
@@ -260,7 +263,7 @@ test "property: the escape is the model's, over any chunking of the reads" {
     const case = comptime gen.tuple2([]const Key2, []const u8, keys, chunks);
     try minish.check(testing.allocator, case, escapeAgrees, .{ .num_runs = 10_000, .seed = 0x1d1d1d });
     try minish.check(testing.allocator, case, escapeAgrees, .{ .num_runs = 10_000 });
-    try testing.expect(instants > 1000 and completions > 1000);
+    try testing.expect(instants > 500 and completions > 5000);
 }
 
 test "the model's own controls: 137's three, and what falls short" {
