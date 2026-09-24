@@ -611,6 +611,26 @@ pub fn build(b: *std.Build) void {
     //               only by tests/integration.nix, for golden's spec set
     //   test-paths  tests/golden/paths.txt against the launcher's functions
     //               (tests/zig/paths.zig), run only by tests/integration.nix
+    //
+    // L2, namespaces, cgroups, records, passwd: src/ns.zig, src/passwd.zig
+    // and the launch's halves of src/cgroup.zig and src/record.zig, which
+    // import more than trunk's `modules` gives cgroup (proc, passwd): the
+    // launch's graph is `Branch.launchModules`'s, not yet built into the
+    // launcher.
+    //
+    //   test           (-Ddev=true) ns.zig's and passwd.zig's own tests,
+    //                  cgroup.zig's and record.zig's in the launch's graph
+    //   test-launch    tests/zig/launch_test.zig: the record writer against
+    //                  tests/golden/records/, the name taken, the cache
+    //                  lock, the session made and undone; run only by
+    //                  tests/integration.nix, whose fileset holds the
+    //                  golden records
+    //   test-libc      tests/zig/libc_launch.zig: cgroup.mountinfo against
+    //                  cg_check_nsdelegate over the same text
+    //                  (tests/zig/mountinfo_c.c), sys.O_TMPFILE against
+    //                  glibc's fcntl.h
+    //   launch-driver  bin/flong-launch-driver (tests/zig/launchdriver.zig),
+    //                  built only by tests/integration.nix, for checks.native
     {
         const Branch = struct {
             /// src/spec.zig over `m`'s modules.
@@ -650,6 +670,104 @@ pub fn build(b: *std.Build) void {
                         .{ .name = "spec", .module = specModule(bb, m, t, o) },
                     },
                 });
+            }
+
+            /// The launch's modules: trunk's `modules`, and passwd, cgroup
+            /// and record again with the launch's imports (cgroup's launch
+            /// half needs proc and passwd), spec and ns. A compilation
+            /// takes cgroup and record from here only, never from `m`.
+            const Launch = struct {
+                m: Modules,
+                passwd: *std.Build.Module,
+                cgroup: *std.Build.Module,
+                record: *std.Build.Module,
+                spec: *std.Build.Module,
+                ns: *std.Build.Module,
+            };
+
+            fn launchModules(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) Launch {
+                const m = modules(bb, t, o);
+                const passwd = bb.createModule(.{
+                    .root_source_file = bb.path("src/passwd.zig"),
+                    .target = t,
+                    .optimize = o,
+                    .imports = &.{.{ .name = "fd", .module = m.fd }},
+                });
+                const cgroup = bb.createModule(.{
+                    .root_source_file = bb.path("src/cgroup.zig"),
+                    .target = t,
+                    .optimize = o,
+                    .imports = &.{
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "fd", .module = m.fd },
+                        .{ .name = "msg", .module = m.msg },
+                        .{ .name = "sig", .module = m.sig },
+                        .{ .name = "names", .module = m.names },
+                        .{ .name = "proc", .module = m.proc },
+                        .{ .name = "passwd", .module = passwd },
+                    },
+                });
+                const record = bb.createModule(.{
+                    .root_source_file = bb.path("src/record.zig"),
+                    .target = t,
+                    .optimize = o,
+                    .imports = &.{
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "fd", .module = m.fd },
+                        .{ .name = "msg", .module = m.msg },
+                        .{ .name = "sig", .module = m.sig },
+                        .{ .name = "num", .module = m.num },
+                        .{ .name = "proc", .module = m.proc },
+                        .{ .name = "names", .module = m.names },
+                        .{ .name = "cgroup", .module = cgroup },
+                    },
+                });
+                const spec = specModule(bb, m, t, o);
+                const ns = bb.createModule(.{
+                    .root_source_file = bb.path("src/ns.zig"),
+                    .target = t,
+                    .optimize = o,
+                    .imports = &.{
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "fd", .module = m.fd },
+                        .{ .name = "msg", .module = m.msg },
+                        .{ .name = "sig", .module = m.sig },
+                        .{ .name = "proc", .module = m.proc },
+                        .{ .name = "spec", .module = spec },
+                    },
+                });
+                return .{ .m = m, .passwd = passwd, .cgroup = cgroup, .record = record, .spec = spec, .ns = ns };
+            }
+
+            /// flong-launch-driver (tests/zig/launchdriver.zig): the
+            /// launch's halves driven from a shell in checks.native. Static,
+            /// no libc, stripped, no stack size, as an installed artifact.
+            fn launchDriver(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+                const l = launchModules(bb, t, o);
+                const exe = bb.addExecutable(.{
+                    .name = "flong-launch-driver",
+                    .root_module = bb.createModule(.{
+                        .root_source_file = bb.path("tests/zig/launchdriver.zig"),
+                        .target = t,
+                        .optimize = o,
+                        .strip = true,
+                        .single_threaded = true,
+                        .imports = &.{
+                            .{ .name = "sys", .module = l.m.sys },
+                            .{ .name = "fd", .module = l.m.fd },
+                            .{ .name = "msg", .module = l.m.msg },
+                            .{ .name = "sig", .module = l.m.sig },
+                            .{ .name = "proc", .module = l.m.proc },
+                            .{ .name = "spec", .module = l.spec },
+                            .{ .name = "ns", .module = l.ns },
+                            .{ .name = "cgroup", .module = l.cgroup },
+                            .{ .name = "record", .module = l.record },
+                            .{ .name = "passwd", .module = l.passwd },
+                        },
+                    }),
+                });
+                exe.stack_size = 0;
+                return exe;
             }
 
             /// A directory in the store that exists wherever this builds:
@@ -699,8 +817,69 @@ pub fn build(b: *std.Build) void {
                 } else {
                     test_step.dependOn(&b.addFail("tests/zig/spec_test.zig needs a zig in /nix/store: its closure is a store path").step);
                 }
+                // L2: each launch module's own tests, in the launch's graph.
+                for ([_][]const u8{ "passwd", "cgroup", "record", "ns" }) |name| {
+                    const l = Branch.launchModules(b, target, optimize);
+                    const module = if (std.mem.eql(u8, name, "passwd")) l.passwd else if (std.mem.eql(u8, name, "cgroup")) l.cgroup else if (std.mem.eql(u8, name, "record")) l.record else l.ns;
+                    const t = b.addTest(.{ .name = b.fmt("launch_{s}", .{name}), .root_module = module });
+                    test_step.dependOn(&b.addRunArtifact(t).step);
+                }
             }
         }
+
+        {
+            // L2's test-libc: the mountinfo reader against the C it ports,
+            // flong-cgroup.c compiled as the launcher compiles it, reading
+            // the same text (tests/zig/mountinfo_c.c), and sys.O_TMPFILE
+            // against glibc's fcntl.h.
+            const l = Branch.launchModules(b, target, optimize);
+            const root = b.createModule(.{
+                .root_source_file = b.path("tests/zig/libc_launch.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "sys", .module = l.m.sys },
+                    .{ .name = "cgroup", .module = l.cgroup },
+                    .{ .name = "inputs", .module = inputsModule(b, target, optimize) },
+                },
+            });
+            root.addIncludePath(b.path("launcher"));
+            root.addCSourceFile(.{ .file = b.path("tests/zig/mountinfo_c.c"), .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE" } });
+            root.addCSourceFile(.{ .file = b.path("launcher/flong-util.c"), .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE" } });
+            libc_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "libc_launch", .root_module = root })).step);
+        }
+
+        const launch_step = b.step("test-launch", "Run tests/zig/launch_test.zig: the record writer against tests/golden/records/, and the launch's halves");
+        {
+            // Outside `test`: tests/golden/records/ is not in native-test's
+            // fileset (native.nix is trunk's until L4), so, as test-paths,
+            // tests/integration.nix runs it. It needs no lazy dependency.
+            const l = Branch.launchModules(b, target, optimize);
+            const opts = b.addOptions();
+            opts.addOptionPath("records", b.path("tests/golden/records"));
+            const t = b.addTest(.{
+                .name = "launch_test",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/zig/launch_test.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "sys", .module = l.m.sys },
+                        .{ .name = "fd", .module = l.m.fd },
+                        .{ .name = "msg", .module = l.m.msg },
+                        .{ .name = "proc", .module = l.m.proc },
+                        .{ .name = "cgroup", .module = l.cgroup },
+                        .{ .name = "record", .module = l.record },
+                        .{ .name = "options", .module = opts.createModule() },
+                    },
+                }),
+            });
+            launch_step.dependOn(&b.addRunArtifact(t).step);
+        }
+
+        const driver_step = b.step("launch-driver", "Build bin/flong-launch-driver, the launch's halves for checks.native");
+        driver_step.dependOn(&b.addInstallArtifact(Branch.launchDriver(b, target, optimize), .{}).step);
 
         const probe_step = b.step("spec-probe", "Build bin/spec-probe, src/launch.zig as far as L1 goes, for golden's spec set");
         const probe = b.addExecutable(.{ .name = "spec-probe", .root_module = Branch.launchModule(b, target, optimize, true) });

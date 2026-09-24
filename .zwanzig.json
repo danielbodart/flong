@@ -21,6 +21,8 @@
     { "kind": "open", "method_name": "pidfdOpen" },
     { "kind": "open", "method_name": "fork" },
     { "kind": "open", "method_name": "adoptInherited" },
+    { "kind": "open", "method_name": "openRecord" },
+    { "kind": "open", "method_name": "openUserns" },
     { "kind": "close", "method_name": "close" },
     { "kind": "close", "method_name": "await" },
     { "kind": "close", "method_name": "reapNow" },

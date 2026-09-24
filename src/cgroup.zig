@@ -1,8 +1,23 @@
 //! cgroup.zig: the session cgroup (flong-cgroup.h). Phase 5 ports the
 //! sweep's half of launcher/flong-cgroup.c: the sweeper's holder
 //! (:92-144, 146-157, 279-298), a record's session opened (:415-486),
-//! killed, waited for (:490-529) and removed (:531-602). The launch's half
-//! (the nsdelegate check, finding the holder, making the session) is L2's.
+//! killed, waited for (:490-529) and removed (:531-602). Phase 7's L2 ports
+//! the launch's half: the nsdelegate check (:28-88), finding the holder
+//! (:159-277) and making the session (:300-413).
+//!
+//! Every session gets its own cgroup, <holder>/<container>/<machine>, with
+//! three leaves: sandbox (bwrap, everything in the session, and the mount
+//! helper for the moment it runs), hooks (postStart and whatever it leaves
+//! running) and pasta. Each process is created in its leaf with
+//! clone3(CLONE_INTO_CGROUP) and never migrated; the session cgroup itself
+//! holds no process, so controllers can be enabled below it. No limit is
+//! written unless the spec declares one, and a controller is enabled only
+//! when a declared limit needs it (flong-cgroup.h:1-17).
+//!
+//! The launch's half imports proc (the holder's start) and passwd (the
+//! refusal's name); the sweeper's build, which reaches only the sweep's
+//! half, gives cgroup neither, and Zig resolves an import only where it is
+//! used (build.zig's `launcher (branch)` block gives the launch's both).
 //!
 //! Everything is reached from descriptors once the holder is open: the
 //! container level, the session and its leaves are each opened with one
@@ -17,6 +32,8 @@ const fdt = @import("fd");
 const msg = @import("msg");
 const sig = @import("sig");
 const names = @import("names");
+const proc = @import("proc");
+const passwd = @import("passwd");
 
 const Error = msg.Error;
 
@@ -36,7 +53,7 @@ pub const Path = struct {
 
     /// `s` if it fits with its NUL (the C's snprintf into PATH_MAX), else
     /// null.
-    fn of(parts: []const []const u8) ?Path {
+    pub fn of(parts: []const []const u8) ?Path {
         var p: Path = .{};
         for (parts) |s| {
             if (p.len + s.len >= path_max) return null;
@@ -173,6 +190,335 @@ pub fn holderSelf() Error!Holder {
     try cutParent(&own);
     return holderAt(own);
 }
+
+// ---- the nsdelegate check (flong-cgroup.c:28-88) ----
+
+/// has_item (flong-cgroup.c:30-42): whether `item` is one of the items in
+/// `list`, separated by `sep`: the options of a mount, the controllers of a
+/// cgroup. `list` is read as the C reads its string, up to a first NUL.
+pub fn hasItem(list_in: []const u8, item: []const u8, sep: u8) bool {
+    const list = list_in[0 .. std.mem.indexOfScalar(u8, list_in, 0) orelse list_in.len];
+    var p: usize = 0;
+    while (true) {
+        if (p < list.len and list[p] == sep) p += 1;
+        const rest = list[p..];
+        if (std.mem.startsWith(u8, rest, item) and (rest.len == item.len or rest[item.len] == sep)) return true;
+        p = std.mem.indexOfScalarPos(u8, list, p, sep) orelse return false;
+    }
+}
+
+/// strtok_r(3) with the one delimiter ' ', over `line` from `pos.*`:
+/// leading spaces skipped, the token up to the next space, which it
+/// consumes; null at the end.
+fn token(line: []const u8, pos: *usize) ?[]const u8 {
+    var i = pos.*;
+    while (i < line.len and line[i] == ' ') i += 1;
+    if (i == line.len) {
+        pos.* = i;
+        return null;
+    }
+    const start = i;
+    while (i < line.len and line[i] != ' ') i += 1;
+    pos.* = if (i < line.len) i + 1 else i;
+    return line[start..i];
+}
+
+/// What /proc/self/mountinfo says of /sys/fs/cgroup.
+pub const Mountinfo = enum { not_cgroup2, not_delegated, delegated };
+
+/// cg_check_nsdelegate's reading (flong-cgroup.c:50-75), of a whole
+/// mountinfo text. A line is "id parent dev root mountpoint options
+/// [optional...] - fstype source superoptions", its fields separated by
+/// single spaces (a space inside a field is written \040). nsdelegate is a
+/// superblock option. The last line on /sys/fs/cgroup with its " - " is
+/// the mount on top, the one a path reaches, so it alone decides. Each
+/// line is read as getline and strtok_r read it: up to a first NUL, runs
+/// of spaces as one. Any bytes are read without a panic.
+pub fn mountinfo(text: []const u8) Mountinfo {
+    var is_cgroup2 = false;
+    var delegated = false;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |whole| {
+        const line = whole[0 .. std.mem.indexOfScalar(u8, whole, 0) orelse whole.len];
+        var pos: usize = 0;
+        var n: usize = 0;
+        var point: []const u8 = "";
+        while (n < 5) : (n += 1) point = token(line, &pos) orelse break;
+        if (n < 5 or !std.mem.eql(u8, point, root)) continue;
+        // strtok_r(NULL, "", ...): the rest of the line, or null at its end.
+        if (pos == line.len) continue;
+        const rest = line[pos..];
+        const sep = std.mem.indexOf(u8, rest, " - ") orelse continue;
+        var at = pos + sep + 3;
+        const fstype = token(line, &at);
+        _ = token(line, &at);
+        const super = token(line, &at);
+        is_cgroup2 = fstype != null and std.mem.eql(u8, fstype.?, "cgroup2");
+        delegated = is_cgroup2 and super != null and hasItem(super.?, "nsdelegate", ',');
+    }
+    if (!is_cgroup2) return .not_cgroup2;
+    if (!delegated) return .not_delegated;
+    return .delegated;
+}
+
+/// cg_check_nsdelegate (flong-cgroup.c:44-88): refuses to go on unless
+/// cgroup2 is mounted at /sys/fs/cgroup with nsdelegate. Without it a
+/// payload could move out of the cgroup that reaps it. The text is read
+/// whole into `gpa`, the launcher's arena.
+pub fn checkNsdelegate(gpa: std.mem.Allocator) Error!void {
+    const f = try msg.check(fdt.openFile(fdt.cwd, "/proc/self/mountinfo", .{}, 0), "open /proc/self/mountinfo", .{});
+    const read = fdt.readAll(f, gpa);
+    f.close();
+    const text = try msg.check(read catch sys.Result([]u8){ .err = .NOMEM }, "read /proc/self/mountinfo", .{});
+    switch (mountinfo(text)) {
+        .not_cgroup2 => return msg.refuse("cgroup2 is not mounted at " ++ root ++ ": sessions need the unified hierarchy", .{}),
+        .not_delegated => return msg.refuse("cgroup2 at " ++ root ++ " is not mounted with nsdelegate: a session could move out of the cgroup that reaps it", .{}),
+        .delegated => {},
+    }
+}
+
+// ---- finding the holder (flong-cgroup.c:159-277) ----
+
+/// refuse_no_manager (flong-cgroup.c:159-168): the refusal when there is
+/// nowhere to put a session's cgroup, naming the caller as /etc/passwd
+/// does, or by uid (quirk 19).
+fn refuseNoManager(gpa: std.mem.Allocator) Error {
+    return noManager(gpa, sys.getuid());
+}
+
+/// refuse_no_manager for `uid`, which the driver's checks name.
+pub fn noManager(gpa: std.mem.Allocator, uid: sys.uid_t) Error {
+    if (passwd.lookup(gpa, uid)) |name|
+        return msg.refuse("no user manager for {s}: set users.users.{s}.linger = true", .{ name, name });
+    return msg.refuse("no user manager for uid {d}: set users.users.<name>.linger = true", .{uid});
+}
+
+/// An open of a cgroup by its absolute path: the handle, or the errno,
+/// which a full table answers as EMFILE, as the C would get it.
+fn openAbsolute(path: *const Path) sys.Result(fdt.Fd(.cgroup)) {
+    return fdt.openCgroup(fdt.cwd, path.slice()) catch .{ .err = .MFILE };
+}
+
+/// holder_under_manager (flong-cgroup.c:170-208): the user manager is
+/// there. Opens <manager>/<rel>, first starting the holder unit, with
+/// `start_argv`, when its cgroup is absent. The warm path is one open.
+fn holderUnderManager(gpa: std.mem.Allocator, manager: []const u8, rel: []const u8, start_argv: []const [:0]const u8) sig.Error!Holder {
+    const path = Path.of(&.{ manager, "/", rel }) orelse return msg.refuse("the holder's cgroup path is too long", .{});
+    switch (openAbsolute(&path)) {
+        .ok => |h| return holderTake(path, h),
+        .err => |e| if (e != .NOENT) return msg.fail(e, "open the holder's cgroup {s}", .{path.slice()}),
+    }
+    if (start_argv.len == 0)
+        return msg.refuse("the holder's cgroup {s} does not exist, and there is no way to start it", .{path.slice()});
+
+    var s = proc.Spawn.init(gpa, start_argv[0]) catch return msg.fail(.NOMEM, "malloc", .{});
+    for (start_argv[1..]) |a| s.arg(a) catch return msg.fail(.NOMEM, "malloc", .{});
+    const child = try s.start();
+    // An aborted or failed reap closes the pidfd and leaves the start to
+    // end on its own (quirk 8, kept: :195-198).
+    const status = child.await() catch |err| {
+        child.release();
+        return err;
+    };
+    if (status != 0) return msg.refuse("starting the holder failed ({s} exited {d})", .{ start_argv[0], status });
+
+    return switch (openAbsolute(&path)) {
+        .ok => |h| holderTake(path, h),
+        .err => |e| if (e == .NOENT)
+            msg.refuse("the holder's cgroup {s} does not exist after starting it", .{path.slice()})
+        else
+            msg.fail(e, "open the holder's cgroup {s}", .{path.slice()}),
+    };
+}
+
+/// holder_delegated (flong-cgroup.c:210-238): no user manager. The
+/// launcher's own cgroup, when a system unit with User= and Delegate=yes
+/// gave it to the caller; its parent when limits need controllers, since a
+/// cgroup with processes in it cannot enable any for its children.
+fn holderDelegated(gpa: std.mem.Allocator, own: Path, have_limits: bool) Error!Holder {
+    const fd = switch (openAbsolute(&own)) {
+        .ok => |h| h,
+        .err => |e| return msg.fail(e, "open the launcher's cgroup {s}", .{own.slice()}),
+    };
+    if (owner(fd) != sys.getuid()) {
+        fd.close();
+        return refuseNoManager(gpa);
+    }
+    if (!have_limits) return holderTake(own, fd);
+    fd.close();
+
+    var parent = own;
+    try cutParent(&parent);
+    const pfd = switch (openAbsolute(&parent)) {
+        .ok => |h| h,
+        .err => null,
+    };
+    if (pfd == null or owner(pfd.?) != sys.getuid()) {
+        if (pfd) |h| h.close();
+        return msg.refuse("limits need a delegated cgroup with no process in it, and {s} is not yours: run the launcher's unit with DelegateSubgroup=", .{parent.slice()});
+    }
+    return holderTake(parent, pfd.?);
+}
+
+/// cg_holder_find (flong-cgroup.c:240-277; flong-cgroup.h:35-56): the
+/// holder for a launch. `rel` is the spec's holder, a relative path of
+/// plain components the spec has checked.
+///  1. The user manager's cgroup is the launcher's own cgroup up to and
+///     including its user@UID.service component, or, when the launcher
+///     runs outside it (a login session's scope),
+///     /user.slice/user-UID.slice/user@UID.service. If that exists, the
+///     holder is <it>/<rel>, started with `start_argv` when absent.
+///  2. With no user manager: the launcher's own cgroup, when it is the
+///     caller's; with limits, its parent, which must be the caller's too.
+///  3. Otherwise refused, naming users.users.<name>.linger.
+/// Paths and the start's argv are in `gpa`, the launcher's arena.
+pub fn holderFind(gpa: std.mem.Allocator, rel: []const u8, start_argv: []const [:0]const u8, have_limits: bool) sig.Error!Holder {
+    const own = try ownCgroup();
+    const o = own.slice();
+    var unit_buf: [64]u8 = undefined;
+    const unit = std.fmt.bufPrint(&unit_buf, "user@{d}.service", .{sys.getuid()}) catch unreachable; // proven: 13 + 10 < 64
+
+    var hit: ?usize = null;
+    var p = root.len;
+    while (std.mem.indexOfScalarPos(u8, o, p, '/')) |slash| {
+        const c = o[slash + 1 ..];
+        if (std.mem.startsWith(u8, c, unit) and (c.len == unit.len or c[unit.len] == '/')) {
+            hit = slash + 1 + unit.len;
+            break;
+        }
+        p = slash + 1;
+    }
+    var slice_buf: [64]u8 = undefined;
+    const manager = if (hit) |h|
+        Path.of(&.{o[0..h]}).?
+    else
+        Path.of(&.{ root, "/user.slice/", std.fmt.bufPrint(&slice_buf, "user-{d}.slice/", .{sys.getuid()}) catch unreachable, unit }).?; // proven: 16 + 10 < 64
+
+    switch (openAbsolute(&manager)) {
+        .ok => |h| {
+            const u = owner(h);
+            h.close();
+            if (u != sys.getuid()) return msg.refuse("the user manager's cgroup {s} is not yours", .{manager.slice()});
+            return holderUnderManager(gpa, manager.slice(), rel, start_argv);
+        },
+        .err => |e| if (e != .NOENT) return msg.fail(e, "open the user manager's cgroup {s}", .{manager.slice()}),
+    }
+    return holderDelegated(gpa, own, have_limits);
+}
+
+// ---- making the session (flong-cgroup.c:300-413) ----
+
+/// cg_session_path (flong-cgroup.c:302-308): the path the session's cgroup
+/// will have, for the record, which is written before the cgroup exists.
+pub fn sessionPath(h: *const Holder, container: []const u8, machine: []const u8) Error!Path {
+    return Path.of(&.{ h.path.slice(), "/", container, "/", machine }) orelse
+        msg.refuse("the session's cgroup path is too long", .{});
+}
+
+/// enable_controllers (flong-cgroup.c:310-337): enables in the cgroup
+/// behind `dir`, named `path` in messages, the controllers `limits` need.
+/// A controller is the limit file's name up to its dot. One the level does
+/// not have, because systemd did not delegate it, is refused by name rather
+/// than by the ENOENT the write would give. The write itself is EBUSY while
+/// the level has a process of its own, which is why the holder's process
+/// lives in its supervisor leaf.
+fn enableControllers(dir: anytype, path: []const u8, limits: anytype) Error!void {
+    if (limits.len == 0) return;
+    var have_buf: [256]u8 = undefined;
+    const n = try readAt(dir, "cgroup.controllers", &have_buf);
+    const have = have_buf[0 .. std.mem.indexOfScalar(u8, have_buf[0..n], '\n') orelse n];
+    for (limits) |l| {
+        const file: []const u8 = l.file;
+        // snprintf(name, 32, "%.*s", ...): up to the dot, at most 31 bytes.
+        const name = file[0..@min(std.mem.indexOfScalar(u8, file, '.') orelse file.len, 31)];
+        if (!hasItem(have, name, ' '))
+            return msg.refuse("the limit {s} needs the {s} controller, which {s} does not have", .{ file, name, path });
+        var plus_buf: [34]u8 = undefined;
+        const plus = std.fmt.bufPrint(&plus_buf, "+{s}", .{name}) catch unreachable; // proven: 1 + 31 < 34
+        try writeAt(dir, "cgroup.subtree_control", plus);
+    }
+}
+
+/// cg_session_create (flong-cgroup.c:339-413; flong-cgroup.h:82-92): makes
+/// the session cgroup: mkdir <container> (EEXIST is fine: it is shared and
+/// never removed, since another launch may be making its session in it
+/// right now), the controllers the limits need enabled down to the session,
+/// mkdir <machine> (EEXIST is a refusal: a duplicate session), mkdir and
+/// open the three leaves, and each limit written into the sandbox leaf,
+/// where the payload's programs read them (its cgroup namespace is rooted
+/// there, and Go reads cpu.max in its own cgroup and nowhere above). On a
+/// failure after <machine> is made, what was made is removed, in reverse:
+/// nothing has run in the session yet, so every directory is empty and
+/// goes at once. `limits` is a slice of spec.Limit: each has `file` and
+/// `value`, NUL-terminated.
+pub fn sessionCreate(h: *const Holder, container: [:0]const u8, machine: [:0]const u8, limits: anytype) Error!Session {
+    const path = try sessionPath(h, container, machine);
+    const p = path.slice();
+    const hpath = h.path.slice();
+
+    switch (h.fd.mkdirat(container, 0o755)) {
+        .ok => {},
+        .err => |e| if (e != .EXIST) return msg.fail(e, "mkdir {s}/{s}", .{ hpath, container }),
+    }
+    const cfd = try msg.check(fdt.openCgroup(h.fd, container), "open {s}/{s}", .{ hpath, container });
+    defer cfd.close();
+
+    // A controller must be enabled on every level above the cgroup whose
+    // file sets the limit: the holder, the container level and the
+    // session, above the sandbox leaf.
+    try enableControllers(h.fd, hpath, limits);
+    try enableControllers(cfd, p[0..std.mem.lastIndexOfScalar(u8, p, '/').?], limits);
+
+    switch (cfd.mkdirat(machine, 0o755)) {
+        .ok => {},
+        .err => |e| return if (e == .EXIST)
+            msg.refuse("a session named {s} is already running ({s} exists)", .{ machine, p })
+        else
+            msg.fail(e, "mkdir {s}", .{p}),
+    }
+
+    var made: Made = .{};
+    const done: Error!void = steps: {
+        made.fd = msg.check(fdt.openCgroup(cfd, machine), "open {s}", .{p}) catch |e| break :steps e;
+        enableControllers(made.fd.?, p, limits) catch |e| break :steps e;
+        for (leaf_names, 0..) |name, i| {
+            switch (made.fd.?.mkdirat(name, 0o755)) {
+                .ok => {},
+                .err => |e| break :steps msg.fail(e, "mkdir {s}/{s}", .{ p, name }),
+            }
+            made.leaf[i] = msg.check(fdt.openCgroup(made.fd.?, name), "open {s}/{s}", .{ p, name }) catch |e| break :steps e;
+        }
+        for (limits) |l| writeAt(made.leaf[0].?, l.file, l.value) catch |e| break :steps e;
+    };
+    done catch |err| {
+        made.undo(cfd, machine);
+        return err;
+    };
+    return .{ .path = path, .fd = made.fd.?, .leaf = made.leaf };
+}
+
+/// What sessionCreate has made below the container level, open.
+const Made = struct {
+    fd: ?fdt.Fd(.cgroup) = null,
+    leaf: [leaf_names.len]?fdt.Fd(.cgroup) = .{ null, null, null },
+
+    /// The undo (flong-cgroup.c:401-412), in reverse: each leaf closed and
+    /// removed, then the session closed and removed from the container
+    /// level `cfd`. Nothing has run in the session yet, so every directory
+    /// made is empty and goes at once; rmdir's errors are not looked at.
+    fn undo(self: *Made, cfd: fdt.Fd(.cgroup), machine: [:0]const u8) void {
+        var i = leaf_names.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.leaf[i]) |h| h.close();
+            self.leaf[i] = null;
+            if (self.fd) |f| _ = f.unlinkat(leaf_names[i], sys.AT.REMOVEDIR);
+        }
+        if (self.fd) |f| f.close();
+        self.fd = null;
+        _ = cfd.unlinkat(machine, sys.AT.REMOVEDIR);
+    }
+};
 
 // ---- a session named by a record ----
 

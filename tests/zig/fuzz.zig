@@ -10,8 +10,10 @@
 //! failure. In ReleaseSafe (native-test-release) a panic is the build's
 //! failure; each target also checks what its answer must hold.
 //!
-//! The mountinfo reader is L2's (cg_check_nsdelegate, the launch half), so
-//! it is not here yet.
+//! The mountinfo reader (cgroup.mountinfo, cg_check_nsdelegate) is the
+//! launch's, not the sweeper's (phase 7, L2): /proc/self/mountinfo is the
+//! kernel's text, but a panic in the launcher on any of it is a launch
+//! refused with 125 and no reason, so it is held to the same.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -94,6 +96,18 @@ fn ownCgroup(b: []const u8) !void {
         .path => |p| try testing.expect(p.len > 0 and p[0] == '/'),
         .unexpected, .no_entry => {},
     }
+}
+
+fn mountinfo(b: []const u8) !void {
+    const v = cgroup.mountinfo(b);
+    count(v == .delegated);
+    if (v == .delegated) {
+        try testing.expect(std.mem.indexOf(u8, b, "nsdelegate") != null);
+        try testing.expect(std.mem.indexOf(u8, b, " " ++ cgroup.root ++ " ") != null);
+        try testing.expect(std.mem.indexOf(u8, b, "cgroup2") != null);
+    }
+    // has_item alone, over the same bytes as a list.
+    _ = cgroup.hasItem(b, "nsdelegate", ',');
 }
 
 fn stat(b: []const u8) !void {
@@ -199,6 +213,10 @@ fn ownTokens(t: []const u16) []const u8 {
     return inputs.ownCgroup(t, &scratch);
 }
 
+fn mountinfoTokens(t: []const u16) []const u8 {
+    return inputs.mountinfo(t, &scratch);
+}
+
 fn statTokens(t: []const u16) []const u8 {
     return inputs.stat(t, &scratch);
 }
@@ -225,6 +243,10 @@ test "fuzz cgroup.populated (cgroup.events)" {
 
 test "fuzz cgroup.ownFrom (/proc/self/cgroup)" {
     try Target("cgroup-own", ownCgroup, ownTokens).run();
+}
+
+test "fuzz cgroup.mountinfo (/proc/self/mountinfo)" {
+    try Target("cgroup-mountinfo", mountinfo, mountinfoTokens).run();
 }
 
 test "fuzz proc.statStarttime (/proc/<pid>/stat field 22)" {

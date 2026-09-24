@@ -17,9 +17,20 @@
 #   spec-paths   `zig build test-paths`: tests/golden/paths.txt against the
 #                launcher's functions (tests/zig/paths.zig); module.nix
 #                asserts its own side
-#   vm           every proof's bins and the drivers joined, for the VM
-#                node's PATH, with passthru.vmScripts, the proofs' testScript
-#                fragments in order
+#   launch-driver
+#                `zig build launch-driver`: bin/flong-launch-driver
+#                (tests/zig/launchdriver.zig), phase 7's L2 (src/ns.zig,
+#                src/passwd.zig, the launch's halves of src/cgroup.zig and
+#                src/record.zig), for checks.native, until L4 builds the
+#                launcher itself
+#   launch-test  `zig build test-launch`: tests/zig/launch_test.zig, the
+#                L2 record writer against tests/golden/records/ (outside
+#                native-test's fileset), the name taken, the cache lock,
+#                the session made and undone
+#   vm           every proof's bins, the drivers and launch-driver joined,
+#                for the VM node's PATH, with passthru.vmScripts, the
+#                proofs' testScript fragments in order, then L2's
+#                (tests/launch-native.nix)
 #
 # A proof is a directory tests/proofs/<pN>/ holding a default.nix; the
 # contract is tests/proofs/README.md. Adding one needs no edit here or in
@@ -124,6 +135,52 @@ let
     '';
   };
 
+  # Phase 7's L2 (ZIG.md): the launch's halves, driven from checks.native.
+  # Static, no libc, stripped, no stack size, as the launcher will be.
+  launch-driver = zigSet {
+    pname = "flong-launch-driver";
+    steps = "launch-driver";
+    files = specFiles ++ [
+      ../src/cgroup.zig
+      ../src/record.zig
+      ../src/passwd.zig
+      ../src/ns.zig
+      ../tests/zig/launchdriver.zig
+    ];
+    nativeBuildInputs = [
+      pkgs.file
+      pkgs.binutils
+    ];
+    extra = ''
+      file -b $out/bin/flong-launch-driver | tee /dev/stderr | grep -q 'statically linked'
+      readelf -lW $out/bin/flong-launch-driver > $TMPDIR/phdrs
+      if grep -q INTERP $TMPDIR/phdrs; then echo "flong-launch-driver has an INTERP"; exit 1; fi
+      [[ $(awk '$1 == "GNU_STACK" { print $6 }' $TMPDIR/phdrs) == 0x000000 ]]
+    '';
+  };
+
+  # L2's checks.native fragment: the driver above, and the launcher's Zig
+  # flong-sweeper sweeping a record the driver wrote.
+  launchNative = import ./launch-native.nix {
+    inherit pkgs;
+    launcher = import ../launcher { inherit pkgs; };
+  };
+
+  # Phase 7's L2: the record writer against tests/golden/records/ and the
+  # rest of tests/zig/launch_test.zig, in the build sandbox.
+  launch-test = zigSet {
+    pname = "flong-launch-test";
+    steps = "test-launch";
+    files = specFiles ++ [
+      ../src/cgroup.zig
+      ../src/record.zig
+      ../src/passwd.zig
+      ../src/ns.zig
+      ../tests/zig/launch_test.zig
+      ../tests/golden/records
+    ];
+  };
+
   spec-paths = zigSet {
     pname = "flong-spec-paths";
     steps = "test-paths";
@@ -135,14 +192,35 @@ let
 
   vm = pkgs.symlinkJoin {
     name = "flong-proofs-vm";
-    paths = lib.attrValues bins ++ [ drivers ];
-    passthru.vmScripts = lib.concatMap (
-      name:
-      lib.optional (proofs.${name} ? vmScript) {
-        inherit name;
-        script = proofs.${name}.vmScript;
-      }
-    ) proofNames;
+    paths = lib.attrValues bins ++ [
+      drivers
+      launch-driver
+    ];
+    passthru.vmScripts =
+      lib.concatMap (
+        name:
+        lib.optional (proofs.${name} ? vmScript) {
+          inherit name;
+          script = proofs.${name}.vmScript;
+        }
+      ) proofNames
+      ++ [
+        {
+          name = "phase 7, L2";
+          script = launchNative;
+        }
+      ];
   };
 in
-{ inherit vm drivers spec-probe spec-paths; } // builds // bins
+{
+  inherit
+    vm
+    drivers
+    spec-probe
+    spec-paths
+    launch-driver
+    launch-test
+    ;
+}
+// builds
+// bins

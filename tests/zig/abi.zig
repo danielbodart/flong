@@ -270,6 +270,20 @@ fn mountConstants() usize {
     return pairs.len;
 }
 
+/// The launch's constants in sys.zig against their macros (phase 7, L2:
+/// linux/fcntl.h): O_TMPFILE is __O_TMPFILE|O_DIRECTORY, whose O_DIRECTORY
+/// is the arch's.
+fn launchConstants() usize {
+    const pairs = .{
+        .{ "O_TMPFILE", @as(u32, @bitCast(sys.O_TMPFILE)), c.O_TMPFILE },
+        .{ "AT.SYMLINK_FOLLOW", sys.AT.SYMLINK_FOLLOW, c.AT_SYMLINK_FOLLOW },
+    };
+    inline for (pairs) |p| {
+        if (p[1] != p[2]) fail("sys.{s}: {d}, header {d}", .{ p[0], p[1], p[2] });
+    }
+    return pairs.len;
+}
+
 /// The calls `mine` is for, by std's SYS for this arch, against asm/unistd.h.
 fn sameSyscalls() usize {
     const names = .{
@@ -279,6 +293,8 @@ fn sameSyscalls() usize {
         // the mount helper's (phase 4)
            "setns",         "unshare", "setresuid",  "setresgid",
         "setfsuid",  "setfsgid",   "fchownat",     "umask",          "readlinkat", "umount2",       "ioctl",   "pipe2",     "clock_gettime",
+        // the launch's (phase 7)
+        "linkat",
     };
     inline for (names) |name| {
         const h = @field(c, "__NR_" ++ name);
@@ -320,6 +336,7 @@ pub const report = blk: {
         .sigaction = sigactionLayout(),
         .init = initConstants(),
         .mount = mountConstants(),
+        .launch = launchConstants(),
         .constants = sameConstants(),
         .syscalls = sameSyscalls(),
         .stx_mnt_id = @offsetOf(c.struct_statx, "stx_mnt_id"),
@@ -331,11 +348,11 @@ comptime {
 }
 
 test "the kernel ABI matches Zig's bundled headers" {
-    std.debug.print("abi: {s}: __NR_openat {d}, LINUX_VERSION_CODE {d}, stx_mnt_id at 0x{x}; fields compared: open_how {d}, mount_attr {d}, mnt_id_req {d}, statmount {d}, clone_args {d}, iovec {d}, Statx {d}, capability {d}, sigaction {d}; constants: clone3's {d}, flong-init's {d}, the mount helper's {d}; syscalls {d}\n", .{
+    std.debug.print("abi: {s}: __NR_openat {d}, LINUX_VERSION_CODE {d}, stx_mnt_id at 0x{x}; fields compared: open_how {d}, mount_attr {d}, mnt_id_req {d}, statmount {d}, clone_args {d}, iovec {d}, Statx {d}, capability {d}, sigaction {d}; constants: clone3's {d}, flong-init's {d}, the mount helper's {d}, the launch's {d}; syscalls {d}\n", .{
         report.arch,       report.openat,     report.version,    report.stx_mnt_id,
         report.open_how,   report.mount_attr, report.mnt_id_req, report.statmount,
         report.clone_args, report.iovec,      report.statx,      report.cap,
         report.sigaction,  report.constants,  report.init,       report.mount,
-        report.syscalls,
+        report.launch,     report.syscalls,
     });
 }

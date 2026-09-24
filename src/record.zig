@@ -2,9 +2,10 @@
 //! postStop (flong-record.h). Phase 5 ports the sweep's half of
 //! launcher/flong-record.c: state_open (:41-89), reading and parsing a
 //! record (:169-308), postStop (:425-484), the sweep (:486-734) and the
-//! sweeper's watch (:736-825). Making and writing records is L2's; the C
-//! launcher writes them until then, and this sweeps them (ZIG.md, "The
-//! record contract").
+//! sweeper's watch (:736-825). Phase 7's L2 ports the launch's half: the
+//! cache lock (:91-149) and the launcher's own record (:151-167, 310-423),
+//! whose bytes tests/golden/records/ pins, so either sweeper reads either
+//! launcher's records (ZIG.md, "The record contract").
 //!
 //! A record's lock is the launcher's life, and a record is only ever seen
 //! locked: it is made unnamed with O_TMPFILE, locked and filled, and only
@@ -86,12 +87,74 @@ pub fn stateOpen(state: [:0]const u8) Error!State {
     return .{ .state = sfd.holdUntilExit(), .sessions = dfd.holdUntilExit() };
 }
 
+// ---- the cache (flong-record.c:91-149) ----
+
+/// cache_lock's answers but a failure (flong-record.h:31-42).
+pub const Cache = union(enum) {
+    /// the shared lock, held for the launcher's life
+    locked: fdt.Held(.dir),
+    /// the cache was swept: absent, renamed before the lock was granted, or
+    /// made afresh in its place by a wrapper still preparing it; the launch
+    /// starts over from the wrapper
+    swept,
+};
+
+/// cache_lock (flong-record.c:91-149): a shared flock on the cache
+/// directory, then the checks that the path still names the inode it
+/// locked and that the inode holds the prepared root. Called before the
+/// launcher closes inherited descriptors, so a cold wrapper's own shared
+/// lock is never released before this one is held.
+pub fn cacheLock(cache: [:0]const u8) sig.Error!Cache {
+    const cfd = switch (fdt.openDir(fdt.cwd, cache) catch return msg.refuse("cache {s}: too many open descriptors", .{cache})) {
+        .ok => |d| d,
+        .err => |e| return if (e == .NOENT) .swept else msg.fail(e, "cache {s}", .{cache}),
+    };
+    const locked: sig.Error!bool = steps: {
+        // The one exclusive holder is a sweep of a superseded cache, which
+        // holds the lock while it renames the cache away and deletes it, as
+        // long as that deletion takes. So the wait is proc.lockWait's,
+        // which a terminating signal ends (:102-107).
+        proc.lockWait(cfd, sys.LOCK.SH) catch |e| break :steps e;
+        // The lock is on what was opened. If a sweep renamed the cache away
+        // before the lock was granted, the path names another directory
+        // now, or nothing, and this launch must start over from the
+        // wrapper (:108-125).
+        const held = msg.check(cfd.fstat(), "stat {s}", .{cache}) catch |e| break :steps e;
+        const named = switch (sys.fstatat(sys.AT.FDCWD, cache, 0)) {
+            .ok => |st| st,
+            .err => |e| break :steps if (e == .NOENT) false else msg.fail(e, "stat {s}", .{cache}),
+        };
+        if (named.dev != held.dev or named.ino != held.ino) break :steps false;
+        // The path naming what was locked is not enough. A sweep may have
+        // taken the cache this launch was prepared against away and another
+        // launch's wrapper made a cache of its own in its place: that one's
+        // shared lock is granted beside this one, and its prepared/ appears
+        // only once it has finished preparing. A cache without the root is
+        // answered as a swept one is: the wrapper, run again, waits for the
+        // preparer's lock and finds the root made. Once the root is seen
+        // under this shared lock it stays, since a sweep must hold the lock
+        // exclusively to take the cache away (:126-142).
+        switch (cfd.fstatat("prepared", 0)) {
+            .ok => {},
+            .err => |e| break :steps if (e == .NOENT) false else msg.fail(e, "stat {s}/prepared", .{cache}),
+        }
+        break :steps true;
+    };
+    if (locked catch |e| {
+        cfd.close();
+        return e;
+    }) return .{ .locked = cfd.holdUntilExit() };
+    cfd.close();
+    return .swept;
+}
+
 // ---- reading records ----
 
 /// read_record (flong-record.c:169-191): a whole record into `buf`. EFBIG
 /// when it is too long to be one; the read's errno otherwise. Prints
-/// nothing: the caller says what the record was for.
-pub fn readRecord(f: fdt.File, buf: *[rec_max + 1]u8) sys.Result(usize) {
+/// nothing: the caller says what the record was for. `f` is a record the
+/// sweep opened (a file) or the launcher's own (a record).
+pub fn readRecord(f: anytype, buf: *[rec_max + 1]u8) sys.Result(usize) {
     var len: usize = 0;
     while (true) {
         const n = switch (f.pread(buf[len..], len)) {
@@ -200,8 +263,9 @@ pub fn poststopLineLen(rec: []const u8) usize {
 /// first, blanked with newlines in one write of at most a line, so the
 /// record is then exactly what it was without the key, and a sweeper killed
 /// at any moment leaves the old record or the new one, never half of each.
-/// `w` is open for writing; `rec` is the record as read.
-fn blankPoststop(w: fdt.File, rec: []const u8, name: []const u8) Error!void {
+/// `w` is open for writing, a file or the launcher's record; `rec` is the
+/// record as read.
+fn blankPoststop(w: anytype, rec: []const u8, name: []const u8) Error!void {
     const len = poststopLineLen(rec);
     if (len == 0) return;
     var blank: [path_max + 16]u8 = undefined;
@@ -209,6 +273,140 @@ fn blankPoststop(w: fdt.File, rec: []const u8, name: []const u8) Error!void {
     @memset(blank[0..len], '\n');
     const n = try msg.check(w.pwrite(blank[0..len], 0), "drop poststop= from the record of {s}", .{name});
     if (n != len) return msg.fail(.IO, "drop poststop= from the record of {s}", .{name});
+}
+
+// ---- the launcher's own record (flong-record.c:151-167, 310-423) ----
+
+/// struct fl_record (flong-record.h:44-49): the launcher's record, locked
+/// (LOCK_EX) for the launcher's life.
+pub const Record = struct {
+    /// sessions/, not the record's
+    dir: fdt.Held(.dir),
+    rec: fdt.Fd(.record),
+    /// the machine's name
+    name: [:0]const u8,
+    /// once it is in the directory
+    linked: bool,
+
+    /// rec_set_leader (flong-record.c:391-398): appends
+    /// leader=<pid>:<starttime>, once, at child-pid, at the descriptor's
+    /// offset: one write, which a SIGKILL cannot split.
+    pub fn setLeader(self: *const Record, leader: sys.pid_t) Error!void {
+        var buf: [64]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "leader={d}:{d}\n", .{ leader, proc.starttime(leader) }) catch unreachable; // proven: 7 + 11 + 1 + 20 + 1 < 64
+        return writeRecord(self.rec, line, self.name);
+    }
+
+    /// rec_poststop_done (flong-record.c:400-406): rewrites the record
+    /// without poststop=, once postStop has run, so a sweep of a record left
+    /// behind does not run it again.
+    pub fn poststopDone(self: *const Record) Error!void {
+        var buf: [rec_max + 1]u8 = undefined;
+        const len = try msg.check(readRecord(self.rec, &buf), "read the record of {s}", .{self.name});
+        return blankPoststop(self.rec, buf[0..len], self.name);
+    }
+
+    /// rec_remove (flong-record.c:408-417): unlinked first, then closed,
+    /// which unlocks it: a sweep that opened the record before the unlink
+    /// and is granted the lock after the close finds it has no links and
+    /// leaves it (ordering checkpoint 10). A failed unlink is said, and the
+    /// record closed all the same. The last step of a teardown whose
+    /// cgroup is gone.
+    pub fn remove(self: *Record) void {
+        if (self.linked) switch (self.dir.unlinkat(self.name, 0)) {
+            .ok => {},
+            .err => |e| msg.sayErrno(e, "remove the record of {s}", .{self.name}),
+        };
+        self.linked = false;
+        self.rec.close();
+    }
+
+    /// rec_close (flong-record.c:419-423): closed without the unlink: its
+    /// cgroup could not be removed yet (pasta still exiting), and the sweep
+    /// finishes the job. What happens to a record, implicitly, when the
+    /// launcher is killed.
+    pub fn closeKeeping(self: *Record) void {
+        self.linked = false;
+        self.rec.close();
+    }
+};
+
+/// write_record (flong-record.c:153-167): all of `bytes` at the record's
+/// offset, in one write. A regular file takes a small write whole, so a
+/// short write is an error (EIO), not something to go on from.
+fn writeRecord(rec: fdt.Fd(.record), bytes: []const u8, name: []const u8) Error!void {
+    const n = try msg.check(rec.write(bytes), "write the record of {s}", .{name});
+    if (n != bytes.len) return msg.fail(.IO, "write the record of {s}", .{name});
+}
+
+/// rec_create (flong-record.c:324-389; flong-record.h:51-63): the record,
+/// already locked. Ordering checkpoint 10, in this one function: made
+/// unnamed with O_TMPFILE in sessions/, locked, written (poststop= when
+/// there is a postStop, and cgroup=) in one write, and only then linked as
+/// <machine>, so a record is never seen unlocked or half-written. A name
+/// already taken (EEXIST) is a refusal while that session runs: it has no
+/// leader= yet, or its leader is alive. When its leader has exited, the
+/// session is ending, and whoever holds its lock (its launcher's teardown,
+/// or a sweep waiting for pasta) is releasing it: create waits for the
+/// lock, releases the session itself if it is still there (with `h`, as
+/// the sweep does), and links the name then. error.Aborted when a
+/// terminating signal ended that wait.
+pub fn create(sessions: fdt.Held(.dir), h: *const cgroup.Holder, machine: [:0]const u8, post_stop: ?[]const u8, cgroup_path: []const u8) sig.Error!Record {
+    // 1. The text. A newline in a value would be a line of its own
+    // choosing (:333-341).
+    if ((post_stop != null and std.mem.indexOfScalar(u8, post_stop.?, '\n') != null) or
+        std.mem.indexOfScalar(u8, cgroup_path, '\n') != null)
+        return msg.refuse("a newline is in the postStop path or the cgroup path of {s}", .{machine});
+    var buf: [rec_max]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    const fits = blk: {
+        if (post_stop) |ps| w.print("poststop={s}\n", .{ps}) catch break :blk false;
+        w.print("cgroup={s}\n", .{cgroup_path}) catch break :blk false;
+        // snprintf into REC_MAX: the text and its NUL must fit.
+        break :blk w.end < buf.len;
+    };
+    if (!fits) return msg.refuse("the record of {s} is too long", .{machine});
+    const text = buf[0..w.end];
+
+    // 2. Unnamed, with O_TMPFILE (:343-345).
+    const rec = try msg.check(fdt.openRecord(sessions), "make the record of {s}", .{machine});
+    const linked: sig.Error!void = steps: {
+        // 3. Locked: nobody else can see an unnamed file, so the lock is
+        // granted at once (:346-350).
+        _ = msg.check(rec.flock(sys.LOCK.EX | sys.LOCK.NB), "lock the record of {s}", .{machine}) catch |e| break :steps e;
+        // 4. Written, in one write (:351-352).
+        writeRecord(rec, text, machine) catch |e| break :steps e;
+        // 5. Linked through /proc/self/fd/N, which names the unnamed file
+        // without the capability AT_EMPTY_PATH needs, and refuses a name
+        // that exists: the O_EXCL (:353-382).
+        while (true) {
+            switch (rec.linkInto(sessions, machine)) {
+                .ok => break :steps,
+                .err => |e| if (e != .EXIST) break :steps msg.fail(e, "record {s}", .{machine}),
+            }
+            // The name is taken. A session that has ended keeps it until it
+            // is released: by its launcher's teardown, or by a sweep, which
+            // holds the lock while it waits for pasta to go and runs
+            // postStop, and which the inline sweep therefore took for a
+            // live launcher. Running the same machine again right after it
+            // exits waits for that release, on the lock, and takes the name
+            // once it is free. There is no count: each turn follows the
+            // release of the session that held the name, and a running one
+            // refuses.
+            switch (sweepOne(sessions, machine, h, .wait_ended) catch |e| break :steps e) {
+                .released, .gone => continue,
+                .running => break :steps msg.refuse("a session named {s} is already running", .{machine}),
+                // A record the sweep left, a malformed one under the name
+                // included (quirk 5, kept).
+                .left => break :steps msg.refuse("a session named {s} has ended but cannot be released yet", .{machine}),
+            }
+        }
+    };
+    linked catch |e| {
+        rec.close();
+        return e;
+    };
+    return .{ .dir = sessions, .rec = rec, .name = machine, .linked = true };
 }
 
 // ---- postStop (flong-record.c:425-484) ----
@@ -355,7 +553,7 @@ const Outcome = enum { drop, left, released };
 /// release (flong-record.c:522-604): releases one dead session, whose
 /// record's lock the sweep holds (`rec`, read-only). error.Aborted when a
 /// terminating signal ended the sweep.
-fn release(dfd: fdt.Dir, name: [:0]const u8, rec: fdt.File, h: *const cgroup.Holder) error{Aborted}!Released {
+fn release(dfd: anytype, name: [:0]const u8, rec: fdt.File, h: *const cgroup.Holder) error{Aborted}!Released {
     var buf: [rec_max + 1]u8 = undefined;
     var f: Fields = .{};
     var session: ?cgroup.Session = null;
@@ -473,8 +671,10 @@ pub const Swept = enum { released, left, gone, running };
 /// released the record, and a new session taken the name, between the open
 /// and the lock. `.gone` when the name is gone or names another record
 /// now; `.running` when the lock is held and `mode` does not wait for it. A
-/// failure to open or lock is reported, and the record left.
-pub fn sweepOne(dfd: fdt.Dir, name: [:0]const u8, h: *const cgroup.Holder, mode: LockMode) error{Aborted}!Swept {
+/// failure to open or lock is reported, and the record left. `dfd` is
+/// sessions/, a directory handle of the sweep's own or the launcher's held
+/// one (flong-record.c:369).
+pub fn sweepOne(dfd: anytype, name: [:0]const u8, h: *const cgroup.Holder, mode: LockMode) error{Aborted}!Swept {
     // O_NONBLOCK: a FIFO planted here must not hang the open.
     const opened = fdt.openFile(dfd, name, .{ .NOFOLLOW = true, .NONBLOCK = true }, 0) catch {
         msg.say("open the record of {s}: too many open descriptors", .{name});

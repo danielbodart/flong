@@ -175,3 +175,63 @@ pub fn inotify(tokens: []const u16, buf: []align(4) u8) []u8 {
     }
     return buf[0..n];
 }
+
+/// A read of /proc/self/mountinfo (cgroup.mountinfo, the C's
+/// cg_check_nsdelegate). Half the lists (an even first token) are lines,
+/// each "id parent dev root POINT options [optional] SEP FSTYPE source
+/// SUPER", its point /sys/fs/cgroup two times in three, its separator,
+/// file system and superblock options drawn so that cgroup2 with
+/// nsdelegate, without it, another file system and a line cut short are
+/// each common, and the last such line decides; the others are free
+/// pieces.
+pub fn mountinfo(tokens: []const u16, buf: []u8) []u8 {
+    if (tokens.len > 0 and tokens[0] % 2 == 0) {
+        const points = [_][]const u8{ "/sys/fs/cgroup", "/sys/fs/cgroup", "/", "/sys/fs/cgroup/x", "/sys/fs/cgroup ", "" };
+        const optional = [_][]const u8{ "", " shared:4", " master:1 shared:9", " -", " - -" };
+        const seps = [_][]const u8{ " - ", " - ", " - ", "  - ", " -", "- ", " -  " };
+        const fstypes = [_][]const u8{ "cgroup2", "cgroup2", "cgroup", "tmpfs", "cgroup2x", "", " cgroup2" };
+        const supers = [_][]const u8{
+            "rw,nsdelegate,memory_recursiveprot", "rw,nsdelegate", "nsdelegate", "rw",          "rw,nsdelegatex",
+            "rw,xnsdelegate",                     ",,nsdelegate,", "",           " nsdelegate", "rw,nsdelegate\x00",
+        };
+        var n: usize = 0;
+        var i: usize = 1;
+        while (i + 4 < tokens.len) : (i += 5) {
+            put(buf, &n, "29 23 0:26 / ");
+            put(buf, &n, points[tokens[i] % points.len]);
+            put(buf, &n, " rw,nosuid,nodev,noexec,relatime");
+            put(buf, &n, optional[tokens[i + 1] % optional.len]);
+            put(buf, &n, seps[tokens[i + 2] % seps.len]);
+            put(buf, &n, fstypes[tokens[i + 3] % fstypes.len]);
+            // The source, or the line cut before it.
+            if (tokens[i + 4] % 9 == 8) {
+                put(buf, &n, "\n");
+                continue;
+            }
+            put(buf, &n, " cgroup2 ");
+            put(buf, &n, supers[(tokens[i + 4] >> 4) % supers.len]);
+            put(buf, &n, if (tokens[i + 4] % 13 == 12) "" else "\n");
+        }
+        return buf[0..n];
+    }
+    return build(&.{
+        "29 23 0:26 / /sys/fs/cgroup rw shared:4 - cgroup2 cgroup2 rw,nsdelegate\n",
+        "30 23 0:27 / /sys/fs/cgroup rw - tmpfs tmpfs rw\n",
+        "/sys/fs/cgroup",
+        " ",
+        " - ",
+        "-",
+        "cgroup2",
+        "nsdelegate",
+        ",",
+        "\n",
+        "\x00",
+        "1",
+        "rw",
+        "tmpfs",
+        long_a,
+        "\t",
+        "  ",
+        "cgroup",
+    }, tokens, buf);
+}

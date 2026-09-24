@@ -22,7 +22,8 @@
 //! phase 5 the process layer's (flong-util.c:244-513): clone3, waitid on a
 //! pidfd, pidfd_open and pidfd_send_signal, poll, pipe2, the signal mask,
 //! signalfd4 and dispositions, fcntl and dup2 for Spawn's child, inotify,
-//! the real and effective uid, and faccessat for postStop's X_OK.
+//! the real and effective uid, and faccessat for postStop's X_OK; phase 7
+//! the launch's records (flong-record.c:343-356): O_TMPFILE and linkat.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -843,6 +844,21 @@ pub fn inotifyInit1(flags: u32) Result(fd_t) {
 /// inotify_add_watch(2): the watch descriptor.
 pub fn inotifyAddWatch(fd: fd_t, path: [*:0]const u8, mask: u32) Result(i32) {
     return result(i32, linux.inotify_add_watch(fd, path, mask));
+}
+
+// ---- records (flong-record.c:343-356) ----
+
+/// O_TMPFILE as the kernel and glibc spell it, __O_TMPFILE|O_DIRECTORY
+/// (asm-generic/fcntl.h): std's O.TMPFILE is the one bit __O_TMPFILE
+/// (linux.zig:333, 474), and an open with it alone is EINVAL. O_DIRECTORY
+/// differs by arch, so this does too (x86_64 0o20200000, aarch64
+/// 0o20040000; tests/zig/abi.zig holds both).
+pub const O_TMPFILE: O = .{ .TMPFILE = true, .DIRECTORY = true };
+
+/// linkat(2): `flags` takes AT.SYMLINK_FOLLOW, which a link through
+/// /proc/self/fd/N needs to name the file and not the magic link.
+pub fn linkat(old_dir: fd_t, old: [*:0]const u8, new_dir: fd_t, new: [*:0]const u8, flags: u32) Result(void) {
+    return result(void, linux.linkat(old_dir, old, new_dir, new, @intCast(flags)));
 }
 
 test "read and write carry the errno" {

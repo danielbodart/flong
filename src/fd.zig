@@ -29,7 +29,9 @@
 //! `signalfd`, `inherited` (a descriptor the caller handed over, which
 //! Spawn keeps), pidfds of its own children (`proc.zig`, whose slot is
 //! reserved before clone3) and `retainOnly`, a fork child's close of all
-//! but its keep list.
+//! but its keep list. Phase 7's L2 adds the launch's: `record` (a session's
+//! record, made unnamed with O_TMPFILE, flong-record.c:343-386) and U1's
+//! and U2's `userns` by /proc/<pid>/ns/user (flong-ns.c:141-150).
 //!
 //!   Fd(k)       an owned handle: `close` once, then every copy is stale
 //!   Held(k)     `h.holdUntilExit()`: the same descriptor, no `close`, for
@@ -69,6 +71,11 @@ pub const Kind = enum(u8) {
     /// A descriptor the caller handed over at a number the spec named
     /// (flong-launch.c:407-408; ZIG.md, "The descriptor layer").
     inherited,
+    /// A session's record (flong-record.c:343-417): made unnamed with
+    /// O_TMPFILE|O_RDWR, locked, written at its offset (never O_APPEND),
+    /// read and blanked at 0, linked by its selfPath, unlinked before its
+    /// close (ZIG.md, ordering checkpoint 10).
+    record,
 };
 
 /// A namespace setns enters, with the kind of descriptor naming it.
@@ -256,7 +263,7 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
         }
 
         pub fn write(self: Self, bytes: []const u8) sys.Result(usize) {
-            comptime need("write", &.{ .file, .pipe_w });
+            comptime need("write", &.{ .file, .pipe_w, .record });
             return sys.write(self.raw(), bytes);
         }
 
@@ -267,24 +274,36 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
         }
 
         pub fn pread(self: Self, buf: []u8, offset: u64) sys.Result(usize) {
-            comptime need("pread", &.{.file});
+            comptime need("pread", &.{ .file, .record });
             return sys.pread(self.raw(), buf, offset);
         }
 
         pub fn pwrite(self: Self, bytes: []const u8, offset: u64) sys.Result(usize) {
-            comptime need("pwrite", &.{.file});
+            comptime need("pwrite", &.{ .file, .record });
             return sys.pwrite(self.raw(), bytes, offset);
         }
 
         pub fn fstat(self: Self) sys.Result(sys.Stat) {
-            comptime need("fstat", &.{ .file, .dir, .path, .tree, .cgroup });
+            comptime need("fstat", &.{ .file, .dir, .path, .tree, .cgroup, .record });
             return sys.fstat(self.raw());
         }
 
         /// flock(2): `op` is LOCK.SH, LOCK.EX or LOCK.UN, with LOCK.NB.
         pub fn flock(self: Self, op: i32) sys.Result(void) {
-            comptime need("flock", &.{ .file, .dir });
+            comptime need("flock", &.{ .file, .dir, .record });
             return sys.flock(self.raw(), op);
+        }
+
+        // ---- record ----
+
+        /// linkat(AT_FDCWD, "/proc/self/fd/N", dir, name,
+        /// AT_SYMLINK_FOLLOW) (flong-record.c:353-356): names the unnamed
+        /// file without the capability AT_EMPTY_PATH needs, and refuses a
+        /// name that exists (EEXIST), as O_EXCL would.
+        pub fn linkInto(self: Self, dir: anytype, name: [*:0]const u8) sys.Result(void) {
+            comptime need("linkInto", &.{.record});
+            const p = selfPath(self);
+            return sys.linkat(sys.AT.FDCWD, p.path(), dirRaw(dir), name, sys.AT.SYMLINK_FOLLOW);
         }
 
         // ---- dir: calls on paths relative to it ----
@@ -521,6 +540,27 @@ pub fn inotifyInit() Error!sys.Result(Fd(.inotify)) {
 /// sig.openSignalfd's, which keeps it in sig.fd.
 pub fn openSignalfd(mask: u64) Error!sys.Result(Fd(.signalfd)) {
     return adopted(.signalfd, sys.signalfd(mask, sys.SFD_CLOEXEC | sys.SFD_NONBLOCK));
+}
+
+/// An unnamed file in the directory `dir` (flong-record.c:343):
+/// openat(dir, ".", O_TMPFILE|O_RDWR|O_CLOEXEC, 0600), sys.O_TMPFILE being
+/// the kernel's __O_TMPFILE|O_DIRECTORY. Nobody else can see it until it
+/// is linked.
+pub fn openRecord(dir: anytype) Error!sys.Result(Fd(.record)) {
+    var f = sys.O_TMPFILE;
+    f.ACCMODE = .RDWR;
+    f.CLOEXEC = true;
+    return adopted(.record, sys.openat(dirRaw(dir), ".", f, 0o600));
+}
+
+/// /proc/<pid>/ns/user, O_RDONLY|O_CLOEXEC (flong-ns.c:141-150): the user
+/// namespace a child of the caller's is in. The child is unreaped while
+/// this opens, so `pid` names no other process.
+pub fn openUserns(pid: sys.pid_t) Error!sys.Result(Fd(.userns)) {
+    var buf: [32]u8 = undefined;
+    // "/proc/" and an i32 and "/ns/user" are at most 25 bytes.
+    const path = std.fmt.bufPrintZ(&buf, "/proc/{d}/ns/user", .{pid}) catch unreachable; // proven: 25 < 32
+    return adopted(.userns, sys.openat(sys.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0));
 }
 
 /// A descriptor the caller handed over at number `n`, once the spec has
