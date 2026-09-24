@@ -6,8 +6,117 @@ on:
   pull_request:
   workflow_dispatch:
 
+# One job per check, so the VM tests, the Zig builds and the assertion
+# shards run on parallel runners and a slow one no longer holds up the
+# rest (the single `nix flake check` step took 9.5-12.8 min in runs
+# 35947311755, 35954009898 and 35958022199). `list` names the checks,
+# `check` builds each (fail-fast off, so one red check does not hide
+# another), and `eval` evaluates the flake's other outputs.
+#
+# cachix/install-nix-action enables KVM on the standard runner ("Enabled
+# KVM" in the logs; the guests use kvm-clock), so the VM tests run on
+# hardware virtualisation, not emulation. `kvm` in system-features is what
+# lets Nix schedule them.
+#
+# The binary cache is Cachix's danielbodart (public, free tier, 5 GB).
+# Every job that builds reads it; a leg pushes only when CACHIX_AUTH_TOKEN
+# is set, which it is not for a fork's pull request, so there the cache is
+# read-only.
+
 jobs:
+  list:
+    runs-on: ubuntu-latest
+    outputs:
+      checks: ${{ steps.list.outputs.checks }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+
+      # Nothing is built here, so nothing is pushed.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: danielbodart
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+
+      # The names only; each check is evaluated in its own leg below.
+      - id: list
+        run: echo "checks=$(nix eval --json .#checks.x86_64-linux --apply builtins.attrNames)" >> "$GITHUB_OUTPUT"
+
   check:
+    needs: [list]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(needs.list.outputs.checks) }}
+    name: check (${{ matrix.check }})
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+
+      # skipPush: the action's own push sends every path a build made, less
+      # what an exclude-only pushFilter matches (a grep -v in its
+      # post-build hook), so a VM test's NixOS closure would go too. The
+      # last step pushes an allow-list instead.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: danielbodart
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+
+      - name: nix build ${{ matrix.check }}
+        run: nix build -L --no-link ".#checks.x86_64-linux.${{ matrix.check }}"
+
+      # The free tier is 5 GB, so only flong's own derivations are pushed,
+      # by name: the Zig sets and the C launcher (flong-launcher,
+      # flong-seccomp, flong-fixtures), the seccomp tiers' filters
+      # (flong-seccomp-*), the dependency fetch (flong-<v>-zig-deps), the
+      # integration derivations (flong-drivers, flong-proofs-vm,
+      # integration), and the checks that are builds, not VMs: native-*,
+      # cross-aarch64, golden*, shellcheck and the assertion shards. A VM
+      # test's result (vm-test-run-*), its driver, the NixOS system it
+      # boots and the module's per-test scripts (flong-payload-* and the
+      # like) match none of these, so are never pushed. The candidates are
+      # the outputs of the check's derivation closure present in this
+      # runner's store; cachix push sends each with its closure, but skips
+      # what cache.nixos.org has, so nixpkgs' packages are not pushed
+      # either. Run on a failure too, so what did build is there for the
+      # rerun.
+      - name: Push flong's own outputs to Cachix
+        if: ${{ !cancelled() }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CHECK: ${{ matrix.check }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "No CACHIX_AUTH_TOKEN (a fork's pull request): nothing is pushed."
+            exit 0
+          fi
+          drv="$(nix eval --raw ".#checks.x86_64-linux.$CHECK.drvPath")"
+          nix-store --query --requisites "$drv" | grep '\.drv$' \
+            | xargs nix-store --query --outputs | sort -u \
+            | while read -r p; do if [ -e "$p" ]; then echo "$p"; fi; done \
+            | { grep -E '^/nix/store/[a-z0-9]{32}-(flong-(launcher|seccomp|fixtures|drivers|proofs-vm)|flong-[0-9]+-zig-deps|native-(test-debug|test-release|lint|analyze)|cross-aarch64|golden|integration|shellcheck|assertions-[0-9])' || true; } \
+            > push.txt
+          echo "Pushing $(wc -l < push.txt) paths, with their closures:"
+          cat push.txt
+          if [ -s push.txt ]; then cachix push danielbodart < push.txt; fi
+
+  # What `nix flake check` checks besides building the checks: that every
+  # output (the module, bench, the apps, the dev shell, the formatter)
+  # evaluates and has the right shape.
+  eval:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -18,28 +127,20 @@ jobs:
             experimental-features = nix-command flakes
             system-features = nixos-test benchmark big-parallel kvm
 
+      - name: nix flake check --no-build
+        run: nix flake check --no-build
 
-      # No binary cache. The free tier of the Magic Nix Cache was shut down in
-      # February 2025, when GitHub retired the cache API it was built on, and
-      # it now answers 400. Nothing replaces it here because the whole check is
-      # under two minutes; FlakeHub Cache or Cachix are the options if it grows.
-      #
-      # KVM is not available on the standard runner either, so the VM test
-      # falls back to software emulation. Slower, but it does run.
-      - name: nix flake check
-        run: nix flake check --print-build-logs
-
-  # CONTINUOUS RELEASE. Trunk-based: every push to trunk that passes the check
-  # above is published, with no manual step and no tag to cut by hand. Gated on
-  # a direct push to trunk (never a pull request) and on the check having
-  # succeeded, so a red commit never ships.
+  # CONTINUOUS RELEASE. Trunk-based: every push to trunk that passes every
+  # check above is published, with no manual step and no tag to cut by hand.
+  # Gated on a direct push to trunk (never a pull request) and on every leg
+  # of `check` and `eval` having succeeded, so a red commit never ships.
   #
   # The derived version (major.commit-count.run-number, scripts/version.sh)
   # makes every build a unique, monotonic release, so two pushes cannot collide
   # on a tag and a re-run of the same commit does not either.
   release:
-    needs: [check]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/trunk' && needs.check.result == 'success'
+    needs: [check, eval]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/trunk' && needs.check.result == 'success' && needs.eval.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
