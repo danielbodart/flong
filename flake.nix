@@ -45,6 +45,13 @@
             imports = [ ./tests/parity.nix ];
           };
 
+          # TRANSITION ONLY (STANDALONE.md, S3), deleted with
+          # rootless-wrapper.bash: every declaration of basic and rootless,
+          # its spec as the wrapper built it against flong launch's.
+          transition = pkgs.testers.runNixOSTest {
+            imports = [ ./tests/transition.nix ];
+          };
+
           # What the native code needs a kernel for: a delegated user
           # manager, subordinate ids, a real pid 1 (DESIGN.md, "The build").
           native = pkgs.testers.runNixOSTest {

@@ -635,9 +635,10 @@ in
         out = machine.succeed("cd /srv/work && plain true 2>&1 && echo rc=0 || echo rc=$?")
         assert "refusing to run as root" in out and out.split()[-1] == "rc=1", out
         # The launcher and the sweeper refuse root themselves, before
-        # reading anything else, for a caller who runs them directly.
-        flong = machine.succeed(
-            "grep -m 1 -o '/nix/store/[^/]*-flong-launcher-[^/]*/bin/flong' \"$(readlink -f \"$(command -v plain)\")\"").strip()
+        # reading anything else, for a caller who runs them directly. plain
+        # is a link to flong.
+        flong = machine.succeed("readlink -f \"$(command -v plain)\"").strip()
+        assert flong.endswith("/bin/flong"), flong
         out = machine.succeed(f"{flong} launch -- true 2>&1 && echo rc=0 || echo rc=$?")
         assert "refusing to run as root" in out and out.split()[-1] == "rc=125", out
         out = machine.succeed(f"{flong} sweeper /tmp 2>&1 && echo rc=0 || echo rc=$?")
@@ -948,13 +949,15 @@ in
 
     @test("the mount helper's refusals: a destination twice, a directory for a file, a file on the way", part="b")
     def _():
-        # What the wrapper and module.nix's assertions keep a declaration
-        # from asking (rootless-wrapper.bash:100-116, 138-178; module.nix:685),
-        # so a copy of plain's wrapper hands the launcher one more mount
-        # (DEST SRC, flong-spec.c:83). The helper refuses before the gate
-        # opens, and the launcher says the mounts failed: 125
-        # (flong-launch.c:563-575). The workspace is /srv/work, bound there.
-        wrapper = machine.succeed("readlink -f \"$(command -v plain)\"").strip()
+        # What flong check and the prologue keep a declaration from asking
+        # (src/check.zig; src/launch/refuse.zig), so a copy of plain's
+        # declaration, launched as `flong launch FILE`, which any caller may
+        # do with any file, adds one bind to its containerMounts. The helper
+        # refuses before the gate opens, and the launcher says the mounts
+        # failed: 125 (flong-launch.c:563-575). The workspace is /srv/work,
+        # bound there.
+        flong = machine.succeed("readlink -f \"$(command -v plain)\"").strip()
+        zon = machine.succeed("cat /etc/flong/plain.zon")
         machine.succeed("mkdir /srv/work/adir && echo file > /srv/work/afile")
         GATE = "flong init: the gate closed without opening: not starting the payload"
         # flong init is its namespace's pid 1, which SIGPIPE's default never
@@ -962,39 +965,48 @@ in
         READY = "flong init: telling the launcher the root is built: Broken pipe"
         FAILED = "flong launch: the session's mounts failed; the payload does not run"
 
-        def extra_mount(tokens, payload="echo ok"):
-            line = f"spec+=({tokens})"
-            machine.succeed(
-                f"sed '/^exec \"\\$launcher\" /i {line}' {wrapper} > /tmp/plain-mount && "
-                "chmod 755 /tmp/plain-mount && "
-                f"test \"$(grep -cxF {shlex.quote(line)} /tmp/plain-mount)\" = 1")
-            return machine.succeed(as_user(f"/tmp/plain-mount {shlex.quote(payload)} 2>&1; echo rc=$?"))
+        # plain's declaration with a read-only bind of SRC at DEST first in
+        # its containerMounts, or as it is; launched with PAYLOAD.
+        marker = "    .containerMounts = .{"
+        assert zon.count(marker) == 1, zon
+        def extra_mount(bind, payload="echo ok"):
+            text = zon
+            if bind:
+                dest, src = bind
+                entry = f' .{{ .kind = .bind_ro, .dest = "{dest}", .src = "{src}" }},'
+                text = zon.replace(marker, marker + entry)
+            machine.succeed(f"printf %s {shlex.quote(text)} > /tmp/plain-mount.zon && chmod 644 /tmp/plain-mount.zon")
+            return machine.succeed(as_user(f"{flong} launch /tmp/plain-mount.zon -- {shlex.quote(payload)} 2>&1; echo rc=$?"))
 
         # flong init may or may not say the gate closed, or that READY's
         # reader is gone, before teardown kills it (flong-launch.c:792-797);
         # nothing else may be said.
-        def refused(tokens, message):
-            out = extra_mount(tokens)
+        def refused(bind, message):
+            out = extra_mount(bind)
             lines = [l for l in out.splitlines() if l not in (GATE, READY)]
-            assert lines == [f"flong launch: {message}", FAILED, "rc=125"], (tokens, out)
+            assert lines == [f"flong launch: {message}", FAILED, "rc=125"], (bind, out)
 
         # The control: the copy launches, and a mount it adds lands.
-        out = extra_mount("")
+        out = extra_mount(None)
         assert out == "ok\nrc=0\n", out
-        out = extra_mount("mount bind-ro /srv/work/adir /srv/lower", "cat /srv/work/adir/seed; echo")
+        out = extra_mount(("/srv/work/adir", "/srv/lower"), "cat /srv/work/adir/seed; echo")
         assert out == "from-the-lower-layer\nrc=0\n", out
 
-        # src/mount.zig:581, before any namespace is touched.
-        refused("mount bind-ro /srv/work /srv/lower", "/srv/work is mounted twice")
+        # A destination twice, the workspace's: refused before the launch,
+        # as refuse_path refused it, where the argv spec reached
+        # src/mount.zig:581 ("/srv/work is mounted twice"), which flong
+        # check and the prologue now keep every declaration from.
+        out = extra_mount(("/srv/work", "/srv/lower"))
+        assert out == "plain: workspace /srv/work is where the declaration already mounts something\nrc=1\n", out
         # src/mount.zig:469: a file's clone would not go on a directory.
-        refused("mount bind-ro /srv/work/adir /srv/work/afile",
+        refused(("/srv/work/adir", "/srv/work/afile"),
                 "/srv/work/adir is a directory and its source is not")
         # src/mount.zig:450, and :451 for the last component.
-        refused("mount bind-ro /srv/work/afile/x /srv/lower",
+        refused(("/srv/work/afile/x", "/srv/lower"),
                 "/srv/work/afile, on the way to /srv/work/afile/x, is not a directory")
-        refused("mount bind-ro /srv/work/afile /srv/lower", "/srv/work/afile is not a directory")
+        refused(("/srv/work/afile", "/srv/lower"), "/srv/work/afile is not a directory")
         machine.succeed("test -z \"$(ls -A /srv/work/adir)\" && test \"$(cat /srv/work/afile)\" = file")
-        machine.succeed("rm -r /srv/work/adir /srv/work/afile /tmp/plain-mount")
+        machine.succeed("rm -r /srv/work/adir /srv/work/afile /tmp/plain-mount.zon")
 
     @test("the swap race: nothing escapes the workspace", part="b")
     def _():

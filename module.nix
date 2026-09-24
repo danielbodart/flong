@@ -75,13 +75,12 @@ let
   # not a separator, because a word may hold any byte a Nix string can.
   flatCommands = cmds: lib.concatMap (cmd: [ (toString (lib.length cmd)) ] ++ cmd) cmds;
 
-  # postStart and postStop are ordered lists of commands, and the launcher's
-  # spec carries them as such: one `post-start N WORD...` or
-  # `post-stop N WORD...` per command, run in order, the first that fails
-  # ending the list (src/launch/hook.zig, src/record.zig's poststop). Each
-  # command is put behind the declaration's hook program, which gives it the
-  # hook's environment and then execs it, so it is the command's own
-  # process:
+  # postStart and postStop are ordered lists of commands, which the launch
+  # runs in order, the first that fails ending the list (src/launch/hook.zig,
+  # src/record.zig's poststop). Each command is run through the
+  # declaration's hook program, the declaration's postStartProgram and
+  # postStopProgram (src/decl.zig), which gives it the hook's environment
+  # and then execs it, so it is the command's own process:
   #
   #   flong-<kind>-<name> WORD... [ARG...]
   #
@@ -393,6 +392,14 @@ let
       seccompTierFilter = f.tier;
       seccompFixedFilters = f.fixed;
       seccompProject = f.project;
+      # `path` for the caller's commands, before the caller's own PATH, as
+      # writeShellApplication's runtimeInputs put it; and the hook programs
+      # each postStart and postStop command runs through.
+      commandPath = lib.optionals (c.path != [ ]) (lib.splitString ":" (lib.makeBinPath c.path));
+      postStartProgram = if c.postStart == [ ] then null
+        else "${mkHookProgram name "poststart" c}/bin/flong-poststart-${name}";
+      postStopProgram = if c.postStop == [ ] then null
+        else "${mkHookProgram name "poststop" c}/bin/flong-poststop-${name}";
     };
 
   # The rendered file, /etc/flong/<name>.zon.
@@ -407,15 +414,29 @@ let
     '';
   };
 
-  # THE LAUNCHER: a header of assignments, generated here, then
-  # rootless-wrapper.bash, the same text for every declaration. The header is
+  # THE LAUNCHER: a link NAME -> flong, and nothing else (STANDALONE.md, "The
+  # declaration's command"). flong reads its argv[0]'s basename, finds no
+  # subcommand by that name, and launches /etc/flong/NAME.zon, which
+  # environment.etc installs from declFileOf: exactly what `flong launch
+  # NAME -- ARGS` does.
+  mkLauncher = name: pkgs.runCommand "flong-${name}" { meta.mainProgram = name; } ''
+    mkdir -p $out/bin
+    ln -s ${flongLauncher}/bin/flong $out/bin/${lib.escapeShellArg name}
+  '';
+
+  # TRANSITION ONLY (STANDALONE.md, S3), deleted with rootless-wrapper.bash:
+  # the launcher as it was before flong launch read the declaration itself,
+  # a header of assignments, generated here, then rootless-wrapper.bash, the
+  # same text for every declaration. tests/transition.nix runs it with
+  # FLONG_DUMP_SPEC set, where it prints the spec it would hand flong launch
+  # and exits, and diffs that with `flong launch --dump-argv`. The header is
   # the only place a declaration reaches bash, and every value in it is
   # quoted, so a name, a path or a command's word is data there and never
   # code. It runs nothing and expands nothing; the body decides what runs.
   #
   # `c.path` is on PATH for the caller's commands only. The body calls its
   # own tools by the store paths the header gives it.
-  mkLauncher = name: c:
+  mkTransitionWrapper = name: c:
     let
       d = declarationOf name c;
       inherit (d) declared;
@@ -540,7 +561,7 @@ let
       '';
     in
     pkgs.writeShellApplication {
-      inherit name;
+      name = "flong-wrapper-${name}";
       runtimeInputs = c.path;
       text = header + builtins.readFile ./rootless-wrapper.bash;
     };
@@ -918,26 +939,40 @@ in
           type = lib.types.package;
           readOnly = true;
           description = ''
-            The generated launcher, run directly as the user whose session it
-            is, never as root. It needs their subordinate ids in /etc/subuid
-            and /etc/subgid (`users.users.<name>.subUidRanges`, or
+            The declaration's command: `bin/<name>`, a link to flong, which
+            runs /etc/flong/<name>.zon as `flong launch <name> -- ARGS`
+            would. Run it directly as the user whose session it is, never as
+            root. It needs their subordinate ids in /etc/subuid and
+            /etc/subgid (`users.users.<name>.subUidRanges`, or
             `autoSubUidGidRange`).
 
             Its checks -- `workspace`, `binds`, `guard`, the depth rule -- are
             consistency checks, not a boundary: the caller can run
-            flong launch directly with any spec. flong launch's own checks and
-            the session's `seccomp` filter are the boundary against the
-            payload, and the prepared root and the records are the caller's,
-            as their `~/.bashrc` is. It exits with the payload's
-            status, 128+n when a signal killed the payload, 125 when the
-            payload never ran, and 75 when its prepared root was swept and it
-            could not relaunch.
+            flong launch directly with any declaration. flong launch's own
+            checks and the session's `seccomp` filter are the boundary
+            against the payload, and the prepared root and the records are
+            the caller's, as their `~/.bashrc` is. It exits with the
+            payload's status, 128+n when a signal killed the payload, 125
+            when the payload never ran, 75 when its prepared root was swept
+            and it could not relaunch, and 1 when it refused before
+            anything was launched.
           '';
+        };
+
+        # TRANSITION ONLY (STANDALONE.md, S3), deleted with
+        # rootless-wrapper.bash: tests/transition.nix's old side.
+        transitionWrapper = lib.mkOption {
+          type = lib.types.package;
+          readOnly = true;
+          internal = true;
+          visible = false;
+          description = "The launcher as rootless-wrapper.bash was, for the S3 transition check alone.";
         };
       };
 
       config = {
-        launcher = mkLauncher name config;
+        launcher = mkLauncher name;
+        transitionWrapper = mkTransitionWrapper name config;
       };
     }));
   };

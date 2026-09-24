@@ -146,6 +146,24 @@ pub fn relaunch(
     return exit_not_run;
 }
 
+/// relaunch for a launch from a declaration, which has no relaunch argv:
+/// says it is relaunching, as `relaunch` does, and execs this binary again
+/// with the process's own `argv` (relaunchSelf), with `envp` and
+/// `old_mask` back. It returns only when the exec failed, having said
+/// why: 125.
+pub fn relaunchSwept(
+    gpa: Allocator,
+    cache: []const u8,
+    argv: []const [*:0]const u8,
+    old_mask: u64,
+    envp: [*:null]const ?[*:0]const u8,
+) u8 {
+    msg.say("the cache {s} was swept before this launch locked it; relaunching", .{cache});
+    return switch (relaunchSelf(gpa, argv, old_mask, envp)) {
+        error.Reported => exit_not_run,
+    };
+}
+
 /// The wrapper's own relaunch (rootless-wrapper.bash:299, 307, 337:
 /// `exec "$self" "${launcher_args[@]}"`), for the three points where
 /// `flong launch DECL.zon`'s prologue finds its cache swept before it

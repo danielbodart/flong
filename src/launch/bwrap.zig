@@ -1,10 +1,11 @@
 //! launch/bwrap.zig: bwrap's spawn, step 12 of a launch (DESIGN.md, "The
 //! launch, in order"; launcher/flong-launch.c:334-410 of 5f1f08e,
 //! spawn_bwrap). The seccomp programs are opened, the info, ready and gate
-//! pipes made, and bwrap spawned from spec.bwrapArgv, every descriptor it
-//! is given named in its argv by Spawn.passFd (U1, U2, info, the seccomp
-//! programs, gate and ready) or kept by Spawn.keepInherited (the wrapper's
-//! keep-fds, which the spec's --ro-bind-data words already name).
+//! pipes made, the resolver's file written into a memfd, and bwrap spawned
+//! from spec.bwrapArgv, every descriptor it is given named in its argv by
+//! Spawn.passFd (U1, U2, info, the seccomp programs, the resolver's memfd,
+//! gate and ready) or kept by Spawn.keepInherited (an argv spec's
+//! keep-fds, which its --ro-bind-data words already name).
 //!
 //! One module per piece, where the port's plan had flong-launch as one
 //! root module: launch.zig's helpers are split by concern into src/launch/,
@@ -25,6 +26,7 @@
 //!     for (ends.seccomp) |h| h.close();
 //!     ends.u2.close();
 //!     for (ends.keep) |h| h.close();
+//!     if (ends.resolv) |h| h.close();
 //!
 //! A copy the launcher kept of a write end would hide bwrap's death from
 //! the info and ready readers, and one of the gate's read end would never
@@ -61,6 +63,8 @@ pub const ChildEnds = struct {
     seccomp: []const fd.File = &.{},
     u2: fd.Fd(.userns),
     keep: []const fd.Fd(.inherited),
+    /// the memfd holding the spec's resolv_conf, once it is written
+    resolv: ?fd.File = null,
 };
 
 /// bwrap, and the launcher's ends of the three pipes (flong-launch.c:
@@ -107,6 +111,16 @@ pub fn spawn(
     for (s.seccomp, 0..) |path, i| {
         files[i] = try msg.check(fd.openFile(fd.cwd, path.ptr, .{}, 0), "open seccomp program {s}", .{path});
         ends.seccomp = files[0 .. i + 1];
+    }
+
+    // The session's /etc/resolv.conf, whole, in a memfd bwrap reads from
+    // its start: a value where the wrapper handed over a here-string's
+    // descriptor (STANDALONE.md, S3).
+    if (s.resolv_conf) |text| {
+        const f = try msg.check(fd.memfd("resolv.conf"), "memfd_create", .{});
+        ends.resolv = f;
+        const n = try msg.check(f.pwrite(text, 0), "write the session's resolv.conf", .{});
+        if (n != text.len) return msg.fail(.IO, "write the session's resolv.conf", .{});
     }
 
     // The three pipes, both ends close-on-exec: bwrap is given its ends
@@ -157,6 +171,7 @@ fn start(
         .u2 = ends.u2,
         .info_w = ends.info_w.?,
         .seccomp = ends.seccomp,
+        .resolv = ends.resolv,
         .gate_r = ends.gate_r.?,
         .ready_w = ends.ready_w.?,
     }, relay, paths.self) catch return msg.fail(.NOMEM, "realloc", .{});

@@ -2,20 +2,26 @@
 //! without libc, whose subcommands are the programs that were flong-launch,
 //! flong-init and flong-sweeper (STANDALONE.md, S1).
 //!
-//!   flong launch SPEC... -- COMMAND...
+//!   flong launch DECL.zon|NAME [-- ARGS...]
 //!   flong init GATE READY GROUPS TTY TRACE DIR -- COMMAND...
 //!   flong sweeper STATE-DIR
 //!   flong check DECL.zon
+//!   flong list
 //!   flong schema
 //!   flong version
 //!   flong help
+//!   NAME [ARGS...]            a declaration's link, NAME -> flong
 //!
 //! The subcommand is argv[0]'s basename, as busybox reads it, then argv[1]:
 //! a link named `sweeper` runs the sweeper. A subcommand's main is handed
 //! argv from its word on, so its argv[0] is the word wherever it came from,
 //! and the kernel's own slots are what flong init rewrites for tini. A
 //! basename that is neither a subcommand nor "flong" is a declaration's
-//! name (STANDALONE.md, "The declaration's command"), which S3 looks up.
+//! name (STANDALONE.md, "The declaration's command"): the link runs what
+//! `flong launch NAME -- ARGS` does, NAME.zon from the directories
+//! launch/lookup.zig names, /etc/flong first. `flong launch` also takes the
+//! argv spec, keywords then "--" and a command, until the wrapper that
+//! builds one is deleted (STANDALONE.md, S3).
 //!
 //! Dispatch reads the kernel's argv and environ and nothing else. It makes
 //! no syscall, so the first the process makes after execve is its
@@ -30,6 +36,7 @@ const init = @import("init");
 const sweeper = @import("sweeper");
 const check = @import("check");
 const decl_docs = @import("decl_docs");
+const lookup = @import("lookup");
 const config = @import("config");
 
 /// Every subcommand's failure status, and the panic's: 125 is "the
@@ -63,8 +70,9 @@ pub const panic = std.debug.FullPanic(msg.onPanic(failed));
 /// The subcommands. `check` and `schema` came with the declaration (S2):
 /// the one judges a declaration file, the other prints decl-options.json,
 /// the declaration's fields as module.nix builds its options from them.
-/// No declaration may be named as one (check.reserved).
-pub const Sub = enum { launch, init, sweeper, check, schema, version, help };
+/// `list` (S3) prints each declaration a name runs, and its file. No
+/// declaration may be named as one (check.reserved).
+pub const Sub = enum { launch, init, sweeper, check, list, schema, version, help };
 
 pub const Dispatch = union(enum) {
     /// A subcommand, and the index of its word in argv: its main is handed
@@ -98,33 +106,43 @@ fn basename(path: []const u8) []const u8 {
 }
 
 const usage =
-    \\usage: flong launch SPEC... -- COMMAND...
+    \\usage: flong launch DECL.zon|NAME [-- ARGS...]
     \\       flong init GATE READY GROUPS TTY TRACE DIR -- COMMAND...
     \\       flong sweeper STATE-DIR
     \\       flong check DECL.zon
+    \\       flong list
     \\       flong schema
     \\       flong version
     \\       flong help
+    \\       NAME [ARGS...]    (a declaration's link to flong)
 ;
+
+/// `flong version`: the version, then each program compiled into flong as
+/// `NAME=PATH`, one a line, in build.zig's LaunchPaths' order, which is
+/// where a test finds the cache tool its launches run (tests/bench.nix).
+const version_text = blk: {
+    var t: []const u8 = "flong " ++ config.version ++ "\n";
+    for (.{ "bwrap", "self", "pasta", "newuidmap", "newgidmap", "tini", "cache", "seccomp" }) |name| {
+        t = t ++ name ++ "=" ++ @field(config, name) ++ "\n";
+    }
+    break :blk t;
+};
 
 pub fn main() noreturn {
     const argv = sys.argvSlots();
     const envp = sys.environ();
     switch (dispatch(argv)) {
         .sub => |d| switch (d.sub) {
-            .launch => launch.main(argv[d.at..], envp),
+            .launch => launch.main(argv, d.at, envp),
             .init => init.main(argv[d.at..], envp),
             .sweeper => sweeper.main(argv[d.at..]),
             .check => check.main(argv[d.at..]),
+            .list => list(argv[d.at..], envp),
             .schema => schema(argv[d.at..]),
-            .version => put("flong " ++ config.version ++ "\n"),
+            .version => put(version_text),
             .help => put(usage ++ "\n"),
         },
-        .declaration => |name| {
-            // S3 reads the declaration from here; until then there is none.
-            msg.say("no declaration \"{s}\" (looked for /etc/flong/{s}.zon)", .{ name, name });
-            sys.exitGroup(usage_status);
-        },
+        .declaration => |name| launch.named(argv, name, envp),
         .unknown => |word| {
             msg.say("no subcommand \"{s}\"", .{word});
             msg.bare(usage, .{});
@@ -135,6 +153,29 @@ pub fn main() noreturn {
             sys.exitGroup(usage_status);
         },
     }
+}
+
+/// flong list: each declaration a name runs, `NAME PATH` a line, the
+/// directories in lookup order and the names in each sorted; a name an
+/// earlier directory has is not repeated (launch/lookup.zig). Exit 0.
+fn list(argv: []const [*:0]const u8, envp: []const [*:0]const u8) noreturn {
+    msg.prog = "flong list";
+    msg.mode = .whole;
+    if (argv.len != 1) {
+        msg.bare("usage: flong list", .{});
+        sys.exitGroup(usage_status);
+    }
+    var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    const arena = arena_state.allocator();
+    var out: std.ArrayList(u8) = .empty;
+    const entries = lookup.list(arena, envp) catch outOfMemory();
+    for (entries) |e| out.print(arena, "{s} {s}\n", .{ e.name, e.path }) catch outOfMemory();
+    put(out.items);
+}
+
+fn outOfMemory() noreturn {
+    msg.say("out of memory", .{});
+    sys.exitGroup(1);
 }
 
 /// flong schema: decl-options.json on stdout, the bytes `zig build
@@ -212,7 +253,8 @@ test "dispatch: flong alone, or with a word that is no subcommand" {
     try testing.expectEqual(Dispatch.usage, dispatch(&.{}));
     try testing.expectEqual(Dispatch.usage, dispatch(&.{"flong"}));
     try testing.expectEqual(Dispatch.usage, dispatch(&.{"/bin/flong"}));
-    try testing.expectEqualStrings("list", dispatch(&.{ "flong", "list" }).unknown);
+    try expectSub(.list, 1, &.{ "flong", "list" });
+    try testing.expectEqualStrings("lsit", dispatch(&.{ "flong", "lsit" }).unknown);
     try testing.expectEqualStrings("", dispatch(&.{ "", "" }).unknown);
     // A path ending in a slash has an empty basename, as "" does.
     try expectSub(.launch, 1, &.{ "dir/", "launch" });

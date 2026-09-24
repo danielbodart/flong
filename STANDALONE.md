@@ -165,6 +165,12 @@ The user decided this on 2026-09-24: each declaration is a symlink
   a subcommand, so flong loads `/etc/flong/NAME.zon`. The module writes
   that file through `environment.etc`; outside Nix it would be
   `$XDG_CONFIG_HOME/flong/NAME.zon`.
+  - The lookup order (decided in S3): `/etc/flong` first, then
+    `$XDG_CONFIG_HOME/flong` (`$HOME/.config/flong` when it is unset or
+    not absolute). The system's first, so a declaration the system
+    installs is the one its name runs, whatever the caller's
+    configuration holds; `flong list` shows each name once, as it runs.
+    A missing one names every path looked for.
   - The fixed directory, rather than a file beside the symlink in the same
     store path, keeps the lookup obvious: `ls /etc/flong` lists every
     declaration, and no chain of symlinks has to be followed.
@@ -271,6 +277,18 @@ e717355), on trunk only:
   - Then delete `rootless-wrapper.bash`, the argv spec keywords and the
     spec's argv parser (`src/spec.zig` keeps its checks, run over the
     value).
+  - Landed first: `flong launch DECL.zon|NAME`, the links, `flong list`,
+    `src/launch/assemble.zig` (the wrapper's order, one function),
+    `spec.validate`, the typed environment, hostname and resolver; the
+    transition's `--dump-argv`, the wrapper's `FLONG_DUMP_SPEC` and
+    `tests/transition.nix`. `path` reaches the caller's commands as the
+    declaration's computed `commandPath`, and the hooks through
+    module.nix's hook programs, `postStartProgram` and `postStopProgram`,
+    which stay until the sweeper can put `path` on `PATH` itself. The
+    deletion commit takes the wrapper, `transitionWrapper`,
+    `argv_render.zig`, `--dump-argv`, `tests/transition.nix`, the argv
+    spec (parse, its keywords, `bwrap_args`, `keep_fds`, `relaunch`, and
+    `launch.zig`'s guess between the two) and the spec's golden cases.
 - **S4, the reference.** `flong help`, `flong help decl`, and a generated
   reference page for the declaration, from the same walk as
   `decl-options.json`.

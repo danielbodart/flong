@@ -730,6 +730,20 @@ pub fn build(b: *std.Build) void {
                 });
                 test_step.dependOn(&b.addRunArtifact(t).step);
             }
+            // flong launch DECL.zon's prologue, the declaration's lookup and
+            // the transition's renderer, each module's own tests, in the
+            // launch's graph.
+            {
+                const sc = Launcher.subcommands(b, target, optimize, false, LaunchPaths.dummy("/nix/store/test-only"));
+                for ([_]struct { []const u8, *std.Build.Module }{
+                    .{ "launch_assemble", sc.assemble },
+                    .{ "launch_lookup", sc.lookup },
+                    .{ "launch_argv_render", sc.argv_render },
+                }) |x| {
+                    const t = b.addTest(.{ .name = x[0], .root_module = x[1] });
+                    test_step.dependOn(&b.addRunArtifact(t).step);
+                }
+            }
             // S3's pieces that touch the system, each module's own tests,
             // then tests/zig/wrapper_test.zig over all of them, against
             // flong-fake-cmd (tests/zig/fakecmd.zig), in forked children.
@@ -1061,6 +1075,16 @@ const Launcher = struct {
         init: *std.Build.Module,
         sweeper: *std.Build.Module,
         config: *std.Build.Module,
+        /// the declaration and flong check, which flong launch loads and
+        /// judges a declaration with, and flong's root dispatches to
+        d: Decl,
+        check: *std.Build.Module,
+        /// launch/lookup.zig, which the root's `flong list` shares
+        lookup: *std.Build.Module,
+        /// launch/assemble.zig and, transition only, launch/argv_render.zig,
+        /// each a test's root too
+        assemble: *std.Build.Module,
+        argv_render: *std.Build.Module,
     };
 
     fn subcommands(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, strip: bool, lp: LaunchPaths) Subcommands {
@@ -1070,6 +1094,14 @@ const Launcher = struct {
         inline for (@typeInfo(LaunchPaths).@"struct".fields) |f| options.addOption([]const u8, f.name, @field(lp, f.name));
         options.addOption([]const u8, "version", @import("build.zig.zon").version);
         const config = options.createModule();
+        // flong launch DECL.zon's prologue (S3): the wrapper's pieces, the
+        // declaration and its check, over the launch's one graph.
+        const w = wrapperModules(bb, l, t, o);
+        const d = declModules(bb, m, t, o, bb.path("src/decl.zig"));
+        const chk = checkModule(bb, m, l.spec, d, t, o);
+        const lookup = lookupModule(bb, m, w, t, o);
+        const assemble = assembleModule(bb, l, w, d, chk, t, o);
+        const argv_render = argvRenderModule(bb, m, l.spec, t, o);
         const launch = bb.createModule(.{
             .root_source_file = bb.path("src/launch.zig"),
             .target = t,
@@ -1088,12 +1120,17 @@ const Launcher = struct {
                 .{ .name = "cgroup", .module = l.cgroup },
                 .{ .name = "record", .module = l.record },
                 .{ .name = "tty", .module = Terminal.module(bb, m, t, o) },
-                .{ .name = "prologue", .module = prologueModule(bb, l, t, o) },
+                .{ .name = "prologue", .module = w.prologue },
                 .{ .name = "bwrap", .module = bwrapModule(bb, m, l.spec, t, o) },
                 .{ .name = "childpid", .module = childpidModule(bb, m, t, o) },
                 .{ .name = "hook", .module = pieceModule(bb, m, l.spec, "hook", t, o) },
                 .{ .name = "pasta", .module = pieceModule(bb, m, l.spec, "pasta", t, o) },
                 .{ .name = "config", .module = config },
+                .{ .name = "decl", .module = d.decl },
+                .{ .name = "check", .module = chk },
+                .{ .name = "assemble", .module = assemble },
+                .{ .name = "lookup", .module = lookup },
+                .{ .name = "argv_render", .module = argv_render },
             },
         });
         // flong init: sys, msg and tini's path compiled in
@@ -1125,7 +1162,69 @@ const Launcher = struct {
                 .{ .name = "cgroup", .module = l.cgroup },
             },
         });
-        return .{ .l = l, .launch = launch, .init = init, .sweeper = sweeper, .config = config };
+        return .{ .l = l, .launch = launch, .init = init, .sweeper = sweeper, .config = config, .d = d, .check = chk, .lookup = lookup, .assemble = assemble, .argv_render = argv_render };
+    }
+
+    /// src/launch/lookup.zig: where a declaration's name leads, for flong
+    /// launch and flong list.
+    fn lookupModule(bb: *std.Build, m: Modules, w: Wrapper, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+        return bb.createModule(.{
+            .root_source_file = bb.path("src/launch/lookup.zig"),
+            .target = t,
+            .optimize = o,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "fd", .module = m.fd },
+                .{ .name = "cmd", .module = w.cmd },
+            },
+        });
+    }
+
+    /// src/launch/assemble.zig: `flong launch DECL.zon`'s prologue, the
+    /// wrapper's order over its pieces `w`, the declaration `d` and its
+    /// check.
+    fn assembleModule(bb: *std.Build, l: Launch, w: Wrapper, d: Decl, chk: *std.Build.Module, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+        const m = l.m;
+        return bb.createModule(.{
+            .root_source_file = bb.path("src/launch/assemble.zig"),
+            .target = t,
+            .optimize = o,
+            .imports = &.{
+                .{ .name = "sys", .module = m.sys },
+                .{ .name = "fd", .module = m.fd },
+                .{ .name = "msg", .module = m.msg },
+                .{ .name = "sig", .module = m.sig },
+                .{ .name = "spec", .module = l.spec },
+                .{ .name = "mount", .module = m.mount },
+                .{ .name = "decl", .module = d.decl },
+                .{ .name = "check", .module = chk },
+                .{ .name = "prologue", .module = w.prologue },
+                .{ .name = "caller", .module = w.caller },
+                .{ .name = "workspace", .module = w.workspace },
+                .{ .name = "cmd", .module = w.cmd },
+                .{ .name = "binds", .module = w.binds },
+                .{ .name = "subid", .module = w.subid },
+                .{ .name = "prepare", .module = w.prepare },
+                .{ .name = "identity", .module = w.identity },
+                .{ .name = "depth", .module = w.depth },
+                .{ .name = "hometmp", .module = w.hometmp },
+                .{ .name = "resolv", .module = w.resolv },
+            },
+        });
+    }
+
+    /// src/launch/argv_render.zig, transition only: a spec value as the
+    /// wrapper's argv, for `flong launch --dump-argv`.
+    fn argvRenderModule(bb: *std.Build, m: Modules, spec: *std.Build.Module, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+        return bb.createModule(.{
+            .root_source_file = bb.path("src/launch/argv_render.zig"),
+            .target = t,
+            .optimize = o,
+            .imports = &.{
+                .{ .name = "spec", .module = spec },
+                .{ .name = "mount", .module = m.mount },
+            },
+        });
     }
 
     /// flong's root module (src/main.zig): the dispatch over the
@@ -1135,7 +1234,7 @@ const Launcher = struct {
         const sc = subcommands(bb, t, o, strip, lp);
         // flong check and flong schema: the declaration over the same
         // graph, so decl.zig's messages take flong check's prefix.
-        const d = declModules(bb, sc.l.m, t, o, bb.path("src/decl.zig"));
+        const d = sc.d;
         return bb.createModule(.{
             .root_source_file = bb.path("src/main.zig"),
             .target = t,
@@ -1148,8 +1247,9 @@ const Launcher = struct {
                 .{ .name = "launch", .module = sc.launch },
                 .{ .name = "init", .module = sc.init },
                 .{ .name = "sweeper", .module = sc.sweeper },
-                .{ .name = "check", .module = checkModule(bb, sc.l.m, sc.l.spec, d, t, o) },
+                .{ .name = "check", .module = sc.check },
                 .{ .name = "decl_docs", .module = d.docs },
+                .{ .name = "lookup", .module = sc.lookup },
                 .{ .name = "config", .module = sc.config },
             },
         });
@@ -1299,6 +1399,9 @@ const Launcher = struct {
         refuse: *std.Build.Module,
         subid: *std.Build.Module,
         groups: *std.Build.Module,
+        depth: *std.Build.Module,
+        hometmp: *std.Build.Module,
+        resolv: *std.Build.Module,
         caller: *std.Build.Module,
         workspace: *std.Build.Module,
         cmd: *std.Build.Module,
@@ -1325,6 +1428,9 @@ const Launcher = struct {
         const refuse = pure.module(bb, "refuse", t, o);
         const subid = pure.module(bb, "subid", t, o);
         const groups = pure.module(bb, "groups", t, o);
+        const depth = pure.module(bb, "depth", t, o);
+        const hometmp = pure.module(bb, "hometmp", t, o);
+        const resolv = pure.module(bb, "resolv", t, o);
         const piece = struct {
             fn module(b2: *std.Build, name: []const u8, t2: std.Build.ResolvedTarget, o2: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Module {
                 return b2.createModule(.{
@@ -1380,6 +1486,9 @@ const Launcher = struct {
             .refuse = refuse,
             .subid = subid,
             .groups = groups,
+            .depth = depth,
+            .hometmp = hometmp,
+            .resolv = resolv,
             .caller = caller,
             .workspace = workspace,
             .cmd = cmd,

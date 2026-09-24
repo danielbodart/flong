@@ -50,6 +50,11 @@ const childpid = @import("childpid");
 const hook = @import("hook");
 const pasta = @import("pasta");
 const config = @import("config");
+const decl = @import("decl");
+const check = @import("check");
+const assemble = @import("assemble");
+const lookup = @import("lookup");
+const argv_render = @import("argv_render");
 
 const Allocator = std.mem.Allocator;
 
@@ -71,6 +76,12 @@ const maps: ns.Programs = .{
     .newuidmap = std.fmt.comptimePrint("{s}", .{config.newuidmap}),
     .newgidmap = std.fmt.comptimePrint("{s}", .{config.newgidmap}),
 };
+// What a declaration's prologue runs in the wrapper's place (-Dcache,
+// -Dseccomp).
+const tools: assemble.Tools = .{
+    .cache = std.fmt.comptimePrint("{s}", .{config.cache}),
+    .seccomp = std.fmt.comptimePrint("{s}", .{config.seccomp}),
+};
 
 /// The session's cgroup leaves, in cgroup.leaf_names' order
 /// (flong-cgroup.h's FL_LEAF_*).
@@ -83,9 +94,12 @@ const Launch = struct {
     /// The launch's allocations, never freed (flong-launch.c:97-99).
     arena: Allocator,
     s: *const spec.Spec,
-    /// the environment the process started with, main's, which the hook
-    /// adds to
+    /// the environment the hook adds to: the process's, main's, or for a
+    /// declaration the prologue's (assemble.zig), what the wrapper passed
     environ: []const [*:0]const u8,
+    /// what pasta gets when no hook ran: null, the process's own, or for a
+    /// declaration `environ`, as the wrapper's exec handed it on (quirk 3)
+    default_envp: ?hook.Envp = null,
 
     // What the prologue made, held until the process exits.
     state: record.State,
@@ -126,9 +140,12 @@ const Launch = struct {
     gate_opened: bool = false,
 };
 
-/// `argv` is the kernel's, from the subcommand's word on, and `envp` its
-/// environ, which a relaunch passes on.
-pub fn main(argv: []const [*:0]const u8, envp: []const [*:0]const u8) noreturn {
+/// `argv` is the kernel's whole, flong launch's own word at `at`, and
+/// `envp` its environ, which a relaunch passes on. `flong launch
+/// [--dump-argv] DECL.zon|NAME [-- ARGS...]` launches a declaration
+/// (`declared`); anything else is the argv spec, until rootless-wrapper.bash
+/// and the spec's argv parser are deleted (STANDALONE.md, S3).
+pub fn main(argv: []const [*:0]const u8, at: usize, envp: []const [*:0]const u8) noreturn {
     // Ordering checkpoint 1, the prologue (flong-launch.c:847-925). The
     // time is main's first statement: `launcher-start` is stamped now and
     // printed once the trace flag is known (quirk 45). Nothing here changes
@@ -137,6 +154,16 @@ pub fn main(argv: []const [*:0]const u8, envp: []const [*:0]const u8) noreturn {
     const start = sys.clockRealtime();
     msg.prog = "flong launch";
     msg.mode = .cut;
+    const own = argv[at..];
+    switch (declared(own)) {
+        .spec => {},
+        .usage => {
+            msg.bare(usage, .{});
+            proc.exit(usage_status);
+        },
+        .declaration => |d| fromDeclaration(start, argv, d.decl, d.args, d.dump, envp),
+    }
+    const argv_spec = own;
 
     // 1. Signals are read from a signalfd, so every wait can end on one as
     // an event, and none interrupts a step half done. They are blocked now
@@ -155,7 +182,7 @@ pub fn main(argv: []const [*:0]const u8, envp: []const [*:0]const u8) noreturn {
     // page_allocator that lives as long as the process (:879-881).
     var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     const arena = arena_state.allocator();
-    const s = spec.parse(arena, argv) catch proc.exit(not_run);
+    const s = spec.parse(arena, argv_spec) catch proc.exit(not_run);
 
     // 3. The keep-fds into the table, which the spec checked open by
     // F_GETFD: kept by bwrap's spawn, closed right after it (checkpoint 2),
@@ -203,6 +230,174 @@ pub fn main(argv: []const [*:0]const u8, envp: []const [*:0]const u8) noreturn {
 
     var l: Launch = .{ .arena = arena, .s = &s, .environ = envp, .state = state, .cache = cache, .keep = keep };
     proc.exit(teardown(&l, run(&l)));
+}
+
+// ---- a declaration's launch (STANDALONE.md, S3) ----
+
+const usage = "usage: flong launch [--dump-argv] DECL.zon|NAME [-- ARGS...]";
+const usage_status = 2;
+
+/// What `flong launch`'s words ask for.
+const Entry = union(enum) {
+    /// the argv spec: keywords, "--" and a command (DESIGN.md, "The input
+    /// contract"), until it is deleted with the wrapper
+    spec,
+    /// a declaration, by its file (a '/' in it, or a `.zon` name) or its
+    /// name (lookup.zig), and the launcher's arguments after its "--";
+    /// `dump` is --dump-argv's
+    declaration: struct { decl: []const u8, args: []const [*:0]const u8, dump: bool },
+    usage,
+};
+
+/// A declaration when the first word (after --dump-argv, which is
+/// transition-only and hidden) is a file or a name and is followed by
+/// nothing or by "--"; the argv spec when it is a spec keyword or "--", or
+/// no name at all (the spec's golden cases' unknown keywords are ones
+/// longer than a file name, or followed by fields). Transition only: the
+/// argv spec goes with the wrapper, and with it this guess.
+fn declared(own: []const [*:0]const u8) Entry {
+    var i: usize = 1;
+    const dump = i < own.len and std.mem.eql(u8, std.mem.span(own[i]), "--dump-argv");
+    if (dump) i += 1;
+    if (i >= own.len) return if (dump) .usage else .spec;
+    const w = std.mem.span(own[i]);
+    const file = std.mem.indexOfScalar(u8, w, '/') != null or std.mem.endsWith(u8, w, ".zon");
+    if (!dump and (std.mem.eql(u8, w, "--") or spec.isKeyword(w) or !(file or lookup.isName(w)))) return .spec;
+    if (i + 1 == own.len) return .{ .declaration = .{ .decl = w, .args = &.{}, .dump = dump } };
+    if (std.mem.eql(u8, std.mem.span(own[i + 1]), "--"))
+        return .{ .declaration = .{ .decl = w, .args = own[i + 2 ..], .dump = dump } };
+    return if (dump or file) .usage else .spec;
+}
+
+/// A declaration's link, `NAME -> flong` (STANDALONE.md, "The
+/// declaration's command"): argv[0]'s basename is its name, and every
+/// argument after it is the launcher's, as `flong launch NAME -- ARGS`.
+pub fn named(argv: []const [*:0]const u8, name: []const u8, envp: []const [*:0]const u8) noreturn {
+    const start = sys.clockRealtime();
+    msg.prog = "flong launch";
+    msg.mode = .cut;
+    fromDeclaration(start, argv, name, argv[1..], false, envp);
+}
+
+/// `what`'s declaration, loaded and judged as flong check judges it, then
+/// launched (`launchDeclared`). A name that no directory has is said as
+/// `flong: no declaration "NAME" (looked for PATH...)`, 2; a file that
+/// cannot be read or parsed, or that flong check refuses, as flong check
+/// says it, under "flong launch", 1.
+fn fromDeclaration(start: sys.timespec, argv: []const [*:0]const u8, what: []const u8, args: []const [*:0]const u8, dump: bool, envp: []const [*:0]const u8) noreturn {
+    var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    const arena = arena_state.allocator();
+    const is_file = std.mem.indexOfScalar(u8, what, '/') != null or std.mem.endsWith(u8, what, ".zon");
+    const path: [:0]const u8 = if (is_file) arena.dupeZ(u8, what) catch outOfMemory() else switch (lookup.find(arena, what, envp) catch outOfMemory()) {
+        .path => |p| p,
+        .missing => |looked| {
+            msg.prog = "flong";
+            msg.mode = .whole;
+            msg.say("no declaration \"{s}\" ({s})", .{ what, lookup.lookedFor(arena, looked) catch outOfMemory() });
+            proc.exit(usage_status);
+        },
+    };
+    msg.mode = .whole;
+    const d = decl.load(arena, path) catch |err| switch (err) {
+        error.Reported => proc.exit(prologue.exit_refused),
+        error.OutOfMemory => outOfMemory(),
+    };
+    const refusals = check.validate(arena, &d) catch outOfMemory();
+    for (refusals) |r| msg.say("{s}: {s}", .{ path, r });
+    if (refusals.len > 0) proc.exit(prologue.exit_refused);
+    launchDeclared(start, arena, &d, argv, args, dump, envp);
+}
+
+fn outOfMemory() noreturn {
+    msg.sayErrno(.NOMEM, "malloc", .{});
+    proc.exit(prologue.exit_refused);
+}
+
+/// Ordering checkpoint 1 for a declaration: the prologue that stands in for
+/// the wrapper (launch/assemble.zig, in the wrapper's order), then `main`'s
+/// steps on the spec it assembled, as a value: no argv to parse and no
+/// keep-fds to adopt. The prologue runs before the signals are blocked, as
+/// the wrapper ran before flong launch; SIGCHLD's default comes first, so a
+/// command's status is seen whatever the caller left it as. `argv` is the
+/// process's whole, a relaunch's; the relaunch at the cache lock execs this
+/// binary with it (quirk 2), as each of the prologue's own does.
+fn launchDeclared(start: sys.timespec, arena: Allocator, d: *const decl.Declaration, argv: []const [*:0]const u8, args: []const [*:0]const u8, dump: bool, envp: []const [*:0]const u8) noreturn {
+    // 1. SIGCHLD's default, which an ignored one inherited through execve
+    // is not: the commands' statuses would be lost (:874-877).
+    sig.defaultChld();
+
+    // 2. The prologue: the caller, the workspace, the commands, the maps,
+    // the prepared root and the payload's identity, then the spec. Its
+    // refusals are the wrapper's, 1; the spec's, 125.
+    msg.tracing = if (assemble.getenv(envp, "FLONG_TRACE")) |t| t.len > 0 else false;
+    msg.traceAt(start, "prologue-start");
+    const a = assemble.run(arena, d, .{ .argv = argv, .args = args, .environ = envp }, tools) catch |err| proc.exit(switch (err) {
+        error.Reported, error.Aborted => prologue.exit_refused,
+        error.NotRun => not_run,
+    });
+    const s = &a.spec;
+    if (dump) dumpArgv(arena, s);
+
+    // 3. Signals are blocked and read from a signalfd, SIGPIPE ignored, as
+    // `main`'s step 1 (:857-877).
+    const old_mask = sig.block() catch proc.exit(not_run);
+    sig.ignorePipe();
+
+    // 4. The spec's checks, over the value (spec.validate).
+    spec.validate(arena, s) catch proc.exit(not_run);
+
+    // 5. The signalfd (:882-886).
+    sig.openSignalfd() catch proc.exit(not_run);
+
+    // 6. The trace flag; the stage is when the launch proper began.
+    msg.tracing = s.trace;
+    msg.trace("launcher-start");
+
+    // 7. DESIGN.md's step 3: the state directory and its sessions/
+    // (:891-893).
+    const state = prologue.stateOpen(s.state) catch proc.exit(not_run);
+
+    // 8. Step 4, before the prologue's own shared lock goes: swept,
+    // relaunch this binary with the process's argv (:895-907).
+    const cache = switch (prologue.cacheLock(s.cache) catch |err| proc.exit(switch (err) {
+        error.Aborted => 128 + sig.abort_signal,
+        error.Reported => not_run,
+    })) {
+        .locked => |h| h,
+        .swept => proc.exit(prologue.relaunchSwept(arena, s.cache, argv, old_mask, @ptrCast(envp.ptr))),
+    };
+    msg.trace("cache-locked");
+
+    // 9. The cold path's shared lock, which held the cache from the
+    // prepare to here, as the wrapper's descriptor did into flong launch.
+    if (a.cold) |c| c.close();
+
+    // 10. Step 5: whatever else was inherited (:909-924).
+    prologue.closeUntracked() catch proc.exit(not_run);
+
+    var l: Launch = .{ .arena = arena, .s = s, .environ = a.environ, .default_envp = @ptrCast(a.environ.ptr), .state = state, .cache = cache, .keep = &.{} };
+    proc.exit(teardown(&l, run(&l)));
+}
+
+/// `--dump-argv` (transition only, launch/argv_render.zig): the spec, after
+/// its checks, as the argv the wrapper would have handed flong launch, on
+/// stdout, then 0; nothing is launched.
+fn dumpArgv(arena: Allocator, s: *const spec.Spec) noreturn {
+    spec.validate(arena, s) catch proc.exit(not_run);
+    var rest = argv_render.render(arena, s) catch {
+        msg.sayErrno(.NOMEM, "malloc", .{});
+        proc.exit(not_run);
+    };
+    while (rest.len > 0) {
+        switch (sys.write(1, rest)) {
+            .ok => |n| rest = rest[n..],
+            .err => |e| {
+                msg.sayErrno(e, "writing to stdout", .{});
+                proc.exit(not_run);
+            },
+        }
+    }
+    proc.exit(0);
 }
 
 /// What childpid.wait reads: the info pipe, waited for with bwrap's exit
@@ -302,6 +497,8 @@ fn run(l: *Launch) sig.Error!u8 {
     ends.u2.close();
     // 6. The keep-fds.
     for (ends.keep) |h| h.close();
+    // 7. The resolver's memfd.
+    if (ends.resolv) |h| h.close();
     _ = try spawned;
     const bw = l.bwrap.?;
 
@@ -377,7 +574,7 @@ fn run(l: *Launch) sig.Error!u8 {
 
     // 16. pasta in the pasta leaf, ready when the spawned pasta exits 0
     // (:622-675).
-    if (try pasta.build(l.arena, s, pasta_path, self_pid, outer, pid, envp, cg.leaf[pasta_leaf].?)) |built| {
+    if (try pasta.build(l.arena, s, pasta_path, self_pid, outer, pid, envp orelse l.default_envp, cg.leaf[pasta_leaf].?)) |built| {
         var p = built;
         l.pasta_pid_file = p.pid_file;
         l.pasta = try p.start();

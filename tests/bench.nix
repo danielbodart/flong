@@ -161,8 +161,10 @@ in
             "--map-groups=0:100000:100 --map-groups=100:100:1 --map-groups=101:100100:65436")
     COLD = ("for c in /run/user/1000/flong/box-*; do [ -d \"$c\" ] || continue; "
             f"\"$CT\" gc {MAPS} -- \"$c\" || exit 1; done")
-    CT = ("CT=$(sed -n \"s/^cache_tool=//p\" \"$(readlink -f \"$(command -v plain)\")\" | tr -d \"'\"); "
-          "export CT; ")
+    # The cache tool compiled into flong, which `flong version` names; plain
+    # is a link to flong.
+    CT = ("CT=$(\"$(readlink -f \"$(command -v plain)\")\" version | sed -n \"s/^cache=//p\"); "
+          "[ -x \"$CT\" ] || exit 1; export CT; ")
 
     def bench(prep, after, command):
         return f"flong-bench {N} {shlex.quote(prep)} {shlex.quote(after)} -- {command}"

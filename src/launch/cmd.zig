@@ -82,6 +82,15 @@ fn environAlloc(gpa: Allocator, base: []const [*:0]const u8, vars: []const Var) 
     return @ptrCast(list.items.ptr);
 }
 
+/// The value of the first `<name>=` entry of `environ`, as getenv(3)
+/// finds it; null when there is none.
+pub fn getenv(env: []const [*:0]const u8, name: []const u8) ?[]const u8 {
+    for (env) |e| {
+        if (named(e, name)) return std.mem.span(e)[name.len + 1 ..];
+    }
+    return null;
+}
+
 /// Whether `entry` is `<name>=...`.
 fn named(entry: [*:0]const u8, name: []const u8) bool {
     const s = std.mem.span(entry);
@@ -135,9 +144,26 @@ pub const Output = struct {
 /// <limit> bytes") and the command killed. A terminating signal ends the
 /// wait (error.Aborted) and kills the command.
 pub fn capture(gpa: Allocator, command: Command, args: []const [*:0]const u8, envp: Envp, limit: usize) sig.Error!Output {
+    return captureFrom(gpa, command, args, envp, limit, null);
+}
+
+/// `capture` with `input` on the command's stdin, as `<<<"$text"` gives
+/// it (a here-string: the text and a newline, which the caller includes):
+/// in a memfd, read from its start, so no write waits on the command
+/// reading.
+pub fn captureInput(gpa: Allocator, command: Command, envp: Envp, input: []const u8, limit: usize) sig.Error!Output {
+    const f = try msg.check(fdt.memfd("stdin"), "memfd_create", .{});
+    defer f.close();
+    const n = try msg.check(f.pwrite(input, 0), "writing the input of {s}", .{command[0]});
+    if (n != input.len) return msg.fail(.IO, "writing the input of {s}", .{command[0]});
+    return captureFrom(gpa, command, &.{}, envp, limit, f);
+}
+
+fn captureFrom(gpa: Allocator, command: Command, args: []const [*:0]const u8, envp: Envp, limit: usize, stdin: ?fdt.File) sig.Error!Output {
     var sp = try prepare(gpa, command, args, envp);
     const p = try msg.check(fdt.pipe(), "pipe", .{});
     sp.stdio[1] = p.w.any();
+    if (stdin) |f| sp.stdio[0] = f.any();
     const child = sp.start() catch |err| {
         p.r.close();
         p.w.close();
@@ -179,7 +205,7 @@ fn drain(gpa: Allocator, r: fdt.Fd(.pipe_r), argv0: []const u8, limit: usize) si
 /// them, their stdouts concatenated: the binds and seccompPolicy commands
 /// (:146, 203). The first that fails ends it: error.Reported, the command
 /// having said why.
-pub fn outputOf(gpa: Allocator, commands: []const Command, args: []const [*:0]const u8, envp: Envp) sig.Error![]const u8 {
+pub fn outputOf(gpa: Allocator, commands: []const Command, args: []const [*:0]const u8, envp: Envp) sig.Error![]u8 {
     var all: std.ArrayList(u8) = .empty;
     for (commands) |c| {
         const o = try capture(gpa, c, args, envp, output_max - all.items.len);
@@ -235,6 +261,14 @@ test "environ sets each name in order: the first entry replaced, later ones drop
     const twice = try environ(a, &.{}, &.{ .{ .name = "x", .value = "1" }, .{ .name = "x", .value = "" } });
     try expectEnv(&.{"x="}, twice);
     try expectEnv(&.{}, try environ(a, &.{}, &.{}));
+}
+
+test "getenv takes the first entry of a name" {
+    const env = [_][*:0]const u8{ "TERMX=1", "TERM=xterm", "TERM=vt100", "noequals", "EMPTY=" };
+    try testing.expectEqualStrings("xterm", getenv(&env, "TERM").?);
+    try testing.expectEqualStrings("", getenv(&env, "EMPTY").?);
+    try testing.expectEqual(null, getenv(&env, "COLORTERM"));
+    try testing.expectEqual(null, getenv(&env, "noequals"));
 }
 
 test "substitute drops NULs and the trailing newlines, as $(...) does" {

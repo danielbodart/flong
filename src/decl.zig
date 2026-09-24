@@ -389,14 +389,36 @@ pub const Declaration = struct {
     /// `seccompPolicy` is empty, and nothing is compiled.
     seccompProject: ?SeccompProject = null,
 
+    /// Directories put in front of `PATH`, in this order, for the commands
+    /// the launch runs as the caller before the session exists --
+    /// `workspace`, `binds`, `guard`, `seccompPolicy` -- and in the
+    /// environment the launch goes on with, which the hooks start from.
+    /// Under NixOS, the `bin` directories of `flong.<name>.path`. Empty,
+    /// the default, leaves `PATH` as the caller's.
+    commandPath: []const []const u8 = &.{},
+
+    /// The program each `postStart` command is run through: it is given
+    /// the command's words and the launcher's arguments, and execs them.
+    /// module.nix's hook program, which puts `flong.<name>.path` on `PATH`
+    /// first (mkHookProgram). null runs each command as it is.
+    postStartProgram: ?[]const u8 = null,
+
+    /// The same for each `postStop` command, which the session's record
+    /// keeps whole, program first, for the sweeper to run with `$machine`
+    /// alone: module.nix's hook program, which takes the session's name
+    /// from its last argument and puts `flong.<name>.path` on `PATH`. A
+    /// store path, since the record's program must be one. null runs each
+    /// command as it is, and each must then be a store path itself.
+    postStopProgram: ?[]const u8 = null,
+
     /// The fields Nix works out rather than takes as options, in
     /// declaration order: `decl-options.json` lists them with
     /// `nixOption` false, and module.nix generates no option for them.
     /// `container` keeps an option, written by hand in module.nix.
     pub const computed = [_][]const u8{
-        "container",       "closure", "cuid",    "cgid",              "steps8",
-        "containerMounts", "name",    "payload", "seccompTierFilter", "seccompFixedFilters",
-        "seccompProject",
+        "container",       "closure",     "cuid",             "cgid",              "steps8",
+        "containerMounts", "name",        "payload",          "seccompTierFilter", "seccompFixedFilters",
+        "seccompProject",  "commandPath", "postStartProgram", "postStopProgram",
     };
 
     /// The strings that must match a pattern (Nix's `strMatching`), by

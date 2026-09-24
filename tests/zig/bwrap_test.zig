@@ -116,6 +116,7 @@ fn walk(ends: *const bwrap.ChildEnds) void {
     for (ends.seccomp) |h| h.close();
     ends.u2.close();
     for (ends.keep) |h| h.close();
+    if (ends.resolv) |h| h.close();
 }
 
 /// Each of `ends`' handles is closed.
@@ -126,6 +127,7 @@ fn expectWalked(ends: *const bwrap.ChildEnds) !void {
     for (ends.seccomp) |h| try testing.expect(!h.isLive());
     try testing.expect(!ends.u2.isLive());
     for (ends.keep) |h| try testing.expect(!h.isLive());
+    if (ends.resolv) |h| try testing.expect(!h.isLive());
 }
 
 // ---- the spec every branch starts from ----

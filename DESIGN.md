@@ -17,24 +17,27 @@ reported, never used as a pass mark.
 
 ## Launch sequence
 
-The launcher is a bash wrapper, run as the caller, that execs `flong launch`,
-a Zig program, static and without libc. Nothing in either runs as host root,
-and nothing asks for it.
+The launcher is `flong launch`, a Zig program, static and without libc, run
+as the caller: each declaration's command is a link `NAME -> flong`, which
+loads `/etc/flong/NAME.zon` (then `$XDG_CONFIG_HOME/flong/NAME.zon`) as
+`flong launch NAME -- ARGS` does, and judges it as `flong check` does.
+Nothing in it runs as host root, and nothing asks for it.
 
-The wrapper works out what only the launch can know:
+Its prologue works out what only the launch can know, in the order the bash
+wrapper it replaced did (`src/launch/assemble.zig`):
 
 1. Refuse a caller of uid 0 or of primary group 0. Use `/run/user/$UID`,
    which must exist and be the caller's.
 2. `workspace`, then `binds`, then `guard`, each as the caller.
-3. Name the session `<container>-<wrapper pid>-<random>`, then run
+3. Name the session `<container>-<launcher pid>-<random>`, then run
    `seccompPolicy`, as the caller, and compile what it prints.
 4. Check the depth rule against the caller's writable binds.
 5. Build the id maps from `/etc/subuid` and `/etc/subgid`.
 6. Prepare the root if this closure, prepare program and map have none yet.
 7. Read `user`'s uid, gid, home and groups from the prepared root.
-8. Build the spec and exec `flong launch` with it as its arguments.
+8. Build the spec, as a value, and hand it to the launch.
 
-`flong launch` then runs the session, in this order (the full table is in
+The launch then runs the session, in this order (the full table is in
 [The launch, in order](#the-launch-in-order)):
 
 1. Lock the cache shared, for the launcher's life.
@@ -50,11 +53,11 @@ The wrapper works out what only the launch can know:
 10. Wait for the session. Then kill its cgroup, run `postStop` and release
     the rest.
 
-On the warm path the wrapper forks nothing but the commands the declaration
-chose: every test is a builtin, and there is no command substitution outside
-one that runs them. A bash launcher measured 61 ms and a python one 106 ms, against
-the C launcher's 19 ms, which is why everything after the spec is native
-code. The Zig launcher that replaced the C is within the runs' spread of it
+On the warm path the prologue forks nothing but the commands the
+declaration chose, as the bash wrapper, whose every test was a builtin, did
+before it. A bash launcher measured 61 ms and a python one 106 ms, against
+the C launcher's 19 ms, which is why everything after the spec was native
+code, and why the prologue is now too (STANDALONE.md, S3). The Zig launcher that replaced the C is within the runs' spread of it
 (`packages.bench`, [What the port measured](#what-the-port-measured)).
 
 ## Data is data; shell is for what only launch knows
@@ -1395,7 +1398,10 @@ libc, whose subcommands are `launch`, `init` (pid 1 in the session),
 `sweeper` (the holder unit's process), `version` and `help`. `src/main.zig`
 picks the subcommand from `argv[0]`'s basename, then from `argv[1]`, as
 busybox does, and makes no syscall doing it; a basename that is no
-subcommand is a declaration's name, which nothing looks up yet. Until the
+subcommand is a declaration's name, which `flong launch` looks up
+(`src/launch/lookup.zig`: `/etc/flong`, then `$XDG_CONFIG_HOME/flong`, or
+`$HOME/.config/flong`; the system's first, so a caller's file never shadows
+a declaration the system installs), and `flong list` lists. Until the
 one binary (S1 of `STANDALONE.md`), `flong launch`, `flong init` and
 `flong sweeper` were three, `flong-launch`, `flong-init` and
 `flong-sweeper`, and the measurements below that name those are of the
@@ -1405,9 +1411,9 @@ three. The programs `flong launch` runs (bwrap, pasta, its own binary as
 (`-Dbwrap`, `-Dpasta`, `-Dself`, `-Dnewuidmap`, `-Dnewgidmap`, `-Dtini`;
 `build.zig`'s `LaunchPaths`), so the wrapper cannot point the launcher at
 another bwrap, and a build that forgets one fails. So are the two that
-`flong launch DECL.zon` will run in the wrapper's place (STANDALONE.md,
-S3): `-Dcache`, the cache tool (`cache.nix`), and `-Dseccomp`,
-`flong-seccomp`.
+`flong launch DECL.zon` runs in the wrapper's place (STANDALONE.md, S3):
+`-Dcache`, the cache tool (`cache.nix`), and `-Dseccomp`, `flong-seccomp`;
+`flong version` prints every one, `NAME=PATH` a line.
 
 Line numbers that cite the deleted C (`launcher/flong-*.c` and `*.h`,
 `seccomp/flong-seccomp.c`, `tests/parity/*.c`) are those of the C as it last
@@ -1865,8 +1871,8 @@ sweeper reads a new launcher's records.
 
 | # | order | where | held by |
 |---|---|---|---|
-| 1 | the prologue: the time as `main`'s first statement; block signals, SIGPIPE ignored, SIGCHLD default; parse, refusing root first; adopt the keep-fds; the signalfd, so its number is never a keep-fd's; `launcher-start`; the state directory; the cache lock (swept: relaunch or 75); close what was inherited. Nothing chdirs before step 4 | `launch.zig`'s `main` | the keep-fd launches, the spec's golden cases, the payload-descriptor subtest |
-| 2 | the child's ends close at once after bwrap's spawn, whether or not it succeeded: info, ready and gate write ends, the seccomp files, U2, the keep-fds | `run` | the gate subtests |
+| 1 | the prologue: the time as `main`'s first statement; block signals, SIGPIPE ignored, SIGCHLD default; parse, refusing root first; adopt the keep-fds; the signalfd, so its number is never a keep-fd's; `launcher-start`; the state directory; the cache lock (swept: relaunch or 75); close what was inherited. Nothing chdirs before step 4. For a declaration (`launchDeclared`): SIGCHLD default; the wrapper's work, in its order (`assemble.run`, itself one linear function); then block signals, SIGPIPE ignored; the spec's checks over the value (`spec.validate`); the signalfd; `launcher-start`; the state directory; the cache lock (swept: relaunch this binary with its argv); the prologue's own shared lock on a cold cache closed; close what was inherited | `launch.zig`'s `main` and `launchDeclared` | the keep-fd launches, the spec's golden cases, the payload-descriptor subtest, tests/transition.nix |
+| 2 | the child's ends close at once after bwrap's spawn, whether or not it succeeded: info, ready and gate write ends, the seccomp files, U2, the keep-fds, the resolver's memfd | `run` | the gate subtests |
 | 3 | the ready pipe's read end closes right after the helper's fork, so the helper alone sees the byte or EOF | `run` | the mount subtests |
 | 4 | U2 is strictly sequential: the grandchild unshares and writes `u`; the helper writes the maps, then `m`; the grandchild then writes `max_user_namespaces` and `n`; only then the helper sends the pid and waits. On failure every pipe closes before any reap, then the map programs are killed and the helpers waited for | `ns.zig` | the U2 tests in `checks.native` |
 | 5 | the gate: the terminal started (the watchdog before raw), queued signals taken, the window size, one byte, then the gate is open | `run` | the ^C, gate and terminal subtests |
@@ -2111,7 +2117,10 @@ After the gate a signal is forwarded, not acted on, so the payload's status
 tells what happened: `^C` is 130 under a pty and in a pipeline, `^]^]^]` is
 137. A failing `postStop` is reported and does not change the status. 125
 collides with a payload's own 125, as it does for `env` and `chroot`. The
-wrapper's own refusals exit 1.
+prologue's own refusals, the wrapper's before it, exit 1 under the
+declaration's name (`agent: ...`), and so does a declaration file that
+cannot be read or that `flong check` refuses; a name no directory has a
+declaration for is 2, `flong: no declaration "NAME" (looked for ...)`.
 
 ### Layouts on disk
 

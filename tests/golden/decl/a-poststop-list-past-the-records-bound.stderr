@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-poststop-list-past-the-records-bound.zon: flong.box.postStop comes to 4096 bytes in the session's record, its commands' words joined, each after the program it is run through, and a value there is at most 4095. The launch would refuse it: shorten the commands, or run fewer.

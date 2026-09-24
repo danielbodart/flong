@@ -142,6 +142,7 @@ fn expectArgv(extra: []const []const u8, relay: bool, want: []const []const u8) 
         .u2 = Named{ .name = "@U2@" },
         .info_w = Named{ .name = "@INFO@" },
         .seccomp = seccomp_fds[0..s.seccomp.len],
+        .resolv = @as(?Named, null),
         .gate_r = Named{ .name = "@GATE@" },
         .ready_w = Named{ .name = "@READY@" },
     }, relay, "/nix/store/test-only-flong");
@@ -274,6 +275,7 @@ test "bwrapArgv: trace, and no groups" {
         .u2 = Named{ .name = "@U2@" },
         .info_w = Named{ .name = "@INFO@" },
         .seccomp = seccomp_fds[0..0],
+        .resolv = @as(?Named, null),
         .gate_r = Named{ .name = "@GATE@" },
         .ready_w = Named{ .name = "@READY@" },
     }, false, "/flong");

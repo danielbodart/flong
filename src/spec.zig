@@ -52,6 +52,9 @@ pub const Limit = struct { file: [:0]const u8, value: [:0]const u8 };
 /// PATH, so the program is an absolute path.
 pub const Command = []const [:0]const u8;
 
+/// One variable of the payload's environment (Spec.env).
+pub const Var = struct { name: [:0]const u8, value: [:0]const u8 };
+
 /// struct fl_spec (flong-spec.h:58-113). An argument vector is its words,
 /// empty when the keyword was not given.
 pub const Spec = struct {
@@ -64,8 +67,14 @@ pub const Spec = struct {
     state: [:0]const u8,
     /// the cache directory; the root is <cache>/prepared
     cache: [:0]const u8,
-    /// run when the cache was swept; empty: exit 75
+    /// run when the cache was swept; empty: exit 75, unless relaunch_self
     relaunch: []const [:0]const u8 = &.{},
+    /// run when the cache was swept, with `relaunch` empty: this binary,
+    /// readlink(/proc/self/exe), with this argv, the process's own, argv[0]
+    /// untouched (prologue.relaunchSelf). `flong launch DECL.zon` sets it
+    /// (STANDALONE.md, S3): the relaunch is flong's, and no longer the
+    /// wrapper's
+    relaunch_self: ?[]const [*:0]const u8 = null,
     /// bound at /run/current-system
     closure: [:0]const u8,
 
@@ -117,6 +126,16 @@ pub const Spec = struct {
     pasta_wait: bool = false,
 
     // bwrap
+    /// The payload's environment, built from nothing: bwrap's --clearenv,
+    /// then a --setenv for each, in order. null: none, and bwrap_args say
+    /// it (the argv spec's bwrap-args)
+    env: ?[]const Var = null,
+    /// bwrap's --hostname; null: none, or a bwrap-arg says it
+    hostname: ?[:0]const u8 = null,
+    /// A networked session's /etc/resolv.conf, whole: bwrap binds it there
+    /// read-only, mode 0644, from a memfd the spawn writes it into
+    /// (launch/bwrap.zig). null: none, or a keep-fd's --ro-bind-data
+    resolv_conf: ?[]const u8 = null,
     /// only DESIGN.md's bwrap-arg allow-list
     bwrap_args: []const [:0]const u8 = &.{},
     /// descriptors those options name (--ro-bind-data 9 ...), each checked
@@ -234,6 +253,13 @@ fn keyword(word: []const u8) ?Kw {
         if (eql(word, k.name)) return @enumFromInt(i);
     }
     return null;
+}
+
+/// Whether `word` is one of the argv spec's keywords: what tells
+/// `flong launch`'s argv spec from a declaration's name (launch.zig), until
+/// both the argv spec and this go with the wrapper (STANDALONE.md, S3).
+pub fn isKeyword(word: []const u8) bool {
+    return keyword(word) != null;
 }
 
 fn mountKind(word: []const u8) ?usize {
@@ -768,7 +794,15 @@ pub fn parse(arena: Allocator, argv: []const [*:0]const u8) Error!Spec {
         i += 1 + n;
     }
 
-    // Across keywords.
+    try across(arena, &s);
+    return s;
+}
+
+/// The checks across keywords, parse's tail (flong-spec.c:680-706), which
+/// `validate` runs too: a map covering the payload's ids, the programs
+/// absolute, pasta's words with a network, the bwrap-args allowed and
+/// every keep-fd consumed. `arena` holds the one array it needs.
+fn across(arena: Allocator, s: *const Spec) Error!void {
     try idmapDisjoint("uidmap", s.uidmap);
     try idmapDisjoint("gidmap", s.gidmap);
     if (!idmapCovers(s.uidmap, s.uid)) return msg.refuse("spec: user's uid {d} is in no uidmap extent", .{s.uid});
@@ -791,13 +825,106 @@ pub fn parse(arena: Allocator, argv: []const [*:0]const u8) Error!Spec {
     // used[j] is set when a --ro-bind-data names keep-fd j.
     const used = arena.alloc(bool, s.keep_fds.len) catch return msg.fail(.NOMEM, "spec", .{});
     @memset(used, false);
-    try bwrapAllowed(&s, used);
+    try bwrapAllowed(s, used);
     // bwrap passes whatever it inherits on to the payload, so a keep-fd
     // that no option consumes would reach the payload open.
     for (s.keep_fds, used) |k, u| {
         if (!u) return msg.refuse("spec: keep-fd {d} is named by no bwrap-arg --ro-bind-data", .{k});
     }
-    return s;
+}
+
+/// The spec's checks over a value, which `flong launch DECL.zon` builds in
+/// process where the wrapper passed argv (STANDALONE.md, S3): each field's,
+/// as parse checks it while reading it, then `across`, parse's tail. A
+/// refusal is parse's text for the same fault, naming the field in the
+/// keyword's words, with a number printed as the value it is rather than
+/// the text it was read from. Refuses root first, as parse does; the typed
+/// environment's names and the hostname are checked as the bwrap-args that
+/// said them were. `arena` holds `across`'s array.
+pub fn validate(arena: Allocator, s: *const Spec) Error!void {
+    try proc.refuseRoot();
+    try name("machine", s.machine);
+    try name("container", s.container);
+    try absolute("state", s.state);
+    try absolute("cache", s.cache);
+    try closure(s.closure);
+    if (s.uidmap.len == 0) return msg.refuse("spec: uidmap is missing", .{});
+    if (s.gidmap.len == 0) return msg.refuse("spec: gidmap is missing", .{});
+    for (s.uidmap) |e| try idmapValue("uidmap", e);
+    for (s.gidmap) |e| try idmapValue("gidmap", e);
+    try idValue("user's uid", s.uid);
+    try idValue("user's gid", s.gid);
+    try clean("user's home", s.home, .absolute);
+    for (s.groups) |g| try idValue("group", g);
+    try absolute("chdir", s.chdir);
+    for (s.mounts) |*m| try mountValue(m);
+    for (s.protect) |p| try clean("protect", p, .absolute);
+    for (s.seccomp) |p| try absolute("seccomp", p);
+    if (s.nested_userns > int_max)
+        return msg.refuse("spec: nested-userns is larger than {d}: '{d}'", .{ int_max, s.nested_userns });
+    try clean("holder", s.holder, .relative);
+    for (s.limits, 0..) |l, i| {
+        for (limit_files) |f| {
+            if (eql(l.file, f)) break;
+        } else return msg.refuse("spec: limit '{s}' is not one of memory.max memory.high memory.swap.max " ++
+            "memory.oom.group pids.max cpu.max cpu.weight io.weight", .{l.file});
+        for (s.limits[0..i]) |o| {
+            if (eql(o.file, l.file)) return msg.refuse("spec: limit {s} given more than once", .{l.file});
+        }
+        if (l.value.len == 0) return msg.refuse("spec: limit {s} has an empty value", .{l.file});
+    }
+    for (s.post_start) |cmd| {
+        if (cmd.len == 0) return msg.refuse("spec: post-start's word count is 0", .{});
+    }
+    for (s.post_stop) |cmd| {
+        if (cmd.len == 0) return msg.refuse("spec: post-stop's word count is 0", .{});
+        try storePath("post-stop", cmd[0]);
+    }
+    if (s.env) |env| for (env) |v| try envName(v.name);
+    if (s.hostname) |h| if (h.len == 0) return msg.refuse("spec: bwrap-arg --hostname is empty", .{});
+    if (s.command.len == 0) return msg.refuse("spec: the command after '--' is empty", .{});
+    try across(arena, s);
+}
+
+/// An id, at most id_max, as `number` bounds one read from argv.
+fn idValue(what: []const u8, v: u64) Error!void {
+    if (v > id_max) return msg.refuse("spec: {s} is larger than {d}: '{d}'", .{ what, id_max, v });
+}
+
+/// `idmap`'s checks, on an extent that is numbers already.
+fn idmapValue(what: []const u8, e: IdMap) Error!void {
+    inline for (.{ "inside", "outside", "count" }) |f| {
+        if (@field(e, f) > id_max)
+            return msg.refuse("spec: {s} {d} {d} {d}: the {s} is larger than {d}", .{ what, e.inside, e.outside, e.count, f, id_max });
+    }
+    if (e.count == 0)
+        return msg.refuse("spec: {s} {d} {d} {d}: the count is 0", .{ what, e.inside, e.outside, e.count });
+    if (e.count > id_max + 1 - e.inside or e.count > id_max + 1 - e.outside)
+        return msg.refuse("spec: {s} {d} {d} {d}: the extent runs past id {d}", .{ what, e.inside, e.outside, e.count, id_max });
+    if (e.outside == 0)
+        return msg.refuse("spec: {s} {d} {d} {d} reaches host id 0: flong never maps host root", .{ what, e.inside, e.outside, e.count });
+}
+
+/// parse's checks of a mount's fields, on a Mount.
+fn mountValue(m: *const mount.Mount) Error!void {
+    var kind: []const u8 = "";
+    for (mount_kinds) |k| {
+        if (k.kind == m.kind) kind = k.name;
+    }
+    var dest_buf: [64]u8 = undefined;
+    const dest_what = std.fmt.bufPrint(&dest_buf, "mount {s} destination", .{kind}) catch unreachable; // proven: 6 + 13 + 12 bytes fit 64
+    try clean(dest_what, m.dest, .absolute);
+    var src_buf: [64]u8 = undefined;
+    const src_what = std.fmt.bufPrint(&src_buf, "mount {s} source", .{kind}) catch unreachable; // proven: 6 + 13 + 7 bytes fit 64
+    switch (m.kind) {
+        .bind_ro_exact, .bind_rw_exact => try clean(src_what, m.src orelse "", .absolute),
+        .bind_ro, .bind_rw, .dev, .overlay => try absolute(src_what, m.src orelse ""),
+        .tmpfs => {
+            try octal("mount tmpfs mode", m.mode orelse "");
+            if (m.size) |size| try tmpfsSize(size);
+        },
+        .mask => {},
+    }
 }
 
 /// The arrays pass 2 fills, allocated once at the counts pass 1 made
@@ -856,7 +983,8 @@ fn tables(arena: Allocator, count: *const [kw_n]usize) Allocator.Error!Tables {
 /// anything with its `arg` and `passFd`. Each descriptor is named only
 /// through `passFd`, which keeps it in bwrap at that number: `fds` holds
 /// U1, U2, the info pipe's write end, the seccomp files (a slice, in the
-/// spec's order), the gate's read end and the ready pipe's write end.
+/// spec's order), the resolver's memfd (null without a resolv_conf), the
+/// gate's read end and the ready pipe's write end.
 /// `relay` is the terminal's (tty.zig), `self` the flong binary's path,
 /// which bwrap runs with the word "init". The words made here (numbers,
 /// joined paths) are `gpa`'s.
@@ -910,6 +1038,26 @@ pub fn bwrapArgv(gpa: Allocator, sp: anytype, s: *const Spec, fds: anytype, rela
     // The mount helper mounts the session's own /sys and detaches this.
     for ([_][*:0]const u8{ "--ro-bind", "/sys", "/.hostsys" }) |w| try sp.arg(w);
 
+    // The typed options, in the order the wrapper's bwrap-args gave them:
+    // the resolver's file from its memfd, the environment from nothing,
+    // the hostname.
+    if (s.resolv_conf != null) {
+        for ([_][*:0]const u8{ "--perms", "0644", "--ro-bind-data" }) |w| try sp.arg(w);
+        try sp.passFd(fds.resolv.?);
+        try sp.arg("/etc/resolv.conf");
+    }
+    if (s.env) |env| {
+        try sp.arg("--clearenv");
+        for (env) |v| {
+            try sp.arg("--setenv");
+            try sp.arg(v.name.ptr);
+            try sp.arg(v.value.ptr);
+        }
+    }
+    if (s.hostname) |h| {
+        try sp.arg("--hostname");
+        try sp.arg(h.ptr);
+    }
     for (s.bwrap_args) |w| try sp.arg(w.ptr);
 
     try sp.arg("--");

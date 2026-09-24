@@ -847,13 +847,13 @@ in
               pid, start = pid1_of(f"{CG}/netless/{name}/sandbox")
               poststop = machine.succeed(
                   "grep -o '/nix/store/[a-z0-9]*-flong-poststop-recorded/bin/flong-poststop-recorded' "
-                  "${recorded} | sort -u").split()
+                  "/etc/flong/recorded.zon | sort -u").split()
               assert len(poststop) == 1, poststop
               # Its one command: the hook program, then the command's word
               # (module.nix's mkHookProgram), 0x1F-separated.
               script = machine.succeed(
                   "grep -o '/nix/store/[a-z0-9]*-flong-test-poststop' "
-                  "${recorded} | sort -u").split()
+                  "/etc/flong/recorded.zon | sort -u").split()
               assert len(script) == 1, script
               want = golden_record(${builtins.toJSON (builtins.readFile ./golden/records/poststop)},
                                    POSTSTOP=poststop[0] + "\x1f" + script[0], CGROUP=f"{CG}/netless/{name}",

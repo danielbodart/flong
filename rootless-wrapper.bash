@@ -473,4 +473,14 @@ done
 if [[ -n ${COLORTERM:-} ]]; then spec+=(bwrap-arg --setenv bwrap-arg COLORTERM bwrap-arg "$COLORTERM"); fi
 if [[ -n ${FLONG_TRACE:-} ]]; then spec+=(trace); fi
 
+# TRANSITION ONLY (STANDALONE.md, S3), deleted with this file: the spec as
+# the words flong launch would be given, each ending in a NUL, the
+# resolver's text first, for tests/transition.nix to diff with
+# `flong launch --dump-argv`; nothing is launched.
+if [[ -n ${FLONG_DUMP_SPEC:-} ]]; then
+	if ((network)); then printf 'resolv:%s\0' "$resolv_conf"; else printf 'resolv:\0'; fi
+	printf '%s\0' "${spec[@]}" -- "$payload" "$workspace" "${launcher_args[@]}"
+	exit 0
+fi
+
 exec "$launcher" launch "${spec[@]}" -- "$payload" "$workspace" "${launcher_args[@]}"

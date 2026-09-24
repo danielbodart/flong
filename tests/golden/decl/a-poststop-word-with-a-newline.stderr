@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-poststop-word-with-a-newline.zon: flong.box.postStop has a word holding a newline, a 0x1E or a 0x1F byte. The session's record keeps postStop's commands on one line, their commands and words separated by those two bytes, so the launch would refuse it.

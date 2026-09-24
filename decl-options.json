@@ -778,5 +778,43 @@
     "doc": "What a project's policy is compiled against, at launch, by\n`flong-seccomp project DUMP NAMES DENY DIR`; null when\n`seccompPolicy` is empty, and nothing is compiled.",
     "merge": "single",
     "nixOption": false
+  },
+  {
+    "path": "commandPath",
+    "type": {
+      "type": "list",
+      "of": {
+        "type": "string"
+      }
+    },
+    "default": [],
+    "required": false,
+    "doc": "Directories put in front of `PATH`, in this order, for the commands\nthe launch runs as the caller before the session exists --\n`workspace`, `binds`, `guard`, `seccompPolicy` -- and in the\nenvironment the launch goes on with, which the hooks start from.\nUnder NixOS, the `bin` directories of `flong.<name>.path`. Empty,\nthe default, leaves `PATH` as the caller's.",
+    "merge": "ordered",
+    "nixOption": false
+  },
+  {
+    "path": "postStartProgram",
+    "type": {
+      "type": "string",
+      "nullable": true
+    },
+    "default": null,
+    "required": false,
+    "doc": "The program each `postStart` command is run through: it is given\nthe command's words and the launcher's arguments, and execs them.\nmodule.nix's hook program, which puts `flong.<name>.path` on `PATH`\nfirst (mkHookProgram). null runs each command as it is.",
+    "merge": "single",
+    "nixOption": false
+  },
+  {
+    "path": "postStopProgram",
+    "type": {
+      "type": "string",
+      "nullable": true
+    },
+    "default": null,
+    "required": false,
+    "doc": "The same for each `postStop` command, which the session's record\nkeeps whole, program first, for the sweeper to run with `$machine`\nalone: module.nix's hook program, which takes the session's name\nfrom its last argument and puts `flong.<name>.path` on `PATH`. A\nstore path, since the record's program must be one. null runs each\ncommand as it is, and each must then be a store path itself.",
+    "merge": "single",
+    "nixOption": false
   }
 ]

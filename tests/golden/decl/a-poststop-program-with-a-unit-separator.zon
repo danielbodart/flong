@@ -1,0 +1,14 @@
+// 0x1F in the program each postStop command is run through, the record's separator between two words.
+.{
+    .user = "u",
+    .command = .{"true"},
+    .container = "box",
+    .closure = "/nix/store/x-nixos-system-box",
+    .cuid = 1000,
+    .cgid = 100,
+    .steps8 = "0123abcd",
+    .name = "box",
+    .payload = "/nix/store/x-payload/bin/flong-payload-box",
+    .postStop = .{.{"/nix/store/x-t/bin/t"}},
+    .postStopProgram = "/nix/store/x-hook/bin/flong-poststop\x1fbox",
+}

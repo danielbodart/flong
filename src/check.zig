@@ -50,7 +50,7 @@ const usage = "usage: flong check DECL.zon";
 /// after it (STANDALONE.md, "The declaration's command"), and flong reads
 /// argv[0]'s basename as a subcommand first, so the link would run the
 /// subcommand. `flong` itself reads its first argument instead. main.zig's
-/// tests hold every subcommand to being here; `list` is to come.
+/// tests hold every subcommand to being here.
 pub const reserved = [_][]const u8{ "flong", "launch", "init", "sweeper", "version", "help", "check", "schema", "list" };
 
 /// `argv` is the kernel's, from the subcommand's word on.
@@ -95,6 +95,7 @@ pub fn validate(arena: Allocator, d: *const Declaration) Allocator.Error![]const
     try c.clean();
     try c.twice();
     try c.noTier();
+    try c.postStop();
     return c.out.items;
 }
 
@@ -312,19 +313,81 @@ const Checker = struct {
         try c.say("flong.{s} sets seccomp.tier = null and {s}, which change a tier's allow-list. With no tier there is no filter for them to act on. Set a tier, or drop them.", .{ c.n, try join(c.arena, what.items) });
     }
 
+    /// What the session's record cannot hold (record.zig's poststop=):
+    /// a word of a postStop command, its program included, holding a
+    /// newline or one of the list's two separators, or the list longer
+    /// than a record's value may be, PATH_MAX - 1 bytes. record.create
+    /// refuses either at launch, after the session's name is taken; here
+    /// it fails the build instead.
+    fn postStop(c: *Checker) Allocator.Error!void {
+        const d = c.d;
+        const seps = [_]u8{ '\n', record_command_sep, record_word_sep };
+        var len: usize = 0;
+        var bad = false;
+        for (d.postStop, 0..) |cmd, i| {
+            // A command's words in the record: the program, then its own.
+            var words: usize = 0;
+            if (i > 0) len += 1;
+            if (d.postStopProgram) |p| {
+                len += p.len;
+                words += 1;
+                if (std.mem.indexOfAny(u8, p, &seps) != null) bad = true;
+            }
+            for (cmd) |w| {
+                if (words > 0) len += 1;
+                len += w.len;
+                words += 1;
+                if (std.mem.indexOfAny(u8, w, &seps) != null) bad = true;
+            }
+        }
+        if (bad)
+            try c.say("flong.{s}.postStop has a word holding a newline, a 0x1E or a 0x1F byte. The session's record keeps postStop's commands on one line, their commands and words separated by those two bytes, so the launch would refuse it.", .{c.n});
+        if (len >= sys.path_max)
+            try c.say("flong.{s}.postStop comes to {d} bytes in the session's record, its commands' words joined, each after the program it is run through, and a value there is at most {d}. The launch would refuse it: shorten the commands, or run fewer.", .{ c.n, len, sys.path_max - 1 });
+    }
+
     /// Every destination the declaration mounts something at, in
     /// module.nix's order: binds, masks, tmpfs, overlays, devices.
     fn allDests(c: *Checker) Allocator.Error![][]const u8 {
-        const d = c.d;
-        var all: std.ArrayList([]const u8) = .empty;
-        for (d.containerMounts) |cm| if (isBind(cm)) try all.append(c.arena, cm.dest);
-        try all.appendSlice(c.arena, d.masks);
-        for (d.containerMounts) |cm| if (cm.kind == .tmpfs) try all.append(c.arena, cm.dest);
-        for (d.overlays) |o| try all.append(c.arena, o.target);
-        for (d.containerMounts) |cm| if (cm.kind == .dev) try all.append(c.arena, cm.dest);
-        return all.items;
+        return declaredDests(c.arena, c.d);
     }
 };
+
+/// The separators of poststop='s list (record.zig's command_sep and
+/// word_sep), which no word may hold.
+const record_command_sep: u8 = 0x1e;
+const record_word_sep: u8 = 0x1f;
+
+/// Every destination `d` mounts something at, in module.nix's order:
+/// binds, masks, tmpfs, overlays, devices, as spelt.
+pub fn declaredDests(arena: Allocator, d: *const Declaration) Allocator.Error![][]const u8 {
+    var all: std.ArrayList([]const u8) = .empty;
+    for (d.containerMounts) |cm| if (isBind(cm)) try all.append(arena, cm.dest);
+    try all.appendSlice(arena, d.masks);
+    for (d.containerMounts) |cm| if (cm.kind == .tmpfs) try all.append(arena, cm.dest);
+    for (d.overlays) |o| try all.append(arena, o.target);
+    for (d.containerMounts) |cm| if (cm.kind == .dev) try all.append(arena, cm.dest);
+    return all.items;
+}
+
+/// Each of `d`'s masks' host path (module.nix's maskHost, the wrapper's
+/// mask_hosts), in the masks' order: through the declared bind whose
+/// destination is the nearest above it, or null when that is no bind's.
+/// The launch's depth rule judges the caller's writable binds by it
+/// (launch/depth.zig).
+pub fn maskHosts(arena: Allocator, d: *const Declaration) Allocator.Error![]const ?[]const u8 {
+    const all = try declaredDests(arena, d);
+    std.mem.sort([]const u8, all, {}, lessThan);
+    var binds: std.ArrayList(Bind) = .empty;
+    for (d.containerMounts) |cm| {
+        if (!isBind(cm)) continue;
+        try binds.append(arena, .{ .dest = cm.dest, .src = try norm(arena, srcOf(cm)), .order = binds.items.len });
+    }
+    std.mem.sort(Bind, binds.items, {}, Bind.byDest);
+    const out = try arena.alloc(?[]const u8, d.masks.len);
+    for (d.masks, out) |m, *h| h.* = try hostOf(arena, all, binds.items, m);
+    return out;
+}
 
 /// ZON's `\x00` puts a NUL in a string, which a Nix string cannot hold.
 fn hasNul(s: []const u8) bool {

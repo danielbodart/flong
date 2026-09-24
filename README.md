@@ -29,8 +29,10 @@ namespace and cached under `$XDG_RUNTIME_DIR/flong`. A **session** is one run:
 an overlay on the prepared root whose writes are held in memory, started by
 bubblewrap in its own cgroup under the caller's user manager, and gone when
 it exits. The **launcher** is `flong.<name>.launcher`, a package whose
-`bin/<name>` starts a session; the caller runs it directly, and it refuses
-root. The **workspace** is the host directory bind-mounted into the session at
+`bin/<name>` is a link to `flong`, which starts a session from
+`/etc/flong/<name>.zon`, the declaration as the module renders it, as
+`flong launch <name> -- ARGS` does; the caller runs it directly, and it
+refuses root. `flong list` names every declaration and its file. The **workspace** is the host directory bind-mounted into the session at
 its own path and used as its working directory. The **payload** is the process
 `command` names. **Hooks** are the shell options the launcher runs as the
 caller at fixed points: `workspace`, `binds`, `guard`, `seccompPolicy`,
@@ -284,7 +286,7 @@ in. Each declaration is also written, as data, to `/etc/flong/<name>.zon`.
 | `seccomp.log` | `false` | Allows and logs what the filter would refuse, to learn a policy. Warns. |
 | `protect` | `[ ]` | Host paths no mount of a session may equal, lie inside or contain, such as a daemon's control socket directory. flong's own state, the user manager's sockets, `/proc` and `/sys/fs/cgroup` are always protected. |
 | `path` | `[ ]` | Packages on `PATH` for every hook. |
-| `launcher` | *read-only* | The generated launcher package. |
+| `launcher` | *read-only* | The declaration's command: a package whose `bin/<name>` is a link to `flong`. |
 
 `scopeConfig` is refused: a session has no scope unit, and `limits` holds what
 a user cgroup can enforce.
