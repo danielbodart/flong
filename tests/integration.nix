@@ -10,6 +10,13 @@
 #   drivers      `zig build integration` over the package: bin/flong-walker
 #                (tests/zig/walker.zig, phase 4) and bin/flong-proc
 #                (tests/zig/procdriver.zig, phase 5), for checks.native
+#   spec-probe   `zig build spec-probe`: bin/spec-probe, src/launch.zig as
+#                far as phase 7's L1 goes (root refused, the spec parsed,
+#                the launcher's exit), for golden's spec set
+#                (tests/golden.nix), until L4 builds the launcher itself
+#   spec-paths   `zig build test-paths`: tests/golden/paths.txt against the
+#                launcher's functions (tests/zig/paths.zig); module.nix
+#                asserts its own side
 #   vm           every proof's bins and the drivers joined, for the VM
 #                node's PATH, with passthru.vmScripts, the proofs' testScript
 #                fragments in order
@@ -85,6 +92,47 @@ let
     ];
   };
 
+  # Phase 7's L1 (ZIG.md): the spec and what it imports.
+  specFiles = [
+    ../src/sys.zig
+    ../src/fd.zig
+    ../src/msg.zig
+    ../src/errno.zig
+    ../src/num.zig
+    ../src/mount.zig
+    ../src/sig.zig
+    ../src/proc.zig
+    ../src/names.zig
+    ../src/spec.zig
+  ];
+
+  # Static, no libc, stripped, and no stack size in PT_GNU_STACK, as the
+  # launcher's Zig will be.
+  spec-probe = zigSet {
+    pname = "flong-spec-probe";
+    steps = "spec-probe";
+    files = specFiles ++ [ ../src/launch.zig ];
+    nativeBuildInputs = [
+      pkgs.file
+      pkgs.binutils
+    ];
+    extra = ''
+      file -b $out/bin/spec-probe | tee /dev/stderr | grep -q 'statically linked'
+      readelf -lW $out/bin/spec-probe > $TMPDIR/phdrs
+      if grep -q INTERP $TMPDIR/phdrs; then echo "spec-probe has an INTERP"; exit 1; fi
+      [[ $(awk '$1 == "GNU_STACK" { print $6 }' $TMPDIR/phdrs) == 0x000000 ]]
+    '';
+  };
+
+  spec-paths = zigSet {
+    pname = "flong-spec-paths";
+    steps = "test-paths";
+    files = specFiles ++ [
+      ../tests/zig/paths.zig
+      ../tests/golden/paths.txt
+    ];
+  };
+
   vm = pkgs.symlinkJoin {
     name = "flong-proofs-vm";
     paths = lib.attrValues bins ++ [ drivers ];
@@ -97,4 +145,4 @@ let
     ) proofNames;
   };
 in
-{ inherit vm drivers; } // builds // bins
+{ inherit vm drivers spec-probe spec-paths; } // builds // bins

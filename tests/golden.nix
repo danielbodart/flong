@@ -56,7 +56,8 @@
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:11-20
 # does; seccomp is the program the seccomp sets run against, launcher the
 # output whose flong-init, flong-sweeper and flong-launch the init, sweeper
-# and spec sets do.
+# and spec sets do; integration tests/integration.nix, whose spec-probe the
+# spec-probe set runs the spec cases against.
 {
   pkgs ?
     let
@@ -68,6 +69,7 @@
     }) { },
   seccomp ? import ../seccomp { inherit pkgs; },
   launcher ? import ../launcher { inherit pkgs; },
+  integration ? import ./integration.nix { inherit pkgs; },
 }:
 let
   inherit (pkgs) lib;
@@ -185,14 +187,23 @@ let
     # m, container c, state /state, cache /cache, closure CLOSURE, uidmap and
     # gidmap 0 100000 65536, user 1000 100 /home/u, holder flong.slice/s, --
     # /bin/true. CLOSURE is a store directory, LEADSOUT a store path that is a
-    # symlink to /, which realpath resolves out of the store (:245-256).
-    spec = {
-      program = "${launcher}/bin/flong-launch";
-      vars = {
-        CLOSURE = "${launcher}";
-        LEADSOUT = "${leadsOut}";
-      };
+    # symlink to /, which realpath resolves out of the store (:245-256), and
+    # TOSTORE one to /nix/store, which it resolves to the store's directory,
+    # not a path under it: the prefix is checked with its slash.
+    spec = specSet "${launcher}/bin/flong-launch";
+
+    # The same cases against src/launch.zig as far as phase 7's L1 goes
+    # (tests/integration.nix's spec-probe: root refused, the spec parsed,
+    # the launcher's exit), beside the C until L4 builds the Zig launcher.
+    spec-probe = specSet probe // {
+      dir = "spec";
     };
+
+    # What only the probe does: a spec that passes every check exits 0,
+    # where the launcher goes on to open the state directory. The control
+    # that spec-probe's run above is the Zig's, which none of the spec
+    # set's refusals can tell from the C's.
+    spec-accepted = specSet probe;
 
     # The subcommands' usage errors, the one text phase 2 (a) changed
     # (quirk 38): rewritten from the bash's then, and expand's added.
@@ -204,8 +215,23 @@ let
     };
   };
 
+  # src/launch.zig as far as phase 7's L1 goes.
+  probe = "${integration.spec-probe}/bin/spec-probe";
+
+  # The spec set against a program: CLOSURE is a store directory, LEADSOUT
+  # a store path that is a symlink to /, TOSTORE one to /nix/store.
+  specSet = program: {
+    inherit program;
+    vars = {
+      CLOSURE = "${launcher}";
+      LEADSOUT = "${leadsOut}";
+      TOSTORE = "${toStore}";
+    };
+  };
+
   # The spec set's closure that leads out of the store.
   leadsOut = pkgs.runCommand "golden-spec-leads-out" { } "ln -s / $out";
+  toStore = pkgs.runCommand "golden-spec-to-store" { } "ln -s /nix/store $out";
 
   sweeperSet = program: {
     inherit program;
