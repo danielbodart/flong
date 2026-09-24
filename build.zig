@@ -623,9 +623,9 @@ pub fn build(b: *std.Build) void {
     //                  per branch, what it holds, checkpoint 2's list;
     //                  sig.awaitFdOrExit); tests/zig/pasta_hook_test.zig
     //                  (the hook's and pasta's Spawns against golden tables
-    //                  read from flong-launch.c:586-675); S3's
-    //                  src/launch/depth.zig, hometmp.zig and resolv.zig,
-    //                  each its own tests
+    //                  read from flong-launch.c:586-675); S3's pure pieces'
+    //                  own tests, src/launch/depth.zig, hometmp.zig,
+    //                  resolv.zig, refuse.zig, subid.zig and groups.zig
     //   analyze        (-Ddev=true) B27 and B28 in tests/zig/analyze/
     //                  bugs.zig, bwrap.spawn's planted bugs
     //   test-launch    tests/zig/launch_test.zig: the record writer against
@@ -708,9 +708,9 @@ pub fn build(b: *std.Build) void {
                 });
                 test_step.dependOn(&b.addRunArtifact(t).step);
             }
-            // S3: `flong launch`'s pure pieces, each with its own tests;
+            // S3's pure pieces of `flong launch`, each module's own tests:
             // they import std alone.
-            for ([_][]const u8{ "depth", "hometmp", "resolv" }) |name| {
+            for ([_][]const u8{ "depth", "hometmp", "resolv", "refuse", "subid", "groups" }) |name| {
                 const t = b.addTest(.{
                     .name = b.fmt("launch_{s}", .{name}),
                     .root_module = b.createModule(.{
