@@ -58,8 +58,12 @@ By the user (final; not revisited):
 - **The launcher is hybrid for the mount helper only.** A Zig mount helper,
   built as a static library and called from the C launcher's fork child,
   reaches trunk early and meets the full VM suite (phase 4). ns and tty are
-  ported on the launcher branch, each milestone gated by the `checks.native`
-  VM; the rest of the launcher lands when green (phase 7).
+  ported on trunk ahead of the launch, each milestone gated by the
+  `checks.native` VM; the rest of the launcher lands when green (phase 7).
+- **Trunk is always the answer.** Every phase, the launcher's milestones
+  included, lands on trunk: no long-lived branch, no draft pull request, never
+  a force push. Code not yet wired into what ships lands as it is, its subject
+  saying so.
 
 By this plan (each detailed below):
 
@@ -78,8 +82,9 @@ By this plan (each detailed below):
   dependencies only under `-Ddev=true`.** **The mount library links without
   compiler-rt**, exporting one symbol. **The seccomp tooling becomes
   subcommands of `flong-seccomp`.**
-- **The launcher branch gets CI through a draft pull request** (`ci.yml:6`;
-  release runs only on trunk pushes, `ci.yml:42`). **DESIGN.md** is corrected
+- **The launcher's milestones get CI as trunk pushes**, one push per commit
+  (`ci.yml:6`; each green trunk push is released, `ci.yml:42`, a milestone not
+  yet built in changing nothing a user runs). **DESIGN.md** is corrected
   by each phase that makes a line false; phase 8 rewrites its native chapter.
 
 ## Measured
@@ -469,7 +474,7 @@ the child (`flong-mount.c:524`). flong-seccomp: an arena over `c_allocator`.
   how `flong-seccomp` and `bpfdump` find libseccomp.
 - **`tests/integration.nix`**, from phase 0, never an output: `zig build
   integration` over the whole package (the proofs, then the spawn probe,
-  walker, ns and pty drivers, on the branch `spec-probe`) for `checks.native`
+  walker, ns and pty drivers, and phase 7's `spec-probe`) for `checks.native`
   and `golden`. Phase 0's is per-proof derivations instead: it finds each
   `tests/proofs/<pN>/default.nix` by `readDir` (`tests/proofs/README.md`;
   `spike/proofs/` until phase 2), for `checks.integration` and `checks.native`.
@@ -863,7 +868,7 @@ rootless.nix and `tests/native.nix`, so the walker test has the swapper.
 ### Phase 5: flong-sweeper, and the process layer complete
 
 **Goal:** the holder's process is Zig, panic-free on any record, sweeping the
-C launcher's records; `proc.zig` and `sig.zig` complete, so the branch does
+C launcher's records; `proc.zig` and `sig.zig` complete, so phase 7 does
 not redesign shipped code. **Before:** the record-bytes subtest with
 `tests/golden/records/`; the sweeper golden cases.
 
@@ -886,7 +891,7 @@ not redesign shipped code. **Before:** the record-bytes subtest with
 
 ### Phase 6: the test fixtures
 
-**Goal:** no C in `tests/`, proven equal before the branch relies on them.
+**Goal:** no C in `tests/`, proven equal before phase 7 relies on them.
 
 - **Contents:** `bpfdump.zig` links libc and `scmp.zig`, which gains
   `seccomp_syscall_resolve_num_arch` (a malloc'd string, `bpfdump.c:293`) and
@@ -901,19 +906,24 @@ not redesign shipped code. **Before:** the record-bytes subtest with
 - **Accept:** parity and rootless green, the swap race included (`rootless.nix:918-926`).
   **Report:** the fixtures derivation's time.
 
-### Phase 7: the launcher, on the branch `zig-launch`
+### Phase 7: the launcher, milestone by milestone on trunk
 
 **Goal:** `flong-launch` is Zig and every suite is green; the C launcher, its
 modules, the headers and the shim are deleted.
 
-**How it runs.** L0 lands on trunk; the branch then opens with a draft PR.
-L1-L3 are branch commits, each green in the PR's CI; the branch is rebased
-after every trunk push, trunk changes to `launcher/*.c` ported before the next
-milestone. Trunk owns `native.nix` and `build.zig`; the branch edits only a
-delimited `// launcher (branch)` block of `build.zig` and
-`tests/integration.nix`, and only L4 touches `native.nix`. L4 and L5, (a) and
-(b), are fast-forwarded onto trunk when green; L1-L3 ride in L4's push, their
-subjects saying the code is not yet built in.
+**How it runs.** On trunk, milestone by milestone: no branch, no draft PR,
+no force push. L0-L3 and L4's pieces (the prologue, bwrap's spawn, the
+child-pid reader, the hook's and pasta's spawns, the transition subtest) each
+land as their own commit, pushed as their own push so CI checks each, code
+not yet wired into the shipped launcher landing as it is, its subject saying
+so ("not yet built into the launcher"). Until L4 the C launcher is the one
+shipped: the Zig is built and tested from `build.zig`'s delimited
+`// launcher (phase 7)` block and `tests/integration.nix`, and a `native.nix`
+change moves no shipped derivation. L4 is the switch commit: `native.nix`
+builds the Zig launcher, the pieces composed by its root. L5, (b), deletes the
+C. Trunk changes to `launcher/*.c` are ported before the next milestone. Every
+push is a fast-forward of trunk; a rejected push means fetching and rebasing
+the unpushed commits onto it, never forcing.
 
 - **L0 (trunk):** the tty, hook-descriptor and spec characterization tests.
 - **L1, the spec.** `spec.zig` (`flong-spec.c:417-708`: two passes, then the
@@ -984,7 +994,7 @@ subjects saying the code is not yet built in.
 
 1. A Phase 0 proof fails and its fallback would change a user decision (P5
    and its fallback failing: the recommendation would be to move the mount
-   helper to the branch as a milestone gated by `checks.native`).
+   helper to phase 7 as a milestone gated by `checks.native`).
 2. The seccomp transition finds a byte difference that is not a Zig bug (the
    same libseccomp calls in the same order), or the fix would change which
    policies are accepted.

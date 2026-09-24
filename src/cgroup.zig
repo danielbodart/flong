@@ -17,7 +17,7 @@
 //! The launch's half imports proc (the holder's start) and passwd (the
 //! refusal's name); the sweeper's build, which reaches only the sweep's
 //! half, gives cgroup neither, and Zig resolves an import only where it is
-//! used (build.zig's `launcher (branch)` block gives the launch's both).
+//! used (build.zig's `launcher (phase 7)` block gives the launch's both).
 //!
 //! Everything is reached from descriptors once the holder is open: the
 //! container level, the session and its leaves are each opened with one

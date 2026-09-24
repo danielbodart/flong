@@ -602,9 +602,9 @@ pub fn build(b: *std.Build) void {
         if (arch == .aarch64) cross_step.dependOn(&tests.step);
     }
 
-    // ---- launcher (branch) ----
-    // Phase 7 on the branch zig-launch (ZIG.md, "How it runs"): trunk owns
-    // the rest of this file, and until L4 the branch edits only this block.
+    // ---- launcher (phase 7) ----
+    // Phase 7's milestones, on trunk (ZIG.md, "How it runs"): until L4 the
+    // Zig launcher's code is built and tested from this block only.
     // L1, the spec: src/spec.zig and a first src/launch.zig, not yet built
     // into the launcher.
     //
@@ -620,7 +620,7 @@ pub fn build(b: *std.Build) void {
     // L2, namespaces, cgroups, records, passwd: src/ns.zig, src/passwd.zig
     // and the launch's halves of src/cgroup.zig and src/record.zig, which
     // import more than trunk's `modules` gives cgroup (proc, passwd): the
-    // launch's graph is `Branch.launchModules`'s, not yet built into the
+    // launch's graph is `Launcher.launchModules`'s, not yet built into the
     // launcher.
     //
     //   test           (-Ddev=true) ns.zig's and passwd.zig's own tests,
@@ -672,7 +672,7 @@ pub fn build(b: *std.Build) void {
     //   test-libc   tests/zig/libc_hookenv.zig: hook.env against glibc's
     //               setenv over random environments
     {
-        const Branch = struct {
+        const Launcher = struct {
             /// src/spec.zig over `m`'s modules.
             fn specModule(bb: *std.Build, m: Modules, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
                 return bb.createModule(.{
@@ -907,7 +907,7 @@ pub fn build(b: *std.Build) void {
 
         if (dev) {
             const m = modules(b, target, optimize);
-            const sm = Branch.specModule(b, m, target, optimize);
+            const sm = Launcher.specModule(b, m, target, optimize);
             const t = b.addTest(.{
                 .name = "pasta_hook_test",
                 .root_module = b.createModule(.{
@@ -920,8 +920,8 @@ pub fn build(b: *std.Build) void {
                         .{ .name = "msg", .module = m.msg },
                         .{ .name = "proc", .module = m.proc },
                         .{ .name = "spec", .module = sm },
-                        .{ .name = "hook", .module = Branch.pieceModule(b, m, sm, "hook", target, optimize) },
-                        .{ .name = "pasta", .module = Branch.pieceModule(b, m, sm, "pasta", target, optimize) },
+                        .{ .name = "hook", .module = Launcher.pieceModule(b, m, sm, "hook", target, optimize) },
+                        .{ .name = "pasta", .module = Launcher.pieceModule(b, m, sm, "pasta", target, optimize) },
                     },
                 }),
             });
@@ -929,7 +929,7 @@ pub fn build(b: *std.Build) void {
         }
         {
             const m = modules(b, target, optimize);
-            const sm = Branch.specModule(b, m, target, optimize);
+            const sm = Launcher.specModule(b, m, target, optimize);
             const t = b.addTest(.{
                 .name = "libc_hookenv",
                 .root_module = b.createModule(.{
@@ -940,7 +940,7 @@ pub fn build(b: *std.Build) void {
                     .imports = &.{
                         .{ .name = "sys", .module = m.sys },
                         .{ .name = "fd", .module = m.fd },
-                        .{ .name = "hook", .module = Branch.pieceModule(b, m, sm, "hook", target, optimize) },
+                        .{ .name = "hook", .module = Launcher.pieceModule(b, m, sm, "hook", target, optimize) },
                     },
                 }),
             });
@@ -951,7 +951,7 @@ pub fn build(b: *std.Build) void {
             {
                 // The prologue's pieces, each in a forked child where it
                 // would touch the test's own descriptors, signals or stderr.
-                const l = Branch.launchModules(b, target, optimize);
+                const l = Launcher.launchModules(b, target, optimize);
                 const m = l.m;
                 const opts = b.addOptions();
                 opts.addOptionPath("driver", procDriver(b, target, optimize).getEmittedBin());
@@ -967,7 +967,7 @@ pub fn build(b: *std.Build) void {
                             .{ .name = "msg", .module = m.msg },
                             .{ .name = "sig", .module = m.sig },
                             .{ .name = "proc", .module = m.proc },
-                            .{ .name = "prologue", .module = Branch.prologueModule(b, l, target, optimize) },
+                            .{ .name = "prologue", .module = Launcher.prologueModule(b, l, target, optimize) },
                             .{ .name = "options", .module = opts.createModule() },
                         },
                     }),
@@ -977,20 +977,20 @@ pub fn build(b: *std.Build) void {
             if (b.lazyDependency("minish", .{ .target = target, .optimize = optimize })) |minish| {
                 {
                     const m = modules(b, target, optimize);
-                    const t = b.addTest(.{ .name = "spec", .root_module = Branch.specModule(b, m, target, optimize) });
+                    const t = b.addTest(.{ .name = "spec", .root_module = Launcher.specModule(b, m, target, optimize) });
                     test_step.dependOn(&b.addRunArtifact(t).step);
                 }
                 {
-                    const t = b.addTest(.{ .name = "launch", .root_module = Branch.launchModule(b, target, optimize, false) });
+                    const t = b.addTest(.{ .name = "launch", .root_module = Launcher.launchModule(b, target, optimize, false) });
                     test_step.dependOn(&b.addRunArtifact(t).step);
                 }
                 {
                     // launch/bwrap.zig and sig.awaitFdOrExit, over one set
                     // of modules, so the test and the piece share fd's table.
                     const m = modules(b, target, optimize);
-                    const spec_module = Branch.specModule(b, m, target, optimize);
+                    const spec_module = Launcher.specModule(b, m, target, optimize);
                     const opts = b.addOptions();
-                    opts.addOptionPath("fake_bwrap", Branch.fakeBwrap(b, target, optimize).getEmittedBin());
+                    opts.addOptionPath("fake_bwrap", Launcher.fakeBwrap(b, target, optimize).getEmittedBin());
                     const t = b.addTest(.{
                         .name = "bwrap_test",
                         .root_module = b.createModule(.{
@@ -1004,7 +1004,7 @@ pub fn build(b: *std.Build) void {
                                 .{ .name = "sig", .module = m.sig },
                                 .{ .name = "proc", .module = m.proc },
                                 .{ .name = "spec", .module = spec_module },
-                                .{ .name = "bwrap", .module = Branch.bwrapModule(b, m, spec_module, target, optimize) },
+                                .{ .name = "bwrap", .module = Launcher.bwrapModule(b, m, spec_module, target, optimize) },
                                 .{ .name = "options", .module = opts.createModule() },
                             },
                         }),
@@ -1013,7 +1013,7 @@ pub fn build(b: *std.Build) void {
                 }
                 {
                     const m = modules(b, target, optimize);
-                    const t = b.addTest(.{ .name = "childpid", .root_module = Branch.childpidModule(b, m, target, optimize) });
+                    const t = b.addTest(.{ .name = "childpid", .root_module = Launcher.childpidModule(b, m, target, optimize) });
                     test_step.dependOn(&b.addRunArtifact(t).step);
                 }
                 {
@@ -1033,14 +1033,14 @@ pub fn build(b: *std.Build) void {
                                 .{ .name = "sys", .module = m.sys },
                                 .{ .name = "msg", .module = m.msg },
                                 .{ .name = "sig", .module = m.sig },
-                                .{ .name = "childpid", .module = Branch.childpidModule(b, m, target, optimize) },
+                                .{ .name = "childpid", .module = Launcher.childpidModule(b, m, target, optimize) },
                                 .{ .name = "options", .module = opts.createModule() },
                             },
                         }),
                     });
                     test_step.dependOn(&b.addRunArtifact(t).step);
                 }
-                if (Branch.storeDir(b)) |dir| {
+                if (Launcher.storeDir(b)) |dir| {
                     const m = modules(b, target, optimize);
                     const opts = b.addOptions();
                     opts.addOption([]const u8, "store", dir);
@@ -1056,7 +1056,7 @@ pub fn build(b: *std.Build) void {
                                 .{ .name = "fd", .module = m.fd },
                                 .{ .name = "msg", .module = m.msg },
                                 .{ .name = "mount", .module = m.mount },
-                                .{ .name = "spec", .module = Branch.specModule(b, m, target, optimize) },
+                                .{ .name = "spec", .module = Launcher.specModule(b, m, target, optimize) },
                                 .{ .name = "options", .module = opts.createModule() },
                             },
                         }),
@@ -1067,7 +1067,7 @@ pub fn build(b: *std.Build) void {
                 }
                 // L2: each launch module's own tests, in the launch's graph.
                 for ([_][]const u8{ "passwd", "cgroup", "record", "ns" }) |name| {
-                    const l = Branch.launchModules(b, target, optimize);
+                    const l = Launcher.launchModules(b, target, optimize);
                     const module = if (std.mem.eql(u8, name, "passwd")) l.passwd else if (std.mem.eql(u8, name, "cgroup")) l.cgroup else if (std.mem.eql(u8, name, "record")) l.record else l.ns;
                     const t = b.addTest(.{ .name = b.fmt("launch_{s}", .{name}), .root_module = module });
                     test_step.dependOn(&b.addRunArtifact(t).step);
@@ -1080,7 +1080,7 @@ pub fn build(b: *std.Build) void {
             // flong-cgroup.c compiled as the launcher compiles it, reading
             // the same text (tests/zig/mountinfo_c.c), and sys.O_TMPFILE
             // against glibc's fcntl.h.
-            const l = Branch.launchModules(b, target, optimize);
+            const l = Launcher.launchModules(b, target, optimize);
             const root = b.createModule(.{
                 .root_source_file = b.path("tests/zig/libc_launch.zig"),
                 .target = target,
@@ -1103,7 +1103,7 @@ pub fn build(b: *std.Build) void {
             // Outside `test`: tests/golden/records/ is not in native-test's
             // fileset (native.nix is trunk's until L4), so, as test-paths,
             // tests/integration.nix runs it. It needs no lazy dependency.
-            const l = Branch.launchModules(b, target, optimize);
+            const l = Launcher.launchModules(b, target, optimize);
             const opts = b.addOptions();
             opts.addOptionPath("records", b.path("tests/golden/records"));
             const t = b.addTest(.{
@@ -1127,10 +1127,10 @@ pub fn build(b: *std.Build) void {
         }
 
         const driver_step = b.step("launch-driver", "Build bin/flong-launch-driver, the launch's halves for checks.native");
-        driver_step.dependOn(&b.addInstallArtifact(Branch.launchDriver(b, target, optimize), .{}).step);
+        driver_step.dependOn(&b.addInstallArtifact(Launcher.launchDriver(b, target, optimize), .{}).step);
 
         const probe_step = b.step("spec-probe", "Build bin/spec-probe, src/launch.zig as far as L1 goes, for golden's spec set");
-        const probe = b.addExecutable(.{ .name = "spec-probe", .root_module = Branch.launchModule(b, target, optimize, true) });
+        const probe = b.addExecutable(.{ .name = "spec-probe", .root_module = Launcher.launchModule(b, target, optimize, true) });
         // No stack size in PT_GNU_STACK, as every installed artifact.
         probe.stack_size = 0;
         probe_step.dependOn(&b.addInstallArtifact(probe, .{}).step);
@@ -1144,7 +1144,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "mount", .module = m.mount },
-                    .{ .name = "spec", .module = Branch.specModule(b, m, target, optimize) },
+                    .{ .name = "spec", .module = Launcher.specModule(b, m, target, optimize) },
                 },
             });
             root.addAnonymousImport("paths.txt", .{ .root_source_file = b.path("tests/golden/paths.txt") });
@@ -1265,7 +1265,7 @@ pub fn build(b: *std.Build) void {
             integration_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
         }
     }
-    // ---- end of launcher (branch) ----
+    // ---- end of launcher (phase 7) ----
 }
 
 /// The modules of src/ every program shares, each importing its own
