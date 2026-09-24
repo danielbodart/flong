@@ -13,9 +13,6 @@
 #                (tests/zig/procdriver.zig, phase 5) and bin/flong-tty
 #                (tests/zig/ttydriver.zig, phase 7's L3: src/tty.zig as the
 #                launcher drives it), for checks.native
-#   spec-paths   `zig build test-paths`: tests/golden/paths.txt against the
-#                launcher's functions (tests/zig/paths.zig); module.nix
-#                asserts its own side
 #   launch-driver
 #                `zig build launch-driver`: bin/flong-launch-driver
 #                (tests/zig/launchdriver.zig), phase 7's L2 (src/ns.zig,
@@ -165,15 +162,6 @@ let
     ];
   };
 
-  spec-paths = zigSet {
-    pname = "flong-spec-paths";
-    steps = "test-paths";
-    files = specFiles ++ [
-      ../tests/zig/paths.zig
-      ../tests/golden/paths.txt
-    ];
-  };
-
   vm = pkgs.symlinkJoin {
     name = "flong-proofs-vm";
     paths = lib.attrValues bins ++ [
@@ -200,7 +188,6 @@ in
   inherit
     vm
     drivers
-    spec-paths
     launch-driver
     launch-test
     ;

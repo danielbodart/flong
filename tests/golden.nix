@@ -210,11 +210,18 @@ let
     # pattern or range decl.zig declares, an empty command); a name flong's
     # dispatch reads as its own; parse errors at their line and column (an
     # unknown field, a wrong type, a missing field, and what decl.notZon
-    # refuses before the parser could recurse on it); and every row of
-    # golden/paths.txt through a declaration (paths-*, each citing its
-    # row), so paths.txt and module.nix's mirrors can go. minimal and full
-    # pass. Each case NAME's declaration is NAME.zon, GOLDEN the store
-    # directory holding them.
+    # refuses before the parser could recurse on it); and every row of the
+    # retired golden/paths.txt through a declaration (paths-*, each citing
+    # its row), which held module.nix's mirrors of the launcher's path
+    # checks to it. minimal and full pass. S2 chunk E added a NUL in a
+    # command's word or in a path (a-nul-*), which ZON can write and Nix
+    # cannot, and escapes, nix/to-zon.nix's render of escapes.nix: every
+    # other character a Nix string can hold, which passes (see
+    # escapesRendered below). a-snippet-guard is the control that a
+    # declaration of the wrong shape is refused. These are now the only
+    # cases of those refusals: module.nix no longer asserts them
+    # (tests/assertions.nix). Each case NAME's declaration is NAME.zon,
+    # GOLDEN the store directory holding them.
     decl = {
       program = "${launcher}/bin/flong";
       sub = "check";
@@ -545,5 +552,16 @@ let
       ${lib.concatMapStrings (name: "write ${name}\n") (lib.attrNames bpfSets)}
     '';
   };
+
+  # The decl set's escapes.zon is nix/to-zon.nix's render of escapes.nix,
+  # so the case holds what to-zon writes of every character a Nix string
+  # can hold, as well as what flong check reads of it.
+  escapesRendered =
+    import ./golden/decl/escapes.nix {
+      inherit lib;
+      toZon = import ../nix/to-zon.nix { inherit lib; };
+    } == builtins.readFile ./golden/decl/escapes.zon
+    || throw "golden: tests/golden/decl/escapes.zon is not nix/to-zon.nix's render of escapes.nix";
 in
+assert escapesRendered;
 check

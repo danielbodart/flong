@@ -329,9 +329,9 @@ pub fn unclean(v: []const u8, rooted: Rooted) ?Unclean {
 /// bytes. `.absolute`, it is absolute, shorter than PATH_MAX and is not "/"
 /// alone; `.relative`, it is relative. A canonical path from realpath
 /// passes, and so does nothing that would name a different place than it
-/// spells (flong-spec.c:203-229). module.nix's `clean` mirrors it,
-/// tests/golden/paths.txt holding both to the same cases; flong check
-/// asks `unclean`, this without the message.
+/// spells (flong-spec.c:203-229). flong check asks `unclean`, this
+/// without the message, of every path a declaration mounts (src/check.zig;
+/// tests/golden/decl/'s paths-clean-* cases).
 pub fn clean(what: []const u8, v: []const u8, rooted: Rooted) Error!void {
     return switch (unclean(v, rooted) orelse return) {
         .not_absolute, .too_long => absolute(what, v),

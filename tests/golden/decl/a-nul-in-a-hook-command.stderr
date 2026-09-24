@@ -1,0 +1,2 @@
+flong check: @GOLDEN@/decl/a-nul-in-a-hook-command.zon: flong.box.workspace is a command with a NUL byte in a word. A word ends at its first NUL, so the program would be given a different argument than the one declared.
+flong check: @GOLDEN@/decl/a-nul-in-a-hook-command.zon: flong.box.guard has a command with a NUL byte in a word. A word ends at its first NUL, so the program would be given a different argument than the one declared.

@@ -372,7 +372,15 @@ already gone.
 | `hostBridge`, `hostAddress`, `hostAddress6`, `localAddress`, `localAddress6`, `localMacAddress`, `forwardPorts`, `interfaces`, `macvlans`, `extraVeths` | Refused: each is fixed per container, and sessions run concurrently. Use `flong.<name>.network`. |
 | `ephemeral`, `restartIfChanged`, `timeoutStartSec` | Ignored: they configure the `container@` unit. |
 
-Refusals are evaluation-time assertions.
+A refusal of a container option or of the host is an evaluation-time
+assertion. A refusal of what the declaration says -- a path that is not
+clean, a destination mounted twice, a source that reaches flong's state or
+a protected path, a device, a mask too deep below a writable bind, seccomp
+settings with no tier, ids past 65535 -- is `flong check`'s, which judges
+`/etc/flong/<name>.zon` as that file is built: `nixos-rebuild` fails
+building `flong-<name>.zon`, and the build log's last lines are
+`flong check: /nix/store/…-flong-<name>.zon: flong.<name> …`, one line a
+refusal.
 
 ## Limitations
 

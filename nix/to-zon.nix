@@ -19,10 +19,11 @@
 #     `.{ .ports = ... }` and `.{ .count = ... }`.
 #
 # `enumPaths` duplicates a little of src/decl.zig's schema. What makes it
-# safe is that the rendered file is parsed by decl.zig itself -- by the
-# decl-render check today, and by `flong check` in the declaration's own
-# derivation when that lands -- so drift is a failed build naming the field,
-# not a launch that refuses.
+# safe is that the rendered file is parsed by decl.zig itself, by `flong
+# check` in the declaration's own derivation, so drift is a failed build
+# naming the field, not a launch that refuses. tests/golden/decl/escapes.zon
+# is this file's render of every character a Nix string can hold, which
+# tests/golden.nix holds it to.
 { lib }:
 
 let

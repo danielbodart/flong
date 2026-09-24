@@ -163,60 +163,15 @@ let
   # from this nixpkgs, so its bubblewrap is the host's.
   flongLauncher = import ./launcher { inherit pkgs; };
 
-  # A path as the launcher compares it for the checks below: /var/run is
-  # /run, and repeated and trailing slashes go. Lexical only; the launcher
-  # canonicalises at launch, and its check is the authority.
+  # A path as the launcher's header compares it with the caller's own
+  # binds (declared_dests, declared_binds, mask_hosts): /var/run is /run,
+  # and repeated and trailing slashes go. Lexical only; the launcher
+  # canonicalises at launch, and its check is the authority. flong check
+  # spells a path the same way (src/check.zig's norm) for the checks it
+  # makes of a declaration.
   norm = p:
     let q = "/" + lib.concatStringsSep "/" (lib.filter (x: x != "") (lib.splitString "/" p)); in
     if q == "/var/run" || lib.hasPrefix "/var/run/" q then "/run" + lib.removePrefix "/var/run" q else q;
-
-  # What the launcher's spec parser accepts as a path (spec.clean in
-  # src/spec.zig; tests/golden/paths.txt holds the cases both must agree
-  # on, and those meant to differ): absolute, not /, and every component
-  # present, not . or .., and at most 255 bytes. A path it would refuse at launch is refused
-  # here, where the declaration can still be read.
-  clean = p:
-    let parts = lib.splitString "/" (lib.removePrefix "/" p); in
-    lib.hasPrefix "/" p && p != "/"
-    && lib.all (x: x != "" && x != "." && x != ".." && lib.stringLength x <= 255) parts;
-
-  # Either path lies inside the other, or they are the same.
-  overlaps = a: b: a == b || lib.hasPrefix "${a}/" b || lib.hasPrefix "${b}/" a;
-
-  # The destinations given more than once. The launcher mounts one thing at
-  # each path, and refuses a destination twice (mount.sortRefusingTwice),
-  # so the checks refuse it first.
-  twiceIn = dests: lib.unique (lib.filter (x: lib.count (y: y == x) dests > 1) dests);
-
-  # clean, overlaps and twiceIn mirror the launcher's checks
-  # (src/spec.zig's clean, src/mount.zig's overlaps and duplicate refusal).
-  # tests/golden/paths.txt declares, once, each case's verdict and whether
-  # the mirror is meant to say the same or, lexical where the launcher is
-  # canonical, the opposite; tests/zig/paths.zig holds the launcher to it,
-  # and hostAssertions holds these. The cases that disagree, as lines of it.
-  pathCaseMisses =
-    let
-      cases = lib.filter (l: l != "" && ! lib.hasPrefix "#" l)
-        (lib.splitString "\n" (builtins.readFile ./tests/golden/paths.txt));
-      miss = l:
-        let
-          f = lib.splitString "\t" l;
-          field = builtins.elemAt f;
-          check = field 0;
-          said =
-            if check == "clean" then clean (field 3)
-            else if check == "overlaps" then overlaps (norm (field 3)) (norm (field 4))
-            else if check == "twice" then twiceIn [ (field 3) (field 4) ] != [ ]
-            else throw "tests/golden/paths.txt: unknown check ${check}";
-          launcher = field 1 == "yes";
-          want = if field 2 == "differs" then ! launcher else launcher;
-        in
-        lib.optional (said != want) l;
-    in
-    lib.concatMap miss cases;
-
-  # How many components REL has.
-  depth = rel: lib.length (lib.filter (x: x != "") (lib.splitString "/" rel));
 
   # Everything flong reads from a declaration, computed once and used by
   # the launcher and the checks alike, so they cannot read it differently.
@@ -269,8 +224,9 @@ let
       devices = declared.allowedDevices;
       overlayDests = lib.attrNames c.overlays;
 
-      # Every destination the declaration mounts something at. The launcher
-      # refuses one twice, so the checks refuse it first.
+      # Every destination the declaration mounts something at, for the
+      # launcher's header. The launcher refuses one twice, and flong check
+      # refuses it first.
       dests = map (b: b.dest) binds ++ c.masks ++ map (t: t.path) tmpfs
         ++ overlayDests ++ map (d: d.node) devices;
     in
@@ -299,10 +255,11 @@ let
   # host path is worked out, and it is refused if some writable bind of the
   # declaration has that host path two or more levels below its source.
   # Each refusal names those binds' sources, since a mask one level below a
-  # read-only bind can still be deep in a writable one.
+  # read-only bind can still be deep in a writable one. flong check makes
+  # that refusal, in each declaration's derivation (src/check.zig's depth).
   #
   # The launch repeats the rule against the caller's own writable binds,
-  # which only exist then, so it is given each mask's host path as well.
+  # which only exist then, so it is given each mask's host path, maskHost's.
   maskHost = d: m:
     let
       under = lib.filter (x: x != m && lib.hasPrefix "${x}/" m) d.dests;
@@ -310,14 +267,6 @@ let
       b = if nearest == null then null else lib.findFirst (x: x.dest == nearest) null d.binds;
     in
     if b == null then null else b.src + "/" + lib.removePrefix "${nearest}/" m;
-
-  deepMasks = d: masks:
-    let
-      over = h: if h == null then [ ] else
-        map (w: w.src) (lib.filter (w: w.rw && lib.hasPrefix "${w.src}/" h && depth (lib.removePrefix "${w.src}/" h) >= 2) d.binds);
-    in
-    lib.concatMap (m: let ws = over (maskHost d m); in
-      lib.optional (ws != [ ]) "${m} (in the writable bind of ${lib.concatStringsSep ", " (lib.unique ws)})") masks;
 
   # THE PREPARED ROOT, BUILT AS CONTAINER ROOT IN THE CALLER'S OWN USER
   # NAMESPACE. Run by the cache tool below, under `unshare --user --mount
@@ -802,6 +751,14 @@ let
   # declare LESS privilege than the default, and a container that is
   # silently not the one declared is worse than one that refuses to build.
   # Each message names the declaration.
+  #
+  # These are what only NixOS can say: facts of containers.<name>, of the
+  # host and of options flong does not render. Whatever the declaration
+  # file itself says -- clean paths, a destination twice, the depth rule,
+  # sources and devices, the tier's settings, the container's ids -- flong
+  # check judges, in declFileOf's build (src/check.zig), so there is one
+  # validator of a declaration, and a refusal of it fails the system's
+  # build with flong check's message rather than its evaluation.
   assertionsFor = n: c:
     let
       d = declarationOf n c;
@@ -827,34 +784,7 @@ let
         (declared.localMacAddress != null)
       ];
 
-      # The user manager's state and sockets, and flong's own, by the
-      # lexical spelling a declaration would use.
-      reachesManager = s:
-        lib.elem s [ "/" "/run" "/run/user" ]
-        || builtins.match "/run/user/[^/]+(/(flong|bus|systemd)(/.*)?)?" s != null;
-      protected = [ "/proc" "/sys/fs/cgroup" ] ++ map norm c.protect;
-      sources = map (b: b.src) d.binds ++ map (v: norm (toString v)) (lib.attrValues c.overlays);
-      badSources = lib.filter (s: reachesManager s || lib.any (overlaps s) protected) sources;
-
-      unclean = lib.filter (p: ! clean p) (lib.unique (
-        map (b: b.dest) d.binds
-        ++ lib.mapAttrsToList (_: m: if m.hostPath == null then m.mountPoint else m.hostPath) declared.bindMounts
-        ++ map (t: t.path) d.tmpfs
-        ++ d.overlayDests ++ map toString (lib.attrValues c.overlays)
-        ++ c.masks ++ map (x: x.node) d.devices ++ c.protect));
-
-      twice = twiceIn d.dests;
-      deep = deepMasks d c.masks;
       badTmpfs = map (t: t.path) (lib.filter (t: t.bad) d.tmpfs);
-      badDevices = map (x: "${x.node} ${x.modifier}")
-        (lib.filter (x: ! lib.hasPrefix "/dev/" x.node || ! lib.elem x.modifier [ "rw" "rwm" ]) d.devices);
-      devBinds = lib.filter (s: s == "/dev" || lib.hasPrefix "/dev/" s) (map (b: b.src) d.binds);
-
-      # What acts on a tier's allow-list, so has nothing to act on without one.
-      noTier = lib.optional (c.seccomp.allow != [ ]) "seccomp.allow"
-        ++ lib.optional (c.seccomp.deny != [ ]) "seccomp.deny"
-        ++ lib.optional c.seccomp.log "seccomp.log"
-        ++ lib.optional (c.seccompPolicy != [ ]) "seccompPolicy";
     in
     [
       {
@@ -968,46 +898,6 @@ let
         '';
       }
       {
-        assertion = badSources == [ ];
-        message = ''
-          flong.${n} drives containers.${c.container}, and would bind
-          ${lib.concatStringsSep ", " badSources} into a session. That reaches
-          flong's state, the user manager's bus or private socket, /proc,
-          the cgroup filesystem or a path in flong.${n}.protect, any of which
-          lets a session act as the caller outside it. The check here is
-          lexical; the launcher's canonical one refuses the rest at launch.
-        '';
-      }
-      {
-        assertion = deep == [ ];
-        message = ''
-          flong.${n} masks ${lib.concatStringsSep ", " deep}, two or more
-          levels below the root of a writable bind. A session that can write
-          the host directory can rename the masked file's parent and leave a
-          decoy for the mask to cover, and the file shows through at the new
-          name. Mask at most one level below the root of the writable bind
-          named, or make that bind read-only.
-        '';
-      }
-      {
-        assertion = badDevices == [ ];
-        message = ''
-          flong.${n} drives containers.${c.container}, whose
-          allowedDevices has ${lib.concatStringsSep ", " badDevices}. A device
-          is bound read-write, so the node must be under /dev/ and the
-          modifier "rw" or "rwm" (m means nothing for a bound node).
-        '';
-      }
-      {
-        assertion = devBinds == [ ];
-        message = ''
-          flong.${n} drives containers.${c.container}, which binds
-          ${lib.concatStringsSep ", " devBinds}. A plain bind is nodev, so the
-          device would mount and then refuse every open. List it in
-          allowedDevices instead, and drop the bind.
-        '';
-      }
-      {
         assertion = d.uEntry != null;
         message =
           if ! d.cfgEval.success then ''
@@ -1026,40 +916,6 @@ let
           root's cache and the caller's maps, before anything is prepared, so
           declare users.users.${c.user}.uid and the gid of its group in the
           container's configuration.
-        '';
-      }
-      {
-        assertion = d.cuid == null || d.cgid == null || (d.cuid <= 65535 && d.cgid <= 65535);
-        message = ''
-          flong.${n} drives containers.${c.container} as ${c.user}
-          (${toString d.cuid}:${toString d.cgid}), outside the container's ids
-          0-65535.
-        '';
-      }
-      {
-        assertion = unclean == [ ];
-        message = ''
-          flong.${n} drives containers.${c.container}, and
-          ${lib.concatStringsSep ", " unclean} is not a clean absolute path:
-          it is /, or has a trailing slash, an empty, . or .. component, or a
-          component over 255 bytes. The launcher would refuse it at launch.
-        '';
-      }
-      {
-        assertion = twice == [ ];
-        message = ''
-          flong.${n} drives containers.${c.container}, and mounts something
-          at ${lib.concatStringsSep ", " twice} twice: as two of a bind, a
-          mask, a tmpfs, an overlay or a device. The launcher mounts one thing
-          at each path.
-        '';
-      }
-      {
-        assertion = c.seccomp.tier != null || noTier == [ ];
-        message = ''
-          flong.${n} sets seccomp.tier = null and ${lib.concatStringsSep ", " noTier},
-          which change a tier's allow-list. With no tier there is no filter
-          for them to act on. Set a tier, or drop them.
         '';
       }
       {
@@ -1137,14 +993,6 @@ let
   # documented (README.md; DESIGN.md, "The kernel floor") and not
   # asserted: the launcher fails loudly on an older one.
   hostAssertions = [
-    {
-      assertion = pathCaseMisses == [ ];
-      message = ''
-        flong's path checks in module.nix disagree with
-        tests/golden/paths.txt, which the launcher is held to, at:
-        ${lib.concatStringsSep "\n" pathCaseMisses}
-      '';
-    }
     {
       assertion = config.security.allowUserNamespaces;
       message = ''

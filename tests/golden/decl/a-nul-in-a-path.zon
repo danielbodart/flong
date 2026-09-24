@@ -1,0 +1,18 @@
+// A path ends at its first NUL: /srv/a\x00/b would be /srv/a.
+.{
+    .user = "u",
+    .command = .{"true"},
+    .overlays = .{.{ .target = "/data", .lower = "/var/lib/\x00state" }},
+    .masks = .{ "/srv/token", "/srv/a\x00/b" },
+    .protect = .{"/srv/gate\x00"},
+    .container = "box",
+    .closure = "/nix/store/x-nixos-system-box",
+    .cuid = 1000,
+    .cgid = 100,
+    .steps8 = "0123abcd",
+    .name = "box",
+    .payload = "/nix/store/x-payload/bin/flong-payload-box",
+    .containerMounts = .{
+        .{ .kind = .bind_ro, .dest = "/in\x00side", .src = "/srv/ok" },
+    },
+}

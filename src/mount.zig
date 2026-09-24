@@ -732,6 +732,11 @@ test "overlaps: the same path, one inside the other, or /" {
     try testing.expect(!overlaps("/a/b", "/a/c"));
     try testing.expect(!overlaps("/run/user/1000", "/run/user/10000"));
     try testing.expect(overlaps("/run/user/1000", "/run/user/1000/flong"));
+    // Spellings a canonical path never has are compared as they are spelt
+    // (flong check's lexical compare spells them as one).
+    try testing.expect(!overlaps("//a", "/a"));
+    try testing.expect(!overlaps("/a/", "/a/b"));
+    try testing.expect(!overlaps("/var/run/user/1000", "/run/user/1000"));
     // A deleted source's " (deleted)" misses the compare (quirk 29).
     try testing.expect(!overlaps("/srv/protected (deleted)", "/srv/protected"));
 }

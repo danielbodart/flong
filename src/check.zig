@@ -18,7 +18,9 @@
 //! declaration's own writable binds, sources reaching what no session may
 //! reach, devices, the seccomp settings that need a tier, the container's
 //! ids; with what Nix's types judged and a ZON file must be told: the
-//! patterns and ranges decl.zig declares, and commands that are not empty.
+//! patterns and ranges decl.zig declares, commands that are not empty, and
+//! strings without a NUL byte, which ZON can write and which an argv, a
+//! path or the environment would cut short.
 //! Each message is the assertion's, in one line, naming the declaration as
 //! `flong.NAME`. Like the assertions, the path checks are lexical, on the
 //! declaration's spelling: the launcher's canonical checks at launch stay
@@ -123,6 +125,8 @@ const Checker = struct {
         const verb = if (in_list) "has" else "is";
         if (T == decl.Command) {
             if (v.len == 0) try c.say("flong.{s}.{s} {s} an empty command, which names no program to run.", .{ c.n, path, verb });
+            for (v) |word| if (hasNul(word))
+                return c.say("flong.{s}.{s} {s} a command with a NUL byte in a word. A word ends at its first NUL, so the program would be given a different argument than the one declared.", .{ c.n, path, verb });
             return;
         }
         switch (@typeInfo(T)) {
@@ -133,6 +137,10 @@ const Checker = struct {
                     try c.say("flong.{s}.{s} {s} {d}, outside {d}-{d}.", .{ c.n, path, verb, v, r[0], r[1] });
             },
             .pointer => |p| if (p.child == u8) {
+                // Said without the string, which the message would cut
+                // short at the NUL as the launch would.
+                if (hasNul(v))
+                    return c.say("flong.{s}.{s} {s} a string with a NUL byte in it. A path, an argument or an environment value ends at its first NUL, so the launch would read a different one than the one declared.", .{ c.n, path, verb });
                 if (m.pattern) |pattern| {
                     comptime supported(pattern);
                     if (!matches(pattern, v))
@@ -154,7 +162,8 @@ const Checker = struct {
 
     /// No bind or overlay source may reach flong's state, the user
     /// manager's sockets, /proc, the cgroup filesystem or a `protect`
-    /// entry, lexically (module.nix's badSources and reachesManager): the
+    /// entry, lexically (module.nix's badSources and reachesManager, until
+    /// this took their place): the
     /// same path, one inside the other, spelt as module.nix's `norm`
     /// spells it.
     fn sources(c: *Checker) Allocator.Error!void {
@@ -177,7 +186,8 @@ const Checker = struct {
         try c.say("flong.{s} drives containers.{s}, and would bind {s} into a session. That reaches flong's state, the user manager's bus or private socket, /proc, the cgroup filesystem or a path in flong.{s}.protect, any of which lets a session act as the caller outside it. The check here is lexical; the launcher's canonical one refuses the rest at launch.", .{ c.n, c.d.container, try join(c.arena, bad.items), c.n });
     }
 
-    /// THE DEPTH RULE (module.nix's maskHost and deepMasks): a mask whose
+    /// THE DEPTH RULE (module.nix's maskHost, and its deepMasks until this
+    /// took its place): a mask whose
     /// nearest enclosing destination is a bind's has a host path, that
     /// bind's source and then the rest of the mask, and is refused when
     /// the host path lies two or more levels below the source of a
@@ -315,6 +325,11 @@ const Checker = struct {
         return all.items;
     }
 };
+
+/// ZON's `\x00` puts a NUL in a string, which a Nix string cannot hold.
+fn hasNul(s: []const u8) bool {
+    return std.mem.indexOfScalar(u8, s, 0) != null;
+}
 
 fn isBind(cm: decl.ContainerMount) bool {
     return cm.kind == .bind_ro or cm.kind == .bind_rw;
@@ -467,7 +482,7 @@ const Keep = enum { all, repeated };
 
 /// Each distinct string of `items` once, in the order it first appears:
 /// every one (`.all`, Nix's lib.unique) or those that appear more than
-/// once (`.repeated`, module.nix's twiceIn). By a sort, so a long list
+/// once (`.repeated`, as module.nix's twiceIn did). By a sort, so a long list
 /// costs n log n and not n squared.
 fn firstOfEach(arena: Allocator, items: []const []const u8, keep: Keep) Allocator.Error![]const []const u8 {
     const order = try arena.alloc(usize, items.len);
@@ -745,4 +760,19 @@ test "the ranges decl.zig declares" {
     try testing.expectEqualStrings("flong.agent.limits.MemoryMax is \"8g\", which is not a string matching the pattern [0-9]+[KMGT].", r[0]);
     try testing.expectEqualStrings("flong.agent.limits.TasksMax is 0, outside 1-9223372036854775807.", r[1]);
     try testing.expectEqualStrings("flong.agent.limits.CPUWeight is 0, outside 1-10000.", r[2]);
+}
+
+test "a NUL byte in a command's word or in any string" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const r = try refusalsOf(arena_state.allocator(),
+        \\    .guard = .{ .{ "test", "-d" }, .{ "a\x00b", "c\x00" } },
+        \\    .masks = .{ "/a\x00b", "/c" },
+        \\    .seccomp = .{ .allow = .{"ptrace\x00"} },
+        \\
+    );
+    try testing.expectEqual(3, r.len);
+    try testing.expect(std.mem.startsWith(u8, r[0], "flong.agent.guard has a command with a NUL byte in a word."));
+    try testing.expect(std.mem.startsWith(u8, r[1], "flong.agent.masks has a string with a NUL byte in it."));
+    try testing.expect(std.mem.startsWith(u8, r[2], "flong.agent.seccomp.allow has a string with a NUL byte in it."));
 }

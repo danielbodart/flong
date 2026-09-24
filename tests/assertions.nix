@@ -2,19 +2,25 @@
 # must trip the assertion it is about, and the baseline must trip none of
 # flong's. Evaluation only; no system is built.
 #
-# Each case is a full NixOS evaluation of about two seconds, about two
-# minutes for all of them in one evaluator, so they are dealt round-robin
-# into `shards` checks, assertions-0 to assertions-<shards - 1> (flake.nix's
-# checks). A shard is a derivation whose evaluation forces its cases, so
-# parallel evaluators (nix-fast-build's workers, CI's matrix legs) split
-# the work, and a case that fails fails its shard alone, with the case's
-# own message. A case is an expression that is true or throws a message
-# that names it.
+# These are the refusals only NixOS can make, of containers.<name>, the
+# host and the options' types. What the declaration file says is flong
+# check's to judge (src/check.zig), in the file's own build, and its cases
+# are tests/golden/decl/'s; assertions-decl below holds that the file's
+# build is where a refusal surfaces.
+#
+# Each case is a full NixOS evaluation of about two seconds, about a
+# minute and a half for all of them in one evaluator, so they are dealt
+# round-robin into `shards` checks, assertions-0 to assertions-<shards - 1>
+# (flake.nix's checks), eight cases or fewer each. A shard is a derivation
+# whose evaluation forces its cases, so parallel evaluators
+# (nix-fast-build's workers, CI's matrix legs) split the work, and a case
+# that fails fails its shard alone, with the case's own message. A case is
+# an expression that is true or throws a message that names it.
 {
   nixpkgs,
   pkgs,
   system,
-  shards ? 8,
+  shards ? 6,
 }:
 let
   lib = nixpkgs.lib;
@@ -83,44 +89,12 @@ let
         { containers.box.forwardPorts = [ { hostPort = 8080; } ]; }
         "static per container")
       (accepted "a network on a private container" { flong.box.network.hostPorts = [ 5432 ]; })
-      # With no tier there is no allow-list filter for a policy to act
-      # on. debug and errno have nothing to act on either, but are
-      # harmless, so they are accepted.
-      (refused "seccomp.allow with no tier"
-        { flong.box.seccomp = { tier = null; allow = [ "ptrace" ]; }; }
-        "no filter")
-      (refused "seccomp.deny with no tier"
-        { flong.box.seccomp = { tier = null; deny = [ "ptrace" ]; }; }
-        "no filter")
-      (refused "seccomp.log with no tier"
-        { flong.box.seccomp = { tier = null; log = true; }; }
-        "no filter")
-      (refused "a seccompPolicy with no tier"
-        {
-          flong.box.seccomp.tier = null;
-          flong.box.seccompPolicy = [ [ "echo" "allow" "ptrace" ] ];
-        }
-        "no filter")
-      (accepted "debug and errno with no tier"
-        { flong.box.seccomp = { tier = null; debug = true; errno = "EACCES"; }; })
       (warned "no tier"
         { flong.box.seccomp.tier = null; }
         "only the audit, tty and namespace masks")
       (warned "log = true"
         { flong.box.seccomp.log = true; }
         "for learning a policy, not for untrusted payloads")
-      (accepted "every tier setting and loosening together"
-        {
-          flong.box.seccomp = {
-            tier = "parity";
-            debug = true;
-            nestedSandbox = true;
-            allow = [ "@keyring" "userfaultfd" ];
-            deny = [ "ptrace" "@swap" ];
-            errno = "ENOSYS";
-          };
-          flong.box.seccompPolicy = [ [ "echo" "allow" "ptrace" ] ];
-        })
       # A name is a syscall or a group, in the form systemd lists them.
       (untyped { flong.box.seccomp.allow = [ "Ptrace" ]; } [ "flong" "box" "seccomp" "allow" ]
         || throw "assertions: an upper-case seccomp name was accepted")
@@ -161,43 +135,6 @@ let
       (refused "a forwarded port below 1024"
         { flong.box.network.forwardPorts = [ { hostPort = 80; } ]; }
         "below net.ipv4.ip_unprivileged_port_start")
-      (refused "a bind of flong's state"
-        { containers.box.bindMounts."/state".hostPath = "/run/user/1000/flong"; }
-        "reaches flong's state")
-      (refused "a bind of the user manager's socket, spelt through /var/run"
-        { containers.box.bindMounts."/bus".hostPath = "/var/run/user/1000//bus"; }
-        "reaches flong's state")
-      (refused "a bind containing /proc"
-        { containers.box.bindMounts."/host".hostPath = "/"; }
-        "reaches flong's state")
-      (refused "an overlay lower inside a protected path"
-        {
-          flong.box.protect = [ "/srv/gate" ];
-          flong.box.overlays."/data" = "/srv/gate/data";
-        }
-        "reaches flong's state")
-      (refused "a mask two levels below a writable bind"
-        {
-          containers.box.bindMounts."/srv/shared" = { hostPath = "/srv/shared"; isReadOnly = false; };
-          flong.box.masks = [ "/srv/shared/a/token" ];
-        }
-        "two or more levels below")
-      (refused "a mask whose host path is deep in another writable bind"
-        {
-          containers.box.bindMounts."/ro" = { hostPath = "/srv/shared/a"; isReadOnly = true; };
-          containers.box.bindMounts."/rw" = { hostPath = "/srv/shared"; isReadOnly = false; };
-          flong.box.masks = [ "/ro/token" ];
-        }
-        "/ro/token (in the writable bind of /srv/shared)")
-      (refused "a device outside /dev"
-        { containers.box.allowedDevices = [ { node = "/srv/null"; modifier = "rw"; } ]; }
-        "allowedDevices has /srv/null rw")
-      (refused "a read-only device"
-        { containers.box.allowedDevices = [ { node = "/dev/null"; modifier = "r"; } ]; }
-        "allowedDevices has /dev/null r")
-      (refused "a bind of a device"
-        { containers.box.bindMounts."/dev/snd".hostPath = "/dev/snd"; }
-        "A plain bind is nodev")
       (refused "a shared host network"
         { containers.box.privateNetwork = lib.mkForce false; }
         "does not set privateNetwork = true")
@@ -213,30 +150,6 @@ let
           flong.box.user = lib.mkForce "v";
         }
         "is not declared")
-      (refused "a user beyond the container's ids"
-        {
-          containers.box.config.users.users.w = { isNormalUser = true; uid = 70000; group = "users"; };
-          flong.box.user = lib.mkForce "w";
-        }
-        "outside the container's ids")
-      (refused "an unclean mask"
-        { flong.box.masks = [ "/srv/../etc/shadow" ]; }
-        "is not a clean absolute path")
-      (refused "an unclean protect entry"
-        { flong.box.protect = [ "/srv/gate/" ]; }
-        "is not a clean absolute path")
-      (refused "a mask on a bind's own destination"
-        {
-          containers.box.bindMounts."/srv/b".hostPath = "/srv/b";
-          flong.box.masks = [ "/srv/b" ];
-        }
-        "twice")
-      (refused "a device that is also bound"
-        {
-          containers.box.allowedDevices = [ { node = "/dev/snd"; modifier = "rw"; } ];
-          containers.box.bindMounts."/dev/snd".hostPath = "/dev/snd";
-        }
-        "at /dev/snd twice")
       (refused "autoStart"
         { containers.box.autoStart = true; }
         "has autoStart enabled")
@@ -246,40 +159,12 @@ let
       (refused "a host without newuidmap"
         { security.wrappers.newuidmap.enable = lib.mkForce false; }
         "does not install")
-      (accepted "odd bind and tmpfs paths"
-        {
-          containers.box.bindMounts."/in side:colon\\slash".hostPath = "/out side:colon\\slash";
-          containers.box.tmpfs = [ "/tmp/with space" ];
-        })
-      (accepted "a mask one level below a writable bind"
-        {
-          containers.box.bindMounts."/srv/shared" = { hostPath = "/srv/shared"; isReadOnly = false; };
-          flong.box.masks = [ "/srv/shared/masked" ];
-        })
-      # The depth rule is for masks below writable binds only: a tmpfs or
-      # an overlay deep below one, and a mask deep below a read-only
-      # one, are allowed.
-      (accepted "a tmpfs and an overlay deep below a writable bind"
-        {
-          containers.box.bindMounts."/srv/shared" = { hostPath = "/srv/shared"; isReadOnly = false; };
-          containers.box.tmpfs = [ "/srv/shared/a/cache" ];
-          flong.box.overlays."/srv/shared/b/state" = "/var/empty";
-        })
-      (accepted "a mask deep below a read-only bind"
-        {
-          containers.box.bindMounts."/srv/ref" = { hostPath = "/srv/ref"; isReadOnly = true; };
-          flong.box.masks = [ "/srv/ref/a/token" ];
-        })
       (accepted "a forwarded port at 1024"
         { flong.box.network.forwardPorts = [ { hostPort = 1024; } ]; })
-      (accepted "a bind of a directory in the runtime directory"
-        { containers.box.bindMounts."/run/cc-socks".hostPath = "/run/user/1000/cc-socks"; })
       (accepted "a tmpfs with a mode and a size"
         { containers.box.tmpfs = [ "/scratch:mode=1777,size=10M" "/rootish:uid=0,gid=0" "/mine:uid=1000,gid=100" ]; })
-      (accepted "a device with rwm"
-        { containers.box.allowedDevices = [ { node = "/dev/null"; modifier = "rwm"; } ]; })
-      (accepted "a directory device without a bind"
-        { containers.box.allowedDevices = [ { node = "/dev/snd"; modifier = "rw"; } ]; })
+      # Declared ids for root, whose uid and gid the container module
+      # gives.
       (accepted "the container's root as the user"
         { flong.box.user = lib.mkForce "root"; })
       # The holder unit exists once there is a declaration, and is
@@ -361,5 +246,38 @@ let
     pkgs.runCommand "assertions-${toString n}" { } ''
       echo ${toString (builtins.length mine)} > $out
     '';
+
+  # A declaration flong check refuses evaluates, and its file,
+  # /etc/flong/box.zon (module.nix's declFileOf), fails to build with flong
+  # check's words. The file is in the system's closure, through
+  # environment.etc, so the same declaration fails nixos-rebuild's build
+  # with them. The baseline's file builds: the control.
+  declFile = extra: (configWith extra).environment.etc."flong/box.zon".source;
+  refusedDecl = {
+    containers.box.bindMounts."/state".hostPath = "/run/user/1000/flong";
+    containers.box.allowedDevices = [ { node = "/dev/null"; modifier = "r"; } ];
+    flong.box.masks = [ "/state" ];
+    flong.box.seccomp = { tier = null; log = true; };
+  };
+  decl =
+    assert flongFailures refusedDecl == [ ]
+      || throw "assertions-decl: module.nix refused what flong check is to: ${builtins.toJSON (flongFailures refusedDecl)}";
+    pkgs.runCommand "assertions-decl"
+      {
+        refused = pkgs.testers.testBuildFailure (declFile refusedDecl);
+        baseline = declFile { };
+      }
+      ''
+        log=$refused/testBuildFailure.log
+        cat "$log"
+        grep -q '^flong check: .*: flong.box drives containers.box, and would bind /run/user/1000/flong into a session\.' "$log"
+        grep -q '^flong check: .*: flong.box drives containers.box, whose allowedDevices has /dev/null r\.' "$log"
+        grep -q '^flong check: .*: flong.box drives containers.box, and mounts something at /state twice:' "$log"
+        grep -q '^flong check: .*: flong.box sets seccomp.tier = null and seccomp.log,' "$log"
+        [ "$(cat $refused/testBuildFailure.exit)" = 1 ]
+        grep -q '^\.{' $baseline
+        touch $out
+      '';
 in
 lib.listToAttrs (map (n: lib.nameValuePair "assertions-${toString n}" (shard n)) (lib.range 0 (shards - 1)))
+// { assertions-decl = decl; }

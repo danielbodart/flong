@@ -34,8 +34,6 @@
 //!                 bin/flong-proc), built only by tests/integration.nix
 //!   schema        decl-options.json at the package root, rewritten from
 //!                 src/decl.zig's fields and their doc comments
-//!   decl-parse    bin/flong-decl-parse, decl.zig's parse over files, for
-//!                 the host, built only by tests/decl-render.nix
 //!
 //! Every path a step reads is a lazy b.path, so an install set's derivation,
 //! which holds build.zig, build.zig.zon and its own sources only, configures
@@ -528,32 +526,6 @@ pub fn build(b: *std.Build) void {
         schema_step.dependOn(&update.step);
     }
 
-    // ---- decl-parse: the rendered declarations' parse ----
-    // tests/zig/declparse.zig, for the host: decl.load over each file it is
-    // given, for the decl-render check (tests/decl-render.nix), until
-    // `flong check` runs in each declaration's derivation.
-    const decl_parse_step = b.step("decl-parse", "Build bin/flong-decl-parse, decl.zig's parse over files");
-    {
-        const m = modules(b, b.graph.host, .Debug);
-        const d = declModules(b, m, b.graph.host, .Debug, b.path("src/decl.zig"));
-        const exe = b.addExecutable(.{
-            .name = "flong-decl-parse",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/zig/declparse.zig"),
-                .target = b.graph.host,
-                .optimize = .Debug,
-                .strip = true,
-                .single_threaded = true,
-                .imports = &.{
-                    .{ .name = "sys", .module = m.sys },
-                    .{ .name = "msg", .module = m.msg },
-                    .{ .name = "decl", .module = d.decl },
-                },
-            }),
-        });
-        decl_parse_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
-    }
-
     // ---- integration: the drivers checks.native runs ----
     const integration_step = b.step("integration", "Build the drivers checks.native runs: bin/flong-walker, bin/flong-proc");
     integration_step.dependOn(&b.addInstallArtifact(walker(b, target, optimize), .{}).step);
@@ -654,9 +626,6 @@ pub fn build(b: *std.Build) void {
     //                  read from flong-launch.c:586-675)
     //   analyze        (-Ddev=true) B27 and B28 in tests/zig/analyze/
     //                  bugs.zig, bwrap.spawn's planted bugs
-    //   test-paths     tests/golden/paths.txt against the launcher's
-    //                  functions (tests/zig/paths.zig), run only by
-    //                  tests/integration.nix
     //   test-launch    tests/zig/launch_test.zig: the record writer against
     //                  tests/golden/records/, the name taken, the cache
     //                  lock, the session made and undone; run only by
@@ -868,7 +837,7 @@ pub fn build(b: *std.Build) void {
         const launch_step = b.step("test-launch", "Run tests/zig/launch_test.zig: the record writer against tests/golden/records/, and the launch's halves");
         {
             // Outside `test`: tests/golden/records/ is not in native-test's
-            // fileset (native.nix is trunk's until L4), so, as test-paths,
+            // fileset (native.nix is trunk's until L4), so
             // tests/integration.nix runs it. It needs no lazy dependency.
             const l = Launcher.launchModules(b, target, optimize);
             const opts = b.addOptions();
@@ -895,22 +864,6 @@ pub fn build(b: *std.Build) void {
 
         const driver_step = b.step("launch-driver", "Build bin/flong-launch-driver, the launch's halves for checks.native");
         driver_step.dependOn(&b.addInstallArtifact(Launcher.launchDriver(b, target, optimize), .{}).step);
-
-        const paths_step = b.step("test-paths", "Check tests/golden/paths.txt against the launcher's functions");
-        {
-            const m = modules(b, target, optimize);
-            const root = b.createModule(.{
-                .root_source_file = b.path("tests/zig/paths.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "mount", .module = m.mount },
-                    .{ .name = "spec", .module = Launcher.specModule(b, m, target, optimize) },
-                },
-            });
-            root.addAnonymousImport("paths.txt", .{ .root_source_file = b.path("tests/golden/paths.txt") });
-            paths_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "paths", .root_module = root })).step);
-        }
     }
     // L3, the terminal: src/tty.zig (built into the launcher since L4).
     //

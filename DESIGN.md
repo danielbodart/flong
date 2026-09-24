@@ -432,7 +432,8 @@ It costs about 1 ms for 3 mounts and 1.5 ms for 12.
   spec protects `/proc`, `/sys/fs/cgroup`, the user manager's `bus` and
   `systemd` sockets and the declaration's `protect` list (frisket's control
   socket directory, for one); the launcher adds its own state directory and
-  the holder's cgroup. The same check runs lexically at evaluation. See
+  the holder's cgroup. `flong check` makes the same check lexically when
+  the declaration's file is built. See
   condition 4 of [the security boundary](#the-security-boundary).
 - **Mount order.** Mounts are sorted by destination, parents first, and one
   destination twice is refused. A bind can therefore land inside a declared
@@ -476,7 +477,7 @@ It costs about 1 ms for 3 mounts and 1.5 ms for 12.
   directory renames the masked name's parent and leaves a decoy, and the file
   is readable at the new name. One level down, the parent is the bind's root,
   which a session cannot rename. So such a mask is refused: against the
-  declaration's writable binds at evaluation, and against the workspace and
+  declaration's writable binds by `flong check` at build, and against the workspace and
   the caller's writable binds at launch. A mask below a read-only bind, and a
   tmpfs or an overlay at any depth, is not checked: moving the parent of
   either only moves where the session's own writes land.
@@ -1312,7 +1313,8 @@ the interactive terminal (a pty of its own).
    the sweep to run a store program of its choice as the caller, or
    `cgroup.kill` any of the caller's cgroups, and one that could reach the
    manager's bus could start a unit outside the sandbox. Refused at
-   evaluation and at launch; the sweep's defences are the second line.
+   build, by `flong check`, and at launch; the sweep's defences are the
+   second line.
 5. The tty filter is in every tier, including a project-loosened one.
 
 **Weaker, accepted:**
@@ -1570,7 +1572,7 @@ build fail fetching it. After a `build.zig.zon` change, the hash is set to
 | `fmt` | `zig fmt --check` |
 | `analyze` | zwanzig over `src/`, and the 27 planted bugs of `tests/zig/analyze/bugs.zig` it must report, and no more; needs `-Ddev=true` |
 | `cross` | aarch64: flong (dummy paths) and the three static fixtures built, flong-seccomp and bpfdump compiled unlinked, `abi`'s half |
-| `integration`, `launch-driver`, `test-launch`, `test-paths` | the drivers `checks.native` runs (`flong-walker`, `flong-proc`, `flong-tty`, `flong-launch-driver`), the record writer against `tests/golden/records/`, and `tests/golden/paths.txt` against `spec.clean` and `mount.overlaps`, built only by `tests/integration.nix` |
+| `integration`, `launch-driver`, `test-launch` | the drivers `checks.native` runs (`flong-walker`, `flong-proc`, `flong-tty`, `flong-launch-driver`) and the record writer against `tests/golden/records/`, built only by `tests/integration.nix` |
 
 Every installed artifact is ReleaseSafe, stripped by the build,
 `single_threaded`, and `stack_size = 0`.
@@ -1579,8 +1581,8 @@ Every installed artifact is ReleaseSafe, stripped by the build,
 `native-test-release` (`test test-libc`), `native-lint` (`lint compile-fail
 fmt`), `native-analyze`, `cross-aarch64` (on x86_64), `launcher`, `seccomp`,
 `golden`, `integration`, the VM tests `native`, `basic-a`, `basic-b`,
-`rootless-a`, `rootless-b` and `parity`, the eight `assertions-N` shards and
-`shellcheck`. `native` boots one node with a lingering user, subordinate
+`rootless-a`, `rootless-b` and `parity`, the six `assertions-N` shards,
+`assertions-decl`, `decl-options-fresh` and `shellcheck`. `native` boots one node with a lingering user, subordinate
 ranges and a delegated user manager, for what the build sandbox cannot do:
 `clone3` into a cgroup, U1 and U2 through the real `newuidmap`, the walker
 against a symlink swapper, the spawn probe, the terminal through a pty, the
@@ -1625,7 +1627,9 @@ The native code is tested at four levels, each a check.
   never regenerated: every seccomp refusal and edge, the tooling over a
   checked-in copy of `systemd-analyze syscall-filter`'s dump (so a systemd
   bump changes nothing), flong init's argv refusals, flong sweeper's usage
-  and state-directory refusals, and one case per refusal of the spec. What
+  and state-directory refusals, and one case per refusal of the spec; and
+  `flong check` over `tests/golden/decl/`, one declaration a case, each
+  refusal of a declaration with its accepted counterpart (below). What
   a case derives (store paths, project keys) is filled in as the check
   runs. The `.bpf` files follow golden-update's rule above.
 - **Unit and property tests** (minish, `native-test`): the descriptor
@@ -1667,13 +1671,24 @@ The VM tests (`basic-*`, `rootless-*`, `parity`) run the shipped launcher
 end to end. **The record contract**: the bytes the launcher writes are
 pinned by `tests/golden/records/`, against which both the writer test and
 basic's record subtest compare, so a sweeper of an older release reads a
-newer launcher's records. **Mirrors of the spec in Nix**: `module.nix`'s
-`clean`, duplicate destinations and `overlaps` refuse at evaluation what
-`spec.clean` and the mount helper refuse at launch; `tests/golden/paths.txt`
-holds (path, verdict) cases that both `test-paths` and the module's
-`hostAssertions` read, marking those meant to differ (the module's check is
-lexical, the launcher's canonical). The mask depth rule has no launcher
-counterpart.
+newer launcher's records. **One validator of a declaration**: `flong
+check` (`src/check.zig`) judges each `/etc/flong/<name>.zon` in its own
+derivation (`module.nix`'s `declFileOf`), with the parse `flong launch`
+reads it with, so a refused declaration fails the system's build with its
+line and column or the refusal's own words. It refuses before a launch
+what `spec.clean` and the mount helper refuse at launch -- unclean paths,
+a destination twice, a source reaching a protected path -- lexically on
+the declaration's spelling, where the launcher's checks are canonical and
+stay the authority; and what only a declaration can say: the mask depth
+rule against its own writable binds, devices, seccomp settings with no
+tier, the container's ids, the patterns and ranges `src/decl.zig`
+declares, an empty command, and a NUL in any string, which ZON can write
+and an argv or a path would cut short. `tests/golden/decl/` is its cases,
+each refusal and its accepted counterpart. `module.nix`'s assertions keep
+only what NixOS alone can say, of `containers.<name>`, the host and the
+option types (`tests/assertions.nix`, evaluated in shards), and
+`assertions-decl` builds a refused declaration's file to hold that the
+refusal surfaces there, in `flong check`'s words.
 
 ### Files
 

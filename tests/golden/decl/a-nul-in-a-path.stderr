@@ -1,0 +1,4 @@
+flong check: @GOLDEN@/decl/a-nul-in-a-path.zon: flong.box.overlays.lower is a string with a NUL byte in it. A path, an argument or an environment value ends at its first NUL, so the launch would read a different one than the one declared.
+flong check: @GOLDEN@/decl/a-nul-in-a-path.zon: flong.box.masks has a string with a NUL byte in it. A path, an argument or an environment value ends at its first NUL, so the launch would read a different one than the one declared.
+flong check: @GOLDEN@/decl/a-nul-in-a-path.zon: flong.box.protect has a string with a NUL byte in it. A path, an argument or an environment value ends at its first NUL, so the launch would read a different one than the one declared.
+flong check: @GOLDEN@/decl/a-nul-in-a-path.zon: flong.box.containerMounts.dest is a string with a NUL byte in it. A path, an argument or an environment value ends at its first NUL, so the launch would read a different one than the one declared.

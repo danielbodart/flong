@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-nul-in-a-command-word.zon: flong.box.command is a command with a NUL byte in a word. A word ends at its first NUL, so the program would be given a different argument than the one declared.

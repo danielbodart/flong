@@ -1,0 +1,12 @@
+// A NUL, which ZON's \x00 writes and a Nix string cannot hold: argv would end the word at it.
+.{
+    .user = "u",
+    .command = .{ "printf", "%s", "a\x00b" },
+    .container = "box",
+    .closure = "/nix/store/x-nixos-system-box",
+    .cuid = 1000,
+    .cgid = 100,
+    .steps8 = "0123abcd",
+    .name = "box",
+    .payload = "/nix/store/x-payload/bin/flong-payload-box",
+}
