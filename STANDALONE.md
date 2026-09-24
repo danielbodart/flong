@@ -42,6 +42,25 @@ The user decided these on 2026-09-24:
 - **A native release outside Nix is a later goal**, and it shapes the
   choices made now: the config file is documented, and `--help`, messages
   and paths assume no Nix store.
+- **No compatibility layer.** flong's only consumers are ours: chase,
+  frisket and nix-config. Every change here updates module.nix, the tests
+  and those consumers together. There are no old-name symlinks, no shim
+  scripts and no translated fields. Anything left on an old interface
+  should fail loudly, so that it gets fixed rather than carried.
+- **Snippets become commands.** The guard, `pwd`, binds and project-policy
+  snippets, and the hooks, are shell text that flong runs today. In ZON
+  each one is a command: a program path and its argv. flong runs no shell
+  of its own, and a consumer that wants shell writes
+  `pkgs.writeShellScript`.
+  - chase uses guard, binds, seccompPolicy, postStart and postStop.
+  - frisket uses guard, postStart and postStop.
+  - Both migrate in the same change.
+- **One source for every description: the Zig doc comment.** A build step
+  walks `Declaration`'s fields, the way capsper's `config_docs.zig` does.
+  For each one it emits the type, the default, the doc comment and the
+  merge kind into a checked-in file. module.nix builds its typed options
+  from that file. Only the Nix-only options (containers, users, enable)
+  keep hand-written prose. Details are under "The declaration".
 
 ## Why
 
@@ -71,18 +90,19 @@ The user decided these on 2026-09-24:
   - The test fixtures that need no libc (`syscall-probe`, `swapper`,
     `ioctl-probe`) become hidden subcommands only if that simplifies
     `tests/probes.nix`.
-  - Dispatch works on both `argv[0]`'s basename and the first argument.
-  - The old names (`flong-launch`, `flong-init`, `flong-sweeper`) stay as
-    symlinks to `flong`, so nothing that calls them changes in phase S1.
+  - Dispatch uses the first argument, plus `argv[0]`'s basename for the
+    per-declaration commands (see open decision 1).
+  - The old names (`flong-launch`, `flong-init`, `flong-sweeper`) are
+    gone in S1, and module.nix, the wrapper, the tests and the consumers
+    call `flong <sub>` in the same change.
   - Dispatch is the first thing in `main` and makes no syscall, so P2's
     property holds; the strace check in `tests/native.nix` confirms it.
 - **`flong init`** keeps reusing the kernel's argv slots for tini's argv
-  (ZIG.md, "Allocation"). Invoked as `flong-init`, the slot indices are
-  unchanged. Invoked as `flong init`, every index shifts by one, and a unit
-  test pins both forms.
-- **Message prefixes** (`flong-launch: …`, `flong-init: …`,
-  `flong-sweeper: …`) are asserted by the VM and golden tests. S1 keeps
-  them; renaming them to `flong launch: …` is open decision 1.
+  (ZIG.md, "Allocation"). The slot indices shift by one for the
+  subcommand word, and a unit test pins them.
+- **Message prefixes** become `flong launch: …`, `flong init: …` and
+  `flong sweeper: …` in S1. The same commit updates every asserted string
+  in the VM and golden tests.
 - **`flong-seccomp`** stays as it is: glibc, libseccomp, subcommands
   `expand`, `render` and `project`. Its store path moves only with its own
   sources, so project caches survive flong updates.
@@ -111,9 +131,22 @@ The user decided these on 2026-09-24:
     go.
   - Assertions about NixOS itself (a container exists, a user exists)
     stay in Nix.
-- **Descriptions.** The option descriptions in `module.nix` are generated
-  from the doc comments where the option maps one-to-one to a field; this
-  is open decision 3.
+- **Generated options.** `flong schema` walks `Declaration` at comptime
+  and prints one entry per field.
+  - Each entry holds: its path, its type (and its enum tags), its default,
+    its doc comment, and its merge kind. Hooks and other ordered
+    sequences merge as ordered lists, so chase's `lib.mkOrder` and
+    frisket's `lib.mkMerge` and `lib.mkAfter` keep working. Everything
+    else is a single value.
+  - The output is checked in as `decl-options.json`.
+  - module.nix builds its typed options from that file with
+    `builtins.fromJSON`: no import from a derivation, and the NixOS
+    manual, `nixos-option` and type errors keep working.
+  - A check fails when the file is stale, and `nix run .#update-options`
+    regenerates it.
+  - A field without a doc comment is a compile error, as in capsper.
+  - The same walk produces `flong help decl` and the reference page for
+    non-Nix users.
 - **The trust boundary does not move.** Any caller can run `flong launch`
   with any file, just as it can run `flong-launch` with any spec today
   (`module.nix:958`). The parser is therefore a boundary:
@@ -137,16 +170,16 @@ and no exec.
 | the project's seccomp policy (`:190`) | runs the snippet, hashes the policy, runs `flong-seccomp project` on a cache miss |
 | the depth rule (`:210`) | the mask depth check for writable binds |
 | the maps (`:234`) | `/etc/subuid` and `/etc/subgid`, U1 and U2 extents |
-| the prepared root (`:277`) | the cache lock, and calling the prepare tool (see open decision 4) |
+| the prepared root (`:277`) | the cache lock, and calling the prepare tool (see open decision 2) |
 | the payload's identity (`:330`) | reading the prepared root's passwd and group |
 | `$home/tmp` (`:362`) | the tmpfs mount |
 | the spec (`:376`) | built as a value and handed to the launch, never rendered as argv |
 
-- **Snippets.** The guard, `pwd`, binds and project-policy snippets are
-  shell text the user writes, and they stay shell. `flong launch` runs
-  each one through a shell named in the declaration: the store's bash
-  under Nix, `/bin/sh` or a configured path outside Nix. Only the glue
-  goes, not the user's shell code.
+- **Commands, not snippets.** `flong launch` runs the guard, `pwd`,
+  binds and project-policy commands as the caller, with argv and a
+  documented environment. Their output formats are the ones the snippets
+  print today (`rootless-wrapper.bash:118-209`). flong runs no shell of
+  its own.
 - **The warm path.** Today it runs bash builtins only, which is the reason
   for the wrapper's style (`rootless-wrapper.bash:11-14`). The Zig warm
   path must fork nothing a declaration did not ask for. Phase S3 reports
@@ -166,7 +199,7 @@ What a native release needs that Nix supplies today:
 - **The root.** Today a session's root is a NixOS container closure plus
   a prepared root (`module.nix:301-401`: `prepareInner`, `cacheTool`).
   Outside Nix, a root must come from somewhere else: a directory, an
-  image, or the host read-only. This is open decision 5, and it is the
+  image, or the host read-only. This is open decision 3, and it is the
   real work of S5.
 - **The sweeper's unit.** A documented systemd user unit
   (`flong sweeper %t/flong`), as `module.nix:1002` declares one.
@@ -188,14 +221,19 @@ The same pattern as ZIG.md, on trunk only:
 - a later commit deletes the old side;
 - no branch and no force push, ever.
 
-- **S1, one binary.** `flong` with subcommands and the old names as
-  symlinks. module.nix, the wrapper and the tests are unchanged.
-  - Accept: every check green; the strace check shows dispatch adds no
-    syscall before the first one `main` makes; the size of `flong`
-    against the three binaries' sum (reported).
-- **S2, the declaration.** `src/decl.zig`, `to-zon.nix`, and
-  `flong check` in each declaration's derivation. The duplicated module
-  assertions and `tests/golden/paths.txt` go.
+- **S1, one binary.** `flong` with subcommands and the new message
+  prefixes. module.nix, the wrapper, the tests, chase and frisket switch
+  to `flong <sub>` in the same change.
+  - Accept: every check green, plus the consumers' own checks; the strace
+    check shows dispatch adds no syscall before the first one `main`
+    makes; the size of `flong` against the three binaries' sum
+    (reported).
+- **S2, the declaration.** `src/decl.zig`, `flong schema` and
+  `decl-options.json`, and the module's options built from it.
+  `to-zon.nix`, and `flong check` in each declaration's derivation. The
+  snippets become commands, and chase and frisket migrate in the same
+  change. The duplicated module assertions and `tests/golden/paths.txt`
+  go.
   - Characterization first: every refusal the Nix assertions make today
     gets a golden case, so the move can be checked refusal by refusal.
 - **S3, no wrapper.** `flong launch DECL.zon`.
@@ -207,9 +245,10 @@ The same pattern as ZIG.md, on trunk only:
   - Then delete `rootless-wrapper.bash`, the argv spec keywords and the
     spec's argv parser (`src/spec.zig` keeps its checks, run over the
     value).
-- **S4, descriptions in one place.** `flong help`, `flong help decl`, and
-  generated option descriptions (open decision 3).
-- **S5, outside Nix.** Open decisions 4 and 5 first; then the release
+- **S4, the reference.** `flong help`, `flong help decl`, and a generated
+  reference page for the declaration, from the same walk as
+  `decl-options.json`.
+- **S5, outside Nix.** Open decisions 2 and 3 first; then the release
   artifacts and a README section on using flong without Nix.
 
 ## Constraints kept from ZIG.md
@@ -217,38 +256,31 @@ The same pattern as ZIG.md, on trunk only:
 - **Every ordering checkpoint** (ZIG.md, "Ordering checkpoints") still
   holds in the linear functions it names. `flong launch` adds its own
   linear prologue ahead of checkpoint 1, for the wrapper's order above.
-- **Asserted strings and exit codes stay as they are** unless an open
-  decision below changes them in its own commit with its tests.
+- **Asserted strings and exit codes stay as they are**, except the
+  message prefixes S1 renames, in a commit that updates their tests.
 - **The project cache key stays sha256 of `flong-seccomp`'s store path**
   plus the policy (quirk 36).
 - **Every test the wrapper passes today passes against `flong launch`.**
   That includes the rootless and basic VM subtests, which call the
-  generated wrappers by name. Those names become small launchers (open
-  decision 2).
+  generated wrappers by name. Those names become the per-declaration
+  commands (open decision 1).
 
 ## Open decisions
 
-1. **Message prefixes.** Keep `flong-launch: …` and the others forever, or
-   rename them to `flong launch: …` in one commit that updates every
-   asserted string. Recommended: rename in S1's last commit, since nothing
-   outside the tests parses them.
-2. **What a declaration's command is.** Today each declaration is a
+1. **What a declaration's command is.** Today each declaration is a
    generated bash script on `PATH`. After S3 it could be:
-   - (a) a symlink to `flong`, finding its `.zon` from `argv[0]`;
-   - (b) a two-line script, `exec flong launch /nix/store/…-NAME.zon -- "$@"`;
+   - (a) a symlink `NAME -> flong`, with the declaration's `.zon` found
+     beside it in the same store path (`$out/share/flong/NAME.zon`);
+   - (b) a two-line script, `exec flong launch …/NAME.zon -- "$@"`;
    - (c) a tiny generated ELF.
 
-   Recommended: (b) for its transparency. The declaration stays readable
-   with `cat`, and the exec adds almost nothing (inferred; S3 measures
-   it).
-3. **Generated NixOS option descriptions.** Generate them from the doc
-   comments, or keep module.nix's prose and check the two agree in a
-   test. Recommended: generate them where an option maps one-to-one to a
-   field, and write by hand the Nix-only options (`containers`, `users`).
-4. **The prepared root and the cache tool** (`prepareInner`, `cacheTool`,
+   Recommended: (a). It needs no shell, and a symlink shows what it runs
+   (`readlink`). Resolving the `.zon` from the invoked path moves no trust
+   boundary, since a caller can run `flong launch` with any file anyway.
+2. **The prepared root and the cache tool** (`prepareInner`, `cacheTool`,
    `module.nix:311-401`) are bash and stay bash under ZIG.md. Should
    `flong launch` call them as it does today, or should they move into Zig
    with S3 or later? Recommended: call them unchanged in S3, and decide
    again in S5, where a non-Nix root changes what "prepare" means.
-5. **A session's root outside Nix:** a directory, an OCI or plain image,
+3. **A session's root outside Nix:** a directory, an OCI or plain image,
    or the host read-only. It decides S5's scope; spike it first.
