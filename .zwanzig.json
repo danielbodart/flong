@@ -27,6 +27,7 @@
     { "kind": "open", "method_name": "openSlave" },
     { "kind": "open", "method_name": "reopenOut" },
     { "kind": "open", "method_name": "spawn" },
+    { "kind": "open", "method_name": "memfd" },
     { "kind": "close", "method_name": "close" },
     { "kind": "close", "method_name": "await" },
     { "kind": "close", "method_name": "reapNow" },

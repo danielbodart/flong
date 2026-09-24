@@ -662,6 +662,15 @@ pub fn build(b: *std.Build) void {
     //               list; sig.awaitFdOrExit
     //   analyze     (-Ddev=true) B27 and B28 in tests/zig/analyze/bugs.zig,
     //               bwrap.spawn's planted bugs (the `spawn` model)
+    //
+    // L4's pieces, each a module under src/launch/ the root composes, not
+    // yet built into the launcher:
+    //
+    //   test        (-Ddev=true) tests/zig/pasta_hook_test.zig: the hook's
+    //               and pasta's Spawns, argv and envp against golden tables
+    //               read from flong-launch.c:586-675
+    //   test-libc   tests/zig/libc_hookenv.zig: hook.env against glibc's
+    //               setenv over random environments
     {
         const Branch = struct {
             /// src/spec.zig over `m`'s modules.
@@ -868,6 +877,23 @@ pub fn build(b: *std.Build) void {
                 return exe;
             }
 
+            /// One of L4's pieces, src/launch/<name>.zig, over `m`'s
+            /// modules and `spec`.
+            fn pieceModule(bb: *std.Build, m: Modules, spec: *std.Build.Module, name: []const u8, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+                return bb.createModule(.{
+                    .root_source_file = bb.path(bb.fmt("src/launch/{s}.zig", .{name})),
+                    .target = t,
+                    .optimize = o,
+                    .imports = &.{
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "fd", .module = m.fd },
+                        .{ .name = "msg", .module = m.msg },
+                        .{ .name = "proc", .module = m.proc },
+                        .{ .name = "spec", .module = spec },
+                    },
+                });
+            }
+
             /// A directory in the store that exists wherever this builds:
             /// the one holding the zig that runs it. Null outside a store.
             fn storeDir(bb: *std.Build) ?[]const u8 {
@@ -878,6 +904,48 @@ pub fn build(b: *std.Build) void {
                 return exe[0..end];
             }
         };
+
+        if (dev) {
+            const m = modules(b, target, optimize);
+            const sm = Branch.specModule(b, m, target, optimize);
+            const t = b.addTest(.{
+                .name = "pasta_hook_test",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/zig/pasta_hook_test.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "fd", .module = m.fd },
+                        .{ .name = "msg", .module = m.msg },
+                        .{ .name = "proc", .module = m.proc },
+                        .{ .name = "spec", .module = sm },
+                        .{ .name = "hook", .module = Branch.pieceModule(b, m, sm, "hook", target, optimize) },
+                        .{ .name = "pasta", .module = Branch.pieceModule(b, m, sm, "pasta", target, optimize) },
+                    },
+                }),
+            });
+            test_step.dependOn(&b.addRunArtifact(t).step);
+        }
+        {
+            const m = modules(b, target, optimize);
+            const sm = Branch.specModule(b, m, target, optimize);
+            const t = b.addTest(.{
+                .name = "libc_hookenv",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("tests/zig/libc_hookenv.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "fd", .module = m.fd },
+                        .{ .name = "hook", .module = Branch.pieceModule(b, m, sm, "hook", target, optimize) },
+                    },
+                }),
+            });
+            libc_step.dependOn(&b.addRunArtifact(t).step);
+        }
 
         if (dev) {
             {

@@ -828,6 +828,22 @@ pub fn geteuid() uid_t {
     return linux.geteuid();
 }
 
+/// getpid(2): the launcher names a descriptor it holds to the postStart
+/// hook and to pasta as /proc/<its pid>/fd/N, a path that works in another
+/// process (flong-launch.c:590-591, 622-624).
+pub fn getpid() pid_t {
+    return linux.getpid();
+}
+
+/// MFD_CLOEXEC (linux/memfd.h), memfd_create's close-on-exec flag.
+pub const MFD_CLOEXEC: u32 = linux.MFD.CLOEXEC;
+
+/// memfd_create(2): a file with nothing on disk, pasta's pid file
+/// (flong-launch.c:616).
+pub fn memfdCreate(name: [*:0]const u8, flags: u32) Result(fd_t) {
+    return result(fd_t, linux.memfd_create(name, flags));
+}
+
 /// X_OK, access(2)'s execute bit.
 pub const X_OK = linux.X_OK;
 

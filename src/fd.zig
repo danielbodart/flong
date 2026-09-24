@@ -599,6 +599,12 @@ pub fn openUserns(pid: sys.pid_t) Error!sys.Result(Fd(.userns)) {
     return adopted(.userns, sys.openat(sys.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0));
 }
 
+/// memfd_create(name, MFD_CLOEXEC) (flong-launch.c:616): a file with
+/// nothing on disk, as pasta's pid file is.
+pub fn memfd(name: [*:0]const u8) Error!sys.Result(File) {
+    return adopted(.file, sys.memfdCreate(name, sys.MFD_CLOEXEC));
+}
+
 /// A descriptor the caller handed over at number `n`, once the spec has
 /// checked it is open (flong-spec.c:656-667; ZIG.md, "The descriptor
 /// layer"): Spawn.keepInherited passes it on, and `close` closes it.
@@ -953,6 +959,28 @@ pub fn selfPath(h: anytype) SelfPath {
     return p;
 }
 
+/// "/proc/<pid>/fd/N": descriptor `h` of this process, named to another
+/// process by this one's pid, `pid` (sys.getpid()), where /proc/self would
+/// name the reader's own: the postStart hook's $userns and $netns, and
+/// pasta's --userns and --pid (flong-launch.c:590-591, 622-624; ZIG.md,
+/// "The descriptor layer"). One of the ways a number leaves the table.
+pub const PidPath = struct {
+    buf: [40]u8 = undefined,
+    len: usize = 0,
+
+    pub fn path(self: *const PidPath) [:0]const u8 {
+        return self.buf[0..self.len :0];
+    }
+};
+
+pub fn pidPath(pid: sys.pid_t, h: anytype) PidPath {
+    var p: PidPath = .{};
+    // "/proc/", "/fd/" and two i32s are at most 32 bytes.
+    const text = std.fmt.bufPrintZ(&p.buf, "/proc/{d}/fd/{d}", .{ pid, h.raw() }) catch unreachable; // proven: 32 < 40
+    p.len = text.len;
+    return p;
+}
+
 // ---- directory entries ----
 
 /// The entries of one getdents64 buffer, each name, inode and type.
@@ -1194,6 +1222,36 @@ test "selfPath names the descriptor under /proc/self/fd" {
     const again = try ok(openFile(cwd, p.path(), .{}, 0));
     defer again.close();
     try testing.expectEqual(f.fstat().ok.ino, again.fstat().ok.ino);
+}
+
+test "pidPath names the descriptor under /proc/<pid>/fd, the pid given" {
+    const f = try ok(memfd("fd-test"));
+    defer f.close();
+    const me = sys.getpid();
+    const p = pidPath(me, f);
+    var want: [40]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "/proc/{d}/fd/{d}", .{ me, f.raw() }), p.path());
+    // Through this process's pid it names the same file.
+    const again = try ok(openFile(cwd, p.path(), .{}, 0));
+    defer again.close();
+    try testing.expectEqual(f.fstat().ok.ino, again.fstat().ok.ino);
+    // The widest pid and number fit.
+    const wide = pidPath(std.math.minInt(i32), f);
+    try testing.expect(std.mem.startsWith(u8, wide.path(), "/proc/-2147483648/fd/"));
+}
+
+test "memfd is a close-on-exec file with nothing on disk" {
+    const f = try ok(memfd("fd-test"));
+    defer f.close();
+    try testing.expectEqual(@as(usize, 3), f.write("abc").ok);
+    var buf: [8]u8 = undefined;
+    try testing.expectEqualStrings("abc", buf[0..f.pread(&buf, 0).ok]);
+    // F_GETFD (1): FD_CLOEXEC set.
+    try testing.expectEqual(@as(sys.fd_t, 1), sys.fcntl(f.raw(), 1, 0).ok & 1);
+    const link = selfPath(f);
+    var target: [64]u8 = undefined;
+    const n = sys.readlinkat(sys.AT.FDCWD, link.path(), &target).ok;
+    try testing.expectEqualStrings("/memfd:fd-test (deleted)", target[0..n]);
 }
 
 test "stdio writes and reads 0-2, outside the table" {
