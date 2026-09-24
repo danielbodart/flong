@@ -3,38 +3,6 @@
 let
   cfg = config.flong;
 
-  # WHERE A NETWORKED SESSION SENDS ITS DNS, for pasta to take from there.
-  # --dns-forward catches UDP and TCP to ports 53 and 853 at this address
-  # and re-sends each query FROM THE HOST to the host's own first
-  # nameserver. Re-originated there, so a stub resolver on the host's
-  # loopback -- resolved's 127.0.0.53, a dnsmasq on 127.0.0.1 -- answers a
-  # session that has no way to the host's loopback otherwise. That is why
-  # this and not a copy of the host's resolv.conf: copied in, 127.0.0.53
-  # names the SESSION's loopback, where nothing is listening.
-  #
-  # 169.254.1.1 is Podman's address for the same job -- `dnsForwardIpv4`
-  # in go.podman.io/common's libnetwork/pasta -- followed deliberately.
-  # It is IPv4 link-local, which no router forwards, so nothing beyond
-  # the host's own link could answer it even without pasta in the way. A
-  # LAN has it only through link-local autoconfiguration, and then all
-  # the session loses is that one address's DNS ports. And it is well
-  # clear of the addresses a cloud answers on -- metadata at
-  # 169.254.169.254, AWS's resolver at 169.254.169.253, ECS at
-  # 169.254.170.2 -- so no rule about those catches it, and nobody reading
-  # a resolv.conf takes it for one of them. A steering hook's own service
-  # address in the same namespace (frisket's, on `lo`) must be another
-  # address again: on `lo`, it would take these queries before pasta ever
-  # saw them.
-  #
-  # 100::1 for IPv6, which Podman does not forward at all. It is in
-  # RFC 6666's discard-only block, which exists to be dropped: globally
-  # unreachable, used by no LAN, and blackholed by the first router that
-  # sees it. Link-local, the IPv4 answer, is no use in IPv6: an fe80::
-  # nameserver needs a zone, and the interface inside is named after
-  # whichever host interface pasta copied.
-  dnsForward4 = "169.254.1.1";
-  dnsForward6 = "100::1";
-
   # THE PAYLOAD IS AN ARGUMENT LIST. `command` is data -- a program and its
   # arguments -- with the launcher's own arguments appended, and no word of
   # either is ever read as shell: a space, a `;` or a `$(...)` is that
@@ -68,12 +36,6 @@ let
            flong ${lib.escapeShellArgs c.command} "$@"
     '';
   };
-
-  # A HOOK IS A LIST OF COMMANDS, each an argument list run as it is, never
-  # read by a shell. Bash has no array of arrays, so a list goes into one as
-  # a flat run of words: each command's length, then its words. A count,
-  # not a separator, because a word may hold any byte a Nix string can.
-  flatCommands = cmds: lib.concatMap (cmd: [ (toString (lib.length cmd)) ] ++ cmd) cmds;
 
   # postStart and postStop are ordered lists of commands, which the launch
   # runs in order, the first that fails ending the list (src/launch/hook.zig,
@@ -129,44 +91,15 @@ let
       })
     declared.tmpfs;
 
-  # EVERY PORT CLASS IS SPELT OUT, "none" included, because -t, -u, -T and
-  # -U all default to `auto` -- and `auto` forwards every port bound on the
-  # other side, which for -T means everything listening on the host's
-  # loopback. A session asks for what it gets, port by port.
-  #
-  # hostPorts go out as TCP and UDP both: a port on the host's loopback is
-  # the thing named, and a resolver there is as likely a reason to name one
-  # as a database.
-  #
-  # forwardPorts "auto" is pasta's own: every second it reads what is
-  # listening in the session and publishes the same TCP port on the host,
-  # for as long as it is listening.
-  #
-  # A list of words, each passed to the launcher as one pasta-arg.
-  pastaPortArgs = net:
-    let
-      spec = ports: if ports == [ ] then "none" else lib.concatStringsSep "," ports;
-      forwards = protocol: map
-        (p: "${toString p.hostPort}:${toString (if p.containerPort == null then p.hostPort else p.containerPort)}")
-        (lib.filter (p: p.protocol == protocol) net.forwardPorts);
-      host = map toString net.hostPorts;
-      auto = net.forwardPorts == "auto";
-    in
-    [ "-t" (if auto then "auto" else spec (forwards "tcp")) "-u" (if auto then "none" else spec (forwards "udp"))
-      "-T" (spec host) "-U" (spec host) ]
-    ++ lib.optional net.hostLoopbackToSession "--host-lo-to-ns-lo";
-
   # The native launcher: flong, whose subcommands are launch, sweeper and
   # init, Zig, static and without libc (native.nix's launcher set). Built
   # from this nixpkgs, so its bubblewrap is the host's.
   flongLauncher = import ./launcher { inherit pkgs; };
 
-  # A path as the launcher's header compares it with the caller's own
-  # binds (declared_dests, declared_binds, mask_hosts): /var/run is /run,
-  # and repeated and trailing slashes go. Lexical only; the launcher
-  # canonicalises at launch, and its check is the authority. flong check
-  # spells a path the same way (src/check.zig's norm) for the checks it
-  # makes of a declaration.
+  # A path as flong spells it to compare it (src/check.zig's norm, which
+  # flong check and the launch's prologue use): /var/run is /run, and
+  # repeated and trailing slashes go. Lexical only; the launcher
+  # canonicalises at launch, and its check is the authority.
   norm = p:
     let q = "/" + lib.concatStringsSep "/" (lib.filter (x: x != "") (lib.splitString "/" p)); in
     if q == "/var/run" || lib.hasPrefix "/var/run/" q then "/run" + lib.removePrefix "/var/run" q else q;
@@ -257,14 +190,8 @@ let
   # that refusal, in each declaration's derivation (src/check.zig's depth).
   #
   # The launch repeats the rule against the caller's own writable binds,
-  # which only exist then, so it is given each mask's host path, maskHost's.
-  maskHost = d: m:
-    let
-      under = lib.filter (x: x != m && lib.hasPrefix "${x}/" m) d.dests;
-      nearest = lib.foldl' (a: x: if a == null || lib.stringLength x > lib.stringLength a then x else a) null under;
-      b = if nearest == null then null else lib.findFirst (x: x.dest == nearest) null d.binds;
-    in
-    if b == null then null else b.src + "/" + lib.removePrefix "${nearest}/" m;
+  # which only exist then, with each mask's host path (src/check.zig's
+  # maskHosts, src/launch/depth.zig).
 
   # The prepared root's two programs: flong-prepare-inner, which builds the
   # root as container root in the caller's own user namespace, and
@@ -296,11 +223,6 @@ let
     systemd = config.systemd.package;
     compiler = seccompCompiler;
   };
-
-  # How many user namespaces a nestedSandbox session may make below its own.
-  # A ceiling, not a need: Chromium's sandbox, `codex sandbox` and a nested
-  # bwrap ran under 16.
-  nestedUserNamespaces = 128;
 
   # A declaration's compiled seccomp filters, as store paths: the tier's (null
   # with no tier), the fixed ones in the order they are installed, and what
@@ -423,148 +345,6 @@ let
     mkdir -p $out/bin
     ln -s ${flongLauncher}/bin/flong $out/bin/${lib.escapeShellArg name}
   '';
-
-  # TRANSITION ONLY (STANDALONE.md, S3), deleted with rootless-wrapper.bash:
-  # the launcher as it was before flong launch read the declaration itself,
-  # a header of assignments, generated here, then rootless-wrapper.bash, the
-  # same text for every declaration. tests/transition.nix runs it with
-  # FLONG_DUMP_SPEC set, where it prints the spec it would hand flong launch
-  # and exits, and diffs that with `flong launch --dump-argv`. The header is
-  # the only place a declaration reaches bash, and every value in it is
-  # quoted, so a name, a path or a command's word is data there and never
-  # code. It runs nothing and expands nothing; the body decides what runs.
-  #
-  # `c.path` is on PATH for the caller's commands only. The body calls its
-  # own tools by the store paths the header gives it.
-  mkTransitionWrapper = name: c:
-    let
-      d = declarationOf name c;
-      inherit (d) declared;
-      q = lib.escapeShellArg;
-      qs = lib.escapeShellArgs;
-      closure = "${declared.path}";
-      s = c.seccomp;
-      f = seccompFiltersOf c;
-
-      # The hook programs each of the launcher's hook commands is run
-      # through (mkHookProgram). postStop is not always run by THIS
-      # launcher: a SIGKILLed launcher's session is released by the holder's
-      # sweeper, which runs the commands the session's record names -- a
-      # superseded generation's included, which this launcher no longer
-      # carries.
-      postStartScript = mkHookProgram name "poststart" c;
-      postStopScript = mkHookProgram name "poststop" c;
-
-      # systemd's names for the limits, as the cgroup files they are written
-      # to. systemd spells unlimited `infinity` and the kernel `max`.
-      value = v: if v == "infinity" then "max" else toString v;
-      limitTokens =
-        let
-          l = c.limits;
-          plain = lib.concatLists (lib.mapAttrsToList
-            (field: file: lib.optionals (l.${field} != null) [ "limit" file (value l.${field}) ])
-            {
-              MemoryMax = "memory.max";
-              MemoryHigh = "memory.high";
-              MemorySwapMax = "memory.swap.max";
-              TasksMax = "pids.max";
-              CPUWeight = "cpu.weight";
-            });
-          # A percentage of one CPU is that many thousandths of a 100 ms period.
-          quota = lib.toIntBase10 (lib.removeSuffix "%" l.CPUQuota) * 1000;
-        in
-        plain
-        ++ lib.optionals (l.CPUQuota != null) [ "limit" "cpu.max" "${toString quota} 100000" ]
-        ++ lib.optionals l.oomGroup [ "limit" "memory.oom.group" "1" ];
-
-      # Everything in the spec that does not depend on the launch, in the
-      # launcher's own words. Its order does not matter: the launcher sorts
-      # the mounts itself, parents first.
-      staticTokens =
-        [ "container" c.container "closure" closure ]
-        ++ lib.concatLists (lib.mapAttrsToList
-          (_: m: [ "mount" (if m.isReadOnly then "bind-ro" else "bind-rw") m.mountPoint
-                   (if m.hostPath == null then m.mountPoint else m.hostPath) ])
-          declared.bindMounts)
-        ++ lib.concatMap (t: [ "mount" "tmpfs" t.path t.mode t.size t.owner ]) d.tmpfs
-        ++ lib.concatMap (p: [ "mount" "overlay" p (toString c.overlays.${p}) ]) d.overlayDests
-        ++ lib.concatMap (x: [ "mount" "dev" x.node x.node ]) d.devices
-        ++ lib.concatMap (m: [ "mount" "mask" m ]) c.masks
-        # The user manager's bus and systemd directory are the caller's
-        # runtime directory's, which is known only at launch.
-        ++ lib.concatMap (p: [ "protect" p ]) ([ "/proc" "/sys/fs/cgroup" ] ++ c.protect)
-        ++ limitTokens
-        ++ lib.optionals s.nestedSandbox [ "nested-userns" (toString nestedUserNamespaces) ]
-        ++ [ "holder" "app.slice/flong-sessions.service" ]
-        ++ lib.concatMap (a: [ "holder-start" a ])
-          [ "/run/current-system/sw/bin/systemctl" "--user" "start" "flong-sessions.service" ]
-        # One post-stop per command: its word count, then its words, the
-        # declaration's hook program first (mkHookProgram).
-        ++ lib.concatMap (cmd: [ "post-stop" (toString (1 + lib.length cmd)) "${postStopScript}/bin/flong-poststop-${name}" ] ++ cmd) c.postStop
-        ++ lib.optionals (c.network != null) ([ "network" ]
-          ++ lib.concatMap (a: [ "pasta-arg" a ]) (pastaPortArgs c.network ++ [ "--no-map-gw" ])
-          # Fixed ports are bound on the host, so teardown waits for pasta to
-          # let them go, and the next session can have them.
-          ++ lib.optional (lib.isList c.network.forwardPorts && c.network.forwardPorts != [ ]) "pasta-wait");
-
-      # Every name the header assigns. The header un-exports them all: an
-      # assignment to a name the caller's environment exports keeps it
-      # exported, into the launcher and the hooks.
-      names = [
-        "name" "container" "user" "closure" "cuid" "cgid" "closure8" "steps8"
-        "static" "declared_dests" "declared_binds" "masks" "mask_hosts"
-        "launcher" "cache_tool" "flock" "mkdir" "payload" "post_start_commands"
-        "network" "dns_forward4" "dns_forward6"
-        "workspace_command" "binds_commands" "guard_commands"
-        "seccomp_tier" "seccomp_fixed" "seccomp_project" "seccomp_policy_commands"
-      ];
-
-      # One group, so one directive covers it: a `$`, a quote, a backslash
-      # or a comma in a value is meant literally, which is what shellcheck
-      # warns of. Two host ports make pasta's `-T 18123,19999`, which
-      # escapeShellArg leaves bare.
-      header = ''
-        # shellcheck disable=SC2016,SC2054,SC2089,SC2090
-        {
-        name=${q name}
-        container=${q c.container}
-        user=${q c.user}
-        closure=${q closure}
-        cuid=${toString d.cuid}
-        cgid=${toString d.cgid}
-        closure8=${q (builtins.substring 0 8 (baseNameOf closure))}
-        steps8=${q steps8}
-        static=(${qs staticTokens})
-        declared_dests=(${qs (map norm d.dests)})
-        declared_binds=(${qs (map (b: norm b.dest) d.binds)})
-        masks=(${qs c.masks})
-        mask_hosts=(${qs (map (m: let h = maskHost d m; in if h == null then "" else h) c.masks)})
-        launcher=${q "${flongLauncher}/bin/flong"}
-        cache_tool=${q "${cacheTool}/bin/flong-cache"}
-        flock=${q "${pkgs.util-linux}/bin/flock"}
-        mkdir=${q "${pkgs.coreutils}/bin/mkdir"}
-        payload=${q (lib.getExe (mkPayload name c))}
-        post_start_commands=(${qs (flatCommands (map (cmd: [ "${postStartScript}/bin/flong-poststart-${name}" ] ++ cmd) c.postStart))})
-        network=${if c.network == null then "0" else "1"}
-        dns_forward4=${q dnsForward4}
-        dns_forward6=${q dnsForward6}
-        workspace_command=(${qs (if c.workspace == null then [ ] else c.workspace)})
-        binds_commands=(${qs (flatCommands c.binds)})
-        guard_commands=(${qs (flatCommands c.guard)})
-        seccomp_tier=${q (if f.tier == null then "" else f.tier)}
-        seccomp_fixed=(${qs f.fixed})
-        seccomp_project=(${qs (lib.optionals (f.project != null)
-          [ "${seccompCompiler}/bin/flong-seccomp" "project" f.project.dump f.project.names f.project.deny ])})
-        seccomp_policy_commands=(${qs (flatCommands c.seccompPolicy)})
-        export -n ${lib.concatStringsSep " " names}
-        }
-      '';
-    in
-    pkgs.writeShellApplication {
-      name = "flong-wrapper-${name}";
-      runtimeInputs = c.path;
-      text = header + builtins.readFile ./rootless-wrapper.bash;
-    };
 
   # Everything the container module or flong's options can say that a
   # session cannot honour, refused rather than dropped: most of these
@@ -953,26 +733,14 @@ in
             against the payload, and the prepared root and the records are
             the caller's, as their `~/.bashrc` is. It exits with the
             payload's status, 128+n when a signal killed the payload, 125
-            when the payload never ran, 75 when its prepared root was swept
-            and it could not relaunch, and 1 when it refused before
+            when the payload never ran, and 1 when it refused before
             anything was launched.
           '';
-        };
-
-        # TRANSITION ONLY (STANDALONE.md, S3), deleted with
-        # rootless-wrapper.bash: tests/transition.nix's old side.
-        transitionWrapper = lib.mkOption {
-          type = lib.types.package;
-          readOnly = true;
-          internal = true;
-          visible = false;
-          description = "The launcher as rootless-wrapper.bash was, for the S3 transition check alone.";
         };
       };
 
       config = {
         launcher = mkLauncher name;
-        transitionWrapper = mkTransitionWrapper name config;
       };
     }));
   };

@@ -34,7 +34,7 @@ it exits. The **launcher** is `flong.<name>.launcher`, a package whose
 `flong launch <name> -- ARGS` does; the caller runs it directly, and it
 refuses root. `flong list` names every declaration and its file. The **workspace** is the host directory bind-mounted into the session at
 its own path and used as its working directory. The **payload** is the process
-`command` names. **Hooks** are the shell options the launcher runs as the
+`command` names. **Hooks** are the commands the launcher runs as the
 caller at fixed points: `workspace`, `binds`, `guard`, `seccompPolicy`,
 `postStart` and `postStop`.
 
@@ -237,15 +237,17 @@ capability over a session's mounts and namespaces from the host, and owns its
 prepared root and its records, as they own their `~/.bashrc`. So the session
 grants nothing the caller lacks, and `guard` is a check the declaration makes
 on its own launch, not a gate: the caller can run `flong launch` directly with
-any spec. Setting `guard` warns, to say so. The boundary is between the
-payload and the caller.
+any declaration file. Setting `guard` warns, to say so. The boundary is
+between the payload and the caller.
 
 The launcher exits with the payload's status, or 128+n when a signal killed
 the payload. It exits 125 when the payload never ran: `flong launch` refused
-the spec, `postStart` failed, or the network could not be attached. It exits 75
-when its prepared root was swept and it could not relaunch, and 1 when the
-launcher itself refused, or `workspace`, `binds`, `guard` or `seccompPolicy`
-failed. Its message says which.
+the spec it built, `postStart` failed, or the network could not be attached.
+It exits 1 when it refused before building the spec (the declaration, the
+caller, the workspace, the maps), or `workspace`, `binds`, `guard` or
+`seccompPolicy` failed, and 2 for a usage error or a name with no
+declaration. Its message says which. When its prepared root is swept from
+under it, it runs itself again, with the same arguments.
 
 ## Options
 

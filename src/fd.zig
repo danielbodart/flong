@@ -796,9 +796,8 @@ pub fn retainOnly(keep: []const AnyFd) ?CloseRangeFailure {
 /// closeUntracked (flong-launch.c:907-925): closes every descriptor from 3
 /// up that the table does not hold. Every handle stays live: the table is
 /// what is kept. For the launcher's prologue, whose table at that step is
-/// the C's keep list exactly (the keep-fds, adopted; the signalfd; the
-/// state and sessions directories; the cache): what the wrapper left open
-/// and bwrap-args do not name goes. A reserved slot is not live and holds
+/// the C's keep list without its keep-fds (the signalfd; the state and
+/// sessions directories; the cache): whatever the caller left open goes. A reserved slot is not live and holds
 /// no number. Allocates nothing.
 pub fn closeUntracked() ?CloseRangeFailure {
     var kept: [capacity]sys.fd_t = undefined;

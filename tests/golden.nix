@@ -56,7 +56,7 @@
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:10-19
 # does; seccomp is the program the seccomp sets run against, launcher the
-# output whose flong the init, sweeper, spec and decl sets run as `flong
+# output whose flong the init, sweeper, launch and decl sets run as `flong
 # init`, `flong sweeper`, `flong launch` and `flong check`.
 {
   pkgs ?
@@ -162,47 +162,30 @@ let
     # sweeper.zig, phase 5).
     sweeper = sweeperSet "${launcher}/bin/flong";
 
-    # Recorded from the C of 2026-09-24 (launcher/flong-spec.c:417-708,
-    # through flong launch's main, flong-launch.c:880-881): every refusal of
-    # the spec but root's (:423, which needs uid 0; rootless.nix:629-642 has
-    # it) and the two ENOMEMs no input reaches (:465-468, 697-700), all made
-    # before anything needs a privilege. Pass 1's shape (:425-444), each
-    # keyword in turn (unknown, too few fields or a mount's kind, given
-    # twice), then no "--", an empty command and each required keyword
-    # missing; pass1-first, fields-before-separator and separator-as-field
-    # show the passes' order and a field's "--" as its value, pass1-in-order
-    # that pass 1 goes left to right. Pass 2's field checks (:469-674), one
-    # field of the valid spec below changed or a keyword added, with each
-    # field's edges (signs, spaces, hex, ID_MAX and INT_MAX and past them,
-    # NAME_MAX, PATH_MAX); pass2-* show it goes left to right and before the
-    # cross checks, and order-* that a keyword's own checks keep their order
-    # (two faults in one keyword, the first checked named). The cross
-    # checks and bwrap_allowed (:359-415, 676-708): cross-order-N breaks
-    # the Nth of them and every one after it, so they keep their order,
-    # and accepted-all passes every check but the last, every keyword
-    # given, each at an edge that passes. A keep-fd is the case's own
-    # descriptor (NAME.redirect), open or not by F_GETFD (:656-667). An
-    # unknown keyword's message at 1023 bytes whole, one byte over and cut,
-    # and over 1 KiB (quirk 22). state-missing is the valid spec
-    # itself, which passes every check and stops at the next step, the
-    # state directory (flong-launch.c:891-893, flong-record.c:58-63),
-    # recorded from the C launcher before L4 switched to the Zig one. The
-    # valid spec: machine m, container c, state /state, cache /cache,
-    # closure CLOSURE, uidmap and gidmap 0 100000 65536, user 1000 100
-    # /home/u, holder flong.slice/s, -- /bin/true. Since S3, post-start and
-    # post-stop are one command each, `N WORD...`, and repeat: the C's
-    # cases carry a count, once-post-stop went, and the post-start-* and
-    # post-stop-* cases of the count (missing, 0, empty, signed, past
-    # INT_MAX, a program in its place, words running out) and of a second
-    # command's program were written for the Zig, not recorded from the C.
-    # CLOSURE is a store directory, LEADSOUT a store path that is a symlink
-    # to /, which realpath resolves out of the store (:245-256), and TOSTORE
-    # one to /nix/store, which it resolves to the store's directory, not a
-    # path under it: the prefix is checked with its slash. Run against the
-    # Zig flong launch since phase 7's L4 (src/launch.zig); that the shipped
-    # flong launch is the Zig is native.nix's launcher build's control (it
-    # is static, with no libc).
-    spec = specSet "${launcher}/bin/flong";
+    # Written for flong launch's entry when S3 deleted the argv spec (the
+    # spec set, recorded from the C's flong-spec.c: its refusals a value can
+    # still reach are spec.validate's, tests/zig/spec_test.zig, each case
+    # under its old name). `flong launch DECL.zon|NAME [-- ARGS...]`: a
+    # usage error for anything else, the argv spec's forms included, 2; a
+    # name no directory has, 2 (no /etc/flong here, and no HOME in a
+    # case's empty environment); a file that cannot be read or parsed, or
+    # that flong check refuses, said as flong check says it under "flong
+    # launch", 1; and a declaration flong check passes reaching the
+    # prologue, whose first refusal here is the caller's runtime directory,
+    # under the declaration's name, 1, as the wrapper said it. CALLER is
+    # the builder's uid, ME its passwd name (or the uid), GOLDEN the store
+    # directory holding the decl set's files.
+    launch = {
+      program = "${launcher}/bin/flong";
+      sub = "launch";
+      vars = {
+        GOLDEN = "${cases}";
+      };
+      caseVars = ''
+        echo "CALLER=$(id -u)"
+        echo "ME=$(id -un 2>/dev/null || id -u)"
+      '';
+    };
 
     # Recorded from flong check of 2026-09-24 (src/check.zig, S2 chunk B),
     # the characterization of what moves out of module.nix: one case per
@@ -244,22 +227,6 @@ let
       };
     };
   };
-
-  # The spec set against a program: CLOSURE is a store directory, LEADSOUT
-  # a store path that is a symlink to /, TOSTORE one to /nix/store.
-  specSet = program: {
-    inherit program;
-    sub = "launch";
-    vars = {
-      CLOSURE = "${launcher}";
-      LEADSOUT = "${leadsOut}";
-      TOSTORE = "${toStore}";
-    };
-  };
-
-  # The spec set's closure that leads out of the store.
-  leadsOut = pkgs.runCommand "golden-spec-leads-out" { } "ln -s / $out";
-  toStore = pkgs.runCommand "golden-spec-to-store" { } "ln -s /nix/store $out";
 
   sweeperSet = program: {
     inherit program;

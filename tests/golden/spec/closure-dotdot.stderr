@@ -1,1 +1,0 @@
-flong launch: spec: closure has an empty, '.' or '..' component: '/nix/store/x/../y'

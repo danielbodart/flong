@@ -68,8 +68,7 @@ pub fn defaultChld() void {
 }
 
 /// Makes `fd`: signalfd4 of `blocked`, close-on-exec and non-blocking
-/// (flong-launch.c:881-885), after the spec is read so its number is never
-/// a keep-fd's.
+/// (flong-launch.c:881-885), after the spec's checks.
 pub fn openSignalfd() msg.Error!void {
     fd = try msg.check(fdt.openSignalfd(blocked), "signalfd", .{});
 }

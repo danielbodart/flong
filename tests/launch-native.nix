@@ -5,7 +5,7 @@
 # as_alice, and flong-launch-driver (tests/zig/launchdriver.zig) on PATH.
 #
 #   - U1 and U2 through /run/wrappers/bin/newuidmap and newgidmap, the
-#     wrapper's three extents, each namespace's maps read back from inside
+#     prologue's three extents, each namespace's maps read back from inside
 #     it, U2's split along U1's, its user.max_user_namespaces; a map
 #     program refusing, both refusing, one that cannot be run, U2's limit
 #     refused, and nothing left after each
@@ -50,7 +50,7 @@ in
           assert "others in the cgroup: 0" in out, out
           opened = [l for l in out if l.startswith("open: ")][0].split()[1:]
           assert sorted(o.split(":")[0] for o in opened) == ["anon_inode", "user", "user"], out
-          # U1, the caller's keep-id map as the wrapper builds it; U2 the
+          # U1, the caller's keep-id map as the prologue builds it; U2 the
           # identity, split along U1's extents; U2's own limit.
           assert "u1 uid_map: 0 100000 1000 / 1000 1000 1 / 1001 101000 64536" in out, out
           assert "u1 gid_map: 0 100000 100 / 100 100 1 / 101 100100 65436" in out, out

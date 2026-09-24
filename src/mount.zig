@@ -47,7 +47,7 @@ pub const Kind = enum {
 /// struct fl_mount (flong-spec.h:37-44).
 pub const Mount = struct {
     kind: Kind,
-    /// absolute, inside the session, plain components (spec_parse)
+    /// absolute, inside the session, plain components (spec.validate)
     dest: [:0]const u8,
     /// binds and dev: the host source; overlay: the lower
     src: ?[:0]const u8 = null,
@@ -169,7 +169,7 @@ fn checkProtected(job: *const Job, h: anytype, src: [:0]const u8) Error!void {
 /// author intended.
 fn openSource(job: *const Job, m: *const Mount, comptime k: fd.Kind) Error!fd.Fd(k) {
     const exact = m.kind == .bind_ro_exact or m.kind == .bind_rw_exact;
-    const src = m.src.?; // spec_parse gives every bind, dev and overlay a source
+    const src = m.src.?; // spec.validate refuses a bind, dev or overlay without a source
     const Open = struct {
         src: [:0]const u8,
         exact: bool,
@@ -244,7 +244,7 @@ fn prepareTmpfs(job: *const Job, s: *Src) Error!void {
     const gid = std.fmt.bufPrintZ(&gid_buf, "{d}", .{job.gid}) catch unreachable; // proven: a u32 is at most 10 digits
     var opts: [4]Opt = undefined;
     var n: usize = 0;
-    opts[n] = .{ "mode", m.mode.? }; // spec_parse gives every tmpfs a mode
+    opts[n] = .{ "mode", m.mode.? }; // spec.validate refuses a tmpfs without a mode
     n += 1;
     if (m.size) |size| {
         opts[n] = .{ "size", size };
@@ -571,7 +571,7 @@ fn byDest(_: void, a: Src, b: Src) bool {
 }
 
 /// Sorts `srcs` by destination, parents first, and refuses the same
-/// destination twice (flong-mount.c:533-541). spec_parse has already made
+/// destination twice (flong-mount.c:533-541). spec.validate has already made
 /// each destination an absolute path of plain components.
 pub fn sortRefusingTwice(srcs: []Src) Error!void {
     std.mem.sort(Src, srcs, {}, byDest);

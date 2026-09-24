@@ -109,8 +109,8 @@ fn specWith(post_start: []const spec.Command, network: bool, pasta_args: []const
         .network = network,
         .pasta_args = pasta_args,
         .pasta_wait = pasta_wait,
-        // A keep-fd, as the wrapper's resolv.conf is: pasta keeps none.
-        .keep_fds = &.{9},
+        // A resolver, bwrap's memfd: pasta keeps nothing of it.
+        .resolv_conf = "nameserver 169.254.1.1\n",
         .command = &.{"sh"},
     };
 }

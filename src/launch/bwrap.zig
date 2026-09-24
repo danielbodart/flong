@@ -3,9 +3,8 @@
 //! spawn_bwrap). The seccomp programs are opened, the info, ready and gate
 //! pipes made, the resolver's file written into a memfd, and bwrap spawned
 //! from spec.bwrapArgv, every descriptor it is given named in its argv by
-//! Spawn.passFd (U1, U2, info, the seccomp programs, the resolver's memfd,
-//! gate and ready) or kept by Spawn.keepInherited (an argv spec's
-//! keep-fds, which its --ro-bind-data words already name).
+//! Spawn.passFd: U1, U2, info, the seccomp programs, the resolver's memfd,
+//! gate and ready.
 //!
 //! One module per piece, where the port's plan had flong-launch as one
 //! root module: launch.zig's helpers are split by concern into src/launch/,
@@ -25,7 +24,6 @@
 //!     if (ends.gate_r) |h| h.close();
 //!     for (ends.seccomp) |h| h.close();
 //!     ends.u2.close();
-//!     for (ends.keep) |h| h.close();
 //!     if (ends.resolv) |h| h.close();
 //!
 //! A copy the launcher kept of a write end would hide bwrap's death from
@@ -51,9 +49,8 @@ pub const Paths = struct {
 
 /// Checkpoint 2's list: every descriptor bwrap alone needs, which the
 /// launcher closes at once after the spawn, whether or not it succeeded
-/// (flong-launch.c:396-408), in that order. The root fills `u2` and `keep`
-/// (U2, and the keep-fds adopted in the prologue) and hands both over
-/// here; `spawn` adds the rest as it makes them, so the list is whole at
+/// (flong-launch.c:396-408), in that order. The root fills `u2` and hands
+/// it over here; `spawn` adds the rest as it makes them, so the list is whole at
 /// whatever step it failed. A pipe end is null until its pipe exists;
 /// `seccomp` holds the programs opened so far.
 pub const ChildEnds = struct {
@@ -62,7 +59,6 @@ pub const ChildEnds = struct {
     gate_r: ?fd.Fd(.pipe_r) = null,
     seccomp: []const fd.File = &.{},
     u2: fd.Fd(.userns),
-    keep: []const fd.Fd(.inherited),
     /// the memfd holding the spec's resolv_conf, once it is written
     resolv: ?fd.File = null,
 };
@@ -84,8 +80,8 @@ pub const Spawned = struct {
 /// spawns bwrap with spec.bwrapArgv's argv in `cgroup` (the sandbox leaf),
 /// with `stdio` as its 0-2 (the terminal's, tty_stdio) and this process's
 /// environment (:379-391). It inherits U1 (`outer`, any userns handle), U2,
-/// its ends of the three pipes, the seccomp descriptors and the keep-fds,
-/// and nothing else (:364-377). `relay` is a relayed pty's: a session of
+/// its ends of the three pipes, the seccomp descriptors and the resolver's
+/// memfd, and nothing else (:364-377). `relay` is a relayed pty's: a session of
 /// its own, flong init's ctty.
 ///
 /// On a failure it has said why (`open seccomp program P: <text>`,
@@ -150,8 +146,7 @@ pub fn spawn(
 
 /// bwrap's Spawn from `ends`' descriptors, and its start: bwrap_argv and
 /// the keep list (:364-391). Every descriptor in argv is a passFd, so
-/// bwrap holds each at the number its argv says; the keep-fds follow, kept
-/// at theirs.
+/// bwrap holds each at the number its argv says.
 fn start(
     arena: Allocator,
     s: *const spec.Spec,
@@ -175,7 +170,6 @@ fn start(
         .gate_r = ends.gate_r.?,
         .ready_w = ends.ready_w.?,
     }, relay, paths.self) catch return msg.fail(.NOMEM, "realloc", .{});
-    for (ends.keep) |h| sp.keepInherited(h) catch return msg.fail(.NOMEM, "malloc", .{});
     sp.stdio = stdio;
     sp.cgroup = cgroup;
     return sp.start();

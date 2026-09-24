@@ -22,7 +22,7 @@
 //! launch exits 1 with (prologue.exit_refused). A command's own failure is
 //! its own to explain, as the wrapper's `|| exit 1` left it. Step 11 is the
 //! spec the wrapper handed flong launch: what it cannot say as a spec's
-//! number is refused as the spec's parse refused it, "flong launch: spec:
+//! number is refused as the argv spec's parse refused it, "flong launch: spec:
 //! ...", and error.NotRun, which the launch exits 125 with.
 //!
 //! The three points where the wrapper found its cache swept before it held
@@ -423,8 +423,8 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
         try l.post_stop.append(gpa, w.items);
     }
 
-    // The network: pasta's ports (module.nix's pastaPortArgs and
-    // --no-map-gw), then the resolver, read once (:423-461).
+    // The network: pasta's ports (portList, hostPorts) and
+    // --no-map-gw, then the resolver, read once (:423-461).
     var resolv_conf: ?[]const u8 = null;
     if (d.network) |n| {
         const fp = n.forwardPorts;
@@ -474,7 +474,6 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
         .container = try z.of(gpa, d.container),
         .state = f.who.state,
         .cache = f.cache,
-        .relaunch_self = p.argv,
         .closure = try z.of(gpa, d.closure),
         .uidmap = try idmaps(gpa, "uidmap", f.umap),
         .gidmap = try idmaps(gpa, "gidmap", f.gmap),
@@ -506,7 +505,17 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
 }
 
 /// A port class of pasta's: "none", or each forward HOST:CONTAINER of
-/// `protocol`, comma-separated (module.nix's pastaPortArgs).
+/// `protocol`, comma-separated.
+///
+/// EVERY PORT CLASS IS SPELT OUT, "none" included, because -t, -u, -T and
+/// -U all default to `auto`, and `auto` forwards every port bound on the
+/// other side, which for -T means everything listening on the host's
+/// loopback. A session asks for what it gets, port by port. hostPorts go
+/// out as TCP and UDP both (`hostPorts`): a port on the host's loopback is
+/// the thing named, and a resolver there is as likely a reason to name one
+/// as a database. forwardPorts `auto` is pasta's own: every second it reads
+/// what is listening in the session and publishes the same TCP port on the
+/// host, for as long as it is listening.
 fn portList(gpa: Allocator, ports: []const decl.ForwardPort, protocol: decl.Protocol) Allocator.Error![:0]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (ports) |x| {
@@ -525,7 +534,7 @@ fn hostPorts(gpa: Allocator, ports: []const u16) Allocator.Error![:0]const u8 {
     return out.toOwnedSliceSentinel(gpa, 0);
 }
 
-/// An id from text the prepared root gave, as the spec's parse read it: a
+/// An id from text the prepared root gave, as the argv spec's parse read it: a
 /// decimal number of at most spec.id_max, or its refusal.
 fn idOf(what: []const u8, t: []const u8) error{NotRun}!u32 {
     if (t.len == 0) return spec_refuse("spec: {s} is empty", .{what});
@@ -540,7 +549,7 @@ fn idOf(what: []const u8, t: []const u8) error{NotRun}!u32 {
 
 /// A map's extents as the spec's numbers (subid.Word.number): a word that
 /// is no decimal number, which only a negative result of the wrapper's
-/// arithmetic is, is refused as the spec's parse refused it.
+/// arithmetic is, is refused as the argv spec's parse refused it.
 fn idmaps(gpa: Allocator, what: []const u8, extents: []const subid.Extent) (Allocator.Error || error{NotRun})![]const spec.IdMap {
     const out = try gpa.alloc(spec.IdMap, extents.len);
     for (out, extents) |*o, e| {
@@ -685,4 +694,61 @@ test "commandPath goes in front of PATH, or stands alone" {
     try testing.expectEqualStrings("/a/bin:/b/bin:/usr/bin", try commandPath(a, &.{ "/a/bin", "/b/bin" }, "/usr/bin"));
     try testing.expectEqualStrings("/a/bin:", try commandPath(a, &.{"/a/bin"}, ""));
     try testing.expectEqualStrings("/a/bin", try commandPath(a, &.{"/a/bin"}, null));
+}
+
+/// What `f` said on stderr, through a memfd at fd 2, in the launcher's cut
+/// mode.
+fn said(buf: []u8, comptime f: anytype, args: anytype) ![]const u8 {
+    msg.prog = "flong launch";
+    msg.mode = .cut;
+    const mf = switch (sys.memfdCreate("assemble-test", sys.MFD_CLOEXEC)) {
+        .ok => |n| n,
+        .err => return error.Memfd,
+    };
+    defer sys.close(mf);
+    const saved = switch (sys.fcntl(2, sys.F_DUPFD_CLOEXEC, 10)) {
+        .ok => |n| n,
+        .err => return error.Dup,
+    };
+    if (sys.dup2(mf, 2) != .ok) return error.Dup;
+    const r = @call(.auto, f, args);
+    _ = sys.dup2(saved, 2);
+    sys.close(saved);
+    try testing.expectError(error.NotRun, r);
+    return switch (sys.pread(mf, buf, 0)) {
+        .ok => |n| buf[0..n],
+        .err => error.Read,
+    };
+}
+
+test "idOf: a group's id from the prepared root, refused as the argv spec's parse refused it" {
+    // The spec's golden cases group-letters and group-over-id-max, and an
+    // empty id: a group's id is text from the prepared root's /etc/group.
+    try testing.expectEqual(@as(u32, 4294967294), try idOf("group", "4294967294"));
+    try testing.expectEqual(@as(u32, 7), try idOf("group", "0007"));
+    var b: [512]u8 = undefined;
+    try testing.expectEqualStrings("flong launch: spec: group is not a decimal number: 'g'\n", try said(&b, idOf, .{ "group", "g" }));
+    try testing.expectEqualStrings("flong launch: spec: group is larger than 4294967294: '4294967295'\n", try said(&b, idOf, .{ "group", "4294967295" }));
+    try testing.expectEqualStrings("flong launch: spec: group is larger than 4294967294: '99999999999999999999999'\n", try said(&b, idOf, .{ "group", "99999999999999999999999" }));
+    try testing.expectEqualStrings("flong launch: spec: group is empty\n", try said(&b, idOf, .{ "group", "" }));
+    try testing.expectEqualStrings("flong launch: spec: group is not a decimal number: '-1'\n", try said(&b, idOf, .{ "group", "-1" }));
+}
+
+test "idmaps: a negative result of fl_map's arithmetic, refused as the argv spec's parse refused it" {
+    // The spec's golden cases uidmap-sign and user-gid-negative: a start
+    // past 2^63 - 1 in /etc/subuid wraps an extent's start negative
+    // (subid.zig's buildMap), which is no decimal number.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ok = [_]subid.Extent{.{ .{ .text = "0" }, .{ .value = 100000 }, .{ .text = "65536" } }};
+    try testing.expectEqualSlices(spec.IdMap, &.{.{ .inside = 0, .outside = 100000, .count = 65536 }}, try idmaps(a, "uidmap", &ok));
+    const negative = [_]subid.Extent{
+        .{ .{ .text = "0" }, .{ .value = 100000 }, .{ .text = "1000" } },
+        .{ .{ .value = 1001 }, .{ .value = -9223372036854774809 }, .{ .value = 64536 } },
+    };
+    var b: [512]u8 = undefined;
+    try testing.expectEqualStrings("flong launch: spec: uidmap is not a decimal number: '-9223372036854774809'\n", try said(&b, idmaps, .{ a, "uidmap", &negative }));
+    const letters = [_]subid.Extent{.{ .{ .text = "0" }, .{ .text = "x" }, .{ .text = "1" } }};
+    try testing.expectEqualStrings("flong launch: spec: gidmap is not a decimal number: 'x'\n", try said(&b, idmaps, .{ a, "gidmap", &letters }));
 }

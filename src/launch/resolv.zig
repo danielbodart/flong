@@ -30,8 +30,34 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 
-/// The synthetic nameservers pasta answers on, module.nix's dnsForward4
-/// and dnsForward6.
+/// WHERE A NETWORKED SESSION SENDS ITS DNS, for pasta to take from there.
+/// --dns-forward catches UDP and TCP to ports 53 and 853 at this address
+/// and re-sends each query FROM THE HOST to the host's own first
+/// nameserver. Re-originated there, so a stub resolver on the host's
+/// loopback (resolved's 127.0.0.53, a dnsmasq on 127.0.0.1) answers a
+/// session that has no way to the host's loopback otherwise. That is why
+/// this and not a copy of the host's resolv.conf: copied in, 127.0.0.53
+/// names the SESSION's loopback, where nothing is listening.
+///
+/// 169.254.1.1 is Podman's address for the same job (`dnsForwardIpv4` in
+/// go.podman.io/common's libnetwork/pasta), followed deliberately. It is
+/// IPv4 link-local, which no router forwards, so nothing beyond the host's
+/// own link could answer it even without pasta in the way. A LAN has it
+/// only through link-local autoconfiguration, and then all the session
+/// loses is that one address's DNS ports. And it is well clear of the
+/// addresses a cloud answers on (metadata at 169.254.169.254, AWS's
+/// resolver at 169.254.169.253, ECS at 169.254.170.2), so no rule about
+/// those catches it, and nobody reading a resolv.conf takes it for one of
+/// them. A steering hook's own service address in the same namespace
+/// (frisket's, on `lo`) must be another address again: on `lo`, it would
+/// take these queries before pasta ever saw them.
+///
+/// 100::1 for IPv6, which Podman does not forward at all. It is in RFC
+/// 6666's discard-only block, which exists to be dropped: globally
+/// unreachable, used by no LAN, and blackholed by the first router that
+/// sees it. Link-local, the IPv4 answer, is no use in IPv6: an fe80::
+/// nameserver needs a zone, and the interface inside is named after
+/// whichever host interface pasta copied.
 pub const dns_forward4 = "169.254.1.1";
 pub const dns_forward6 = "100::1";
 

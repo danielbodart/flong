@@ -1,0 +1,1 @@
+box: no runtime directory /run/user/@CALLER@ owned by @ME@: run it from a login session, or give @ME@ a user manager with users.users.@ME@.linger = true

@@ -1,6 +1,7 @@
 //! flong-fake-cmd: a declaration's command and the cache tool's stand-in
 //! for tests/zig/wrapper_test.zig, which runs it through launch/cmd.zig
-//! and launch/prepare.zig. What it does is its first argument's; every
+//! and launch/prepare.zig, and a swept launch for
+//! tests/zig/prologue_test.zig. What it does is its first argument's; every
 //! argument after the ones a mode reads is the launcher's, appended by
 //! cmd.zig, and ignored but by `show`.
 //!
@@ -23,12 +24,24 @@
 //!   relaunch N        with N above 0, prologue.relaunchSelf with this
 //!                     argv, N one less; at 0, "argv0 A" and "exe E"
 //!                     (readlink /proc/self/exe), exit 0
+//!   swept DRIVER      a launch that found its cache swept, as launch.zig's
+//!                     checkpoint 1 is then: SIGUSR1 alone blocked as the
+//!                     caller's mask, then sig.block and SIGPIPE ignored; a
+//!                     descriptor the caller left open (not close-on-exec),
+//!                     its number printed on stdout, and one of the
+//!                     launcher's own (close-on-exec); then
+//!                     prologue.relaunchSwept, whose exec of this binary
+//!                     runs `exec DRIVER probe again`, under "flong launch"
+//!   exec PATH ARG...  execve(PATH, PATH ARG...), the environment as it
+//!                     came; 1 when it fails
 //!
 //! Static, no libc, as a flong program is. Exit 2 on a usage error, 1 when
 //! a call fails.
 
 const std = @import("std");
 const linux = std.os.linux;
+const msg = @import("msg");
+const sig = @import("sig");
 const prologue = @import("prologue");
 
 pub const std_options: std.Options = .{ .enable_segfault_handler = false, .keep_sigpipe = true };
@@ -89,6 +102,8 @@ pub fn main() u8 {
     }
     if (std.mem.eql(u8, mode, "prepare") or std.mem.eql(u8, mode, "gc")) return cache(mode);
     if (std.mem.eql(u8, mode, "relaunch")) return relaunch();
+    if (std.mem.eql(u8, mode, "swept")) return swept();
+    if (std.mem.eql(u8, mode, "exec")) return exec();
     return 2;
 }
 
@@ -161,4 +176,31 @@ fn relaunch() u8 {
     return switch (prologue.relaunchSelf(fba.allocator(), &argv, null, @ptrCast(std.os.environ.ptr))) {
         error.Reported => 1,
     };
+}
+
+fn swept() u8 {
+    if (arg(2) == null) return 2;
+    msg.prog = "flong launch";
+    msg.mode = .cut;
+    // The caller's mask: SIGUSR1 (bit 9) alone.
+    sig.setMask(1 << 9);
+    const old = sig.block() catch return 1;
+    sig.ignorePipe();
+    const inherited = linux.open("/etc/passwd", .{ .ACCMODE = .RDONLY }, 0);
+    if (linux.E.init(inherited) != .SUCCESS) return 1;
+    const own = linux.open("/", .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0);
+    if (linux.E.init(own) != .SUCCESS) return 1;
+    const line = std.fmt.bufPrint(&buf, "{d}\n", .{inherited}) catch return 1;
+    if (!write(1, line)) return 1;
+    const argv = [_][*:0]const u8{ std.os.argv[0], "exec", std.os.argv[2], "probe", "again" };
+    var ab: [4096]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&ab);
+    return prologue.relaunchSwept(fba.allocator(), "/c/cache", &argv, old, @ptrCast(std.os.environ.ptr));
+}
+
+fn exec() u8 {
+    if (std.os.argv.len < 3) return 2;
+    const argv: [*:null]const ?[*:0]const u8 = @ptrCast(std.os.argv[2..].ptr);
+    _ = linux.execve(std.os.argv[2], argv, @ptrCast(std.os.environ.ptr));
+    return 1;
 }

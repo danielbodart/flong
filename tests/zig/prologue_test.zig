@@ -2,9 +2,10 @@
 //! a tree of directories, symlinks and missing tails, and its refusals;
 //! protectPaths' order; cacheLock on a missing cache, one without
 //! prepared/, one it locks, and one swept or replaced while it waits for a
-//! sweep's exclusive lock (flong-record.c:91-149); relaunch's three ends,
-//! its exec reaching the spawn probe (flong-proc, built for it) with
-//! SIGPIPE default, the old mask and the inherited descriptors (quirk 2);
+//! sweep's exclusive lock (flong-record.c:91-149); relaunchSwept's exec
+//! of flong again (flong-fake-cmd, which then execs the spawn probe,
+//! flong-proc, built for it) with SIGPIPE default, the old mask and the
+//! inherited descriptors (quirk 2);
 //! closeUntracked keeping the table's descriptors and nothing else.
 //!
 //! What would touch the test process's own descriptors, signals or stderr
@@ -514,44 +515,32 @@ fn findDriver() void {
     driver = driver_buf[0..p.len :0];
 }
 
-const Relaunch = struct {
-    argv: []const [:0]const u8,
-    /// set to the inherited descriptor's number, printed first on stdout
-    inherited: bool = false,
+/// flong-fake-cmd, its path made absolute.
+var fake_buf: [std.fs.max_path_bytes:0]u8 = undefined;
+var fake: [:0]const u8 = "";
 
-    fn body(self: Relaunch) noreturn {
-        // The caller's mask: SIGUSR1 blocked. The prologue's step 1 then
-        // blocks its six and ignores SIGPIPE.
-        _ = sys.sigprocmask(sys.SIG_SETMASK, sys.sigBit(sys.SIGUSR1));
-        const old = sig.block() catch proc.exit(98);
-        sig.ignorePipe();
-        // A descriptor the wrapper held, not close-on-exec, and one of the
-        // launcher's own, close-on-exec, as the state directory is.
-        if (self.inherited) {
-            const rc = linux.open("/etc/passwd", .{ .ACCMODE = .RDONLY }, 0);
-            if (linux.E.init(rc) != .SUCCESS) proc.exit(97);
-            var nb: [16]u8 = undefined;
-            const line = std.fmt.bufPrint(&nb, "{d}\n", .{rc}) catch proc.exit(96);
-            _ = fd.Stdio.out.writeAll(line);
-            const own = opened(fd.openDir(fd.cwd, "/")) catch proc.exit(95);
-            _ = own.holdUntilExit();
-        }
-        proc.exit(prologue.relaunch(std.heap.page_allocator, "/c/cache", self.argv, old, @ptrCast(std.os.environ.ptr)));
+fn findFake() void {
+    if (fake.len > 0) return;
+    const p = std.fs.cwd().realpath(options.fake_cmd, &fake_buf) catch @panic("flong-fake-cmd not found");
+    fake_buf[p.len] = 0;
+    fake = fake_buf[0..p.len :0];
+}
+
+/// flong-fake-cmd's `swept DRIVER`: a launch at the cache lock, found
+/// swept, calling relaunchSwept; its exec of itself execs the probe.
+const Swept = struct {
+    fn body(_: Swept) noreturn {
+        const argv = [_:null]?[*:0]const u8{ fake.ptr, "swept", driver.ptr };
+        _ = linux.execve(fake.ptr, &argv, @ptrCast(std.os.environ.ptr));
+        proc.exit(94);
     }
 };
 
-test "relaunch with no argv: 75, said, nothing run" {
-    var c: Captured = .{ .status = 0, .out = "", .err = "" };
-    try capture(&c, Relaunch{ .argv = &.{} }, Relaunch.body);
-    try testing.expectEqual(@as(u8, 75), c.status);
-    try testing.expectEqualStrings("flong launch: the cache /c/cache was swept before this launch locked it\n", c.err);
-    try testing.expectEqualStrings("", c.out);
-}
-
-test "relaunch execs the wrapper with SIGPIPE default, the old mask and the inherited descriptors (quirk 2)" {
+test "relaunchSwept execs flong again with SIGPIPE default, the old mask and the inherited descriptors (quirk 2)" {
     findDriver();
+    findFake();
     var c: Captured = .{ .status = 0, .out = "", .err = "" };
-    try capture(&c, Relaunch{ .argv = &.{ driver, "probe", "again" }, .inherited = true }, Relaunch.body);
+    try capture(&c, Swept{}, Swept.body);
     try testing.expectEqual(@as(u8, 0), c.status);
     try testing.expectEqualStrings("flong launch: the cache /c/cache was swept before this launch locked it; relaunching\n", c.err);
 
@@ -559,7 +548,7 @@ test "relaunch execs the wrapper with SIGPIPE default, the old mask and the inhe
     const inherited = c.out[0..nl];
     const probe = c.out[nl + 1 ..];
     try testing.expectEqualStrings("again", try field(probe, "argv"));
-    // 0-2 and the wrapper's descriptor; the launcher's own went with the
+    // 0-2 and the caller's descriptor; the launcher's own went with the
     // exec.
     var want: [64]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "0 1 2 {s}", .{inherited}), try field(probe, "fds"));
@@ -568,17 +557,6 @@ test "relaunch execs the wrapper with SIGPIPE default, the old mask and the inhe
     // SIGPIPE (bit 12) not ignored.
     const ign = try std.fmt.parseInt(u64, try field(probe, "sigign"), 16);
     try testing.expectEqual(@as(u64, 0), ign & (1 << 12));
-}
-
-test "relaunch whose exec fails: 125, both lines said" {
-    var c: Captured = .{ .status = 0, .out = "", .err = "" };
-    try capture(&c, Relaunch{ .argv = &.{ "/nonexistent-flong/wrapper", "x" } }, Relaunch.body);
-    try testing.expectEqual(@as(u8, 125), c.status);
-    try testing.expectEqualStrings(
-        "flong launch: the cache /c/cache was swept before this launch locked it; relaunching\n" ++
-            "flong launch: exec /nonexistent-flong/wrapper: No such file or directory\n",
-        c.err,
-    );
 }
 
 // ---- closeUntracked ----

@@ -184,8 +184,7 @@ let
   newgidmap = "/run/wrappers/bin/newgidmap";
   # The prepared root's cache tool (cache.nix, module.nix's cacheTool: the
   # same store path, which steps8 hashes) and the project policy's
-  # compiler, this file's seccomp set, which `flong launch DECL.zon` runs in
-  # place of the wrapper's header (STANDALONE.md, S3).
+  # compiler, this file's seccomp set, both of which flong launch runs.
   cacheTool = "${(import ./cache.nix { inherit pkgs; }).cacheTool}/bin/flong-cache";
   seccompTool = "${seccomp}/bin/flong-seccomp";
 

@@ -4,22 +4,22 @@
 //! the argv and the descriptors it was started with.
 //!
 //! - bwrap's argv per branch (plain, relay, nestedSandbox, a project
-//!   filter, keep-fds, trace), each descriptor's number read back as its
-//!   name, against the golden argv; and the stand-in holds 0-2 and exactly
-//!   the descriptors its argv names, the keep-fds included.
+//!   filter, the typed options: the resolver's memfd, the environment and
+//!   the hostname; trace), each descriptor's number read back as its name,
+//!   against the golden argv; and the stand-in holds 0-2 and exactly the
+//!   descriptors its argv names, the resolver's memfd included.
 //! - checkpoint 2's list: after the root's walk of ChildEnds (written here
-//!   as launch.zig's will be) the launcher holds its three ends and bwrap's
-//!   pidfd, and nothing of bwrap's; on a refused seccomp program (U2 and
-//!   the keep-fds in the list, nothing spawned) and on a failed start (the
-//!   launcher's ends closed by spawn) nothing is left.
+//!   as launch.zig's is) the launcher holds its three ends and bwrap's
+//!   pidfd, and nothing of bwrap's; on a refused seccomp program (U2 in the
+//!   list, nothing spawned) and on a failed start (the launcher's ends
+//!   closed by spawn) nothing is left.
 //! - awaitFdOrExit: the descriptor, the child's exit, a tie (the
 //!   descriptor wins, with data and at EOF), a terminating signal first, a
 //!   dropped one; the child-exit wait bounded by a forked tester, so a wait
 //!   that never ends fails as Hung.
 //!
 //! U1 and U2 stand in as this process's own user namespace, opened by
-//! fd.openUserns; the keep-fd is /dev/null, opened by a raw call, as
-//! the wrapper's are.
+//! fd.openUserns.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -54,12 +54,6 @@ fn opened(r: anytype) !@FieldType(@typeInfo(@TypeOf(r)).error_union.payload, "ok
         .ok => |h| h,
         .err => error.TestUnexpectedResult,
     };
-}
-
-fn rawOpen(path: [*:0]const u8) !i32 {
-    const rc = linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
-    if (linux.E.init(rc) != .SUCCESS) return error.Open;
-    return @intCast(rc);
 }
 
 /// This process's own user namespace, opened as the launcher opens U1's:
@@ -115,7 +109,6 @@ fn walk(ends: *const bwrap.ChildEnds) void {
     if (ends.gate_r) |h| h.close();
     for (ends.seccomp) |h| h.close();
     ends.u2.close();
-    for (ends.keep) |h| h.close();
     if (ends.resolv) |h| h.close();
 }
 
@@ -126,7 +119,6 @@ fn expectWalked(ends: *const bwrap.ChildEnds) !void {
     if (ends.gate_r) |h| try testing.expect(!h.isLive());
     for (ends.seccomp) |h| try testing.expect(!h.isLive());
     try testing.expect(!ends.u2.isLive());
-    for (ends.keep) |h| try testing.expect(!h.isLive());
     if (ends.resolv) |h| try testing.expect(!h.isLive());
 }
 
@@ -194,8 +186,8 @@ const Branch = struct {
     nested: u64 = 0,
     trace: bool = false,
     groups: ?[]const u32 = null,
-    /// one keep-fd, named by --ro-bind-data after --clearenv
-    keep_fd: bool = false,
+    /// a resolver, an environment and a hostname
+    typed: bool = false,
     relay: bool = false,
 };
 
@@ -214,30 +206,19 @@ fn expectSpawn(b: Branch, want: []const []const u8) !void {
     const out = try opened(fd.pipe());
     defer out.r.close();
 
-    var keep: []const fd.Fd(.inherited) = &.{};
     var s = baseSpec();
     s.seccomp = b.seccomp;
     s.nested_userns = b.nested;
     s.trace = b.trace;
     if (b.groups) |g| s.groups = g;
-    var keep_text: []const u8 = "@KEEP@";
-    if (b.keep_fd) {
-        const k = try fd.adoptInherited(try rawOpen("/dev/null"));
-        const ks = try arena.alloc(fd.Fd(.inherited), 1);
-        ks[0] = k;
-        keep = ks;
-        keep_text = try std.fmt.allocPrint(arena, "{d}", .{k.raw()});
-        const kf = try arena.alloc(sys.fd_t, 1);
-        kf[0] = k.raw();
-        s.keep_fds = kf;
-        const words = try arena.alloc([:0]const u8, 9);
-        for ([_][]const u8{ "--clearenv", "--setenv", "HOME", "/home/u", "--perms", "0644", "--ro-bind-data", keep_text, "/etc/resolv.conf" }, 0..) |w, i|
-            words[i] = try arena.dupeZ(u8, w);
-        s.bwrap_args = words;
+    if (b.typed) {
+        s.resolv_conf = "nameserver 169.254.1.1\n";
+        s.env = &.{ .{ .name = "HOME", .value = "/home/u" }, .{ .name = "container", .value = "flong" } };
+        s.hostname = "c";
     }
 
     const before = fd.liveCount();
-    var ends: bwrap.ChildEnds = .{ .u2 = try userns(), .keep = keep };
+    var ends: bwrap.ChildEnds = .{ .u2 = try userns() };
     const got = try bwrap.spawn(arena, &s, .{ .bwrap = fakeBwrap(), .self = self_path }, ns1, b.relay, .{ null, out.w.any(), null }, null, &ends);
 
     // Every descriptor's name, by its number, before the walk closes them.
@@ -254,22 +235,23 @@ fn expectSpawn(b: Branch, want: []const []const u8) !void {
     try named.add(arena, &names, "@GATE@", ends.gate_r.?);
     try testing.expectEqual(b.seccomp.len, ends.seccomp.len);
     for (ends.seccomp, 0..) |h, i| try named.add(arena, &names, try std.fmt.allocPrint(arena, "@SECCOMP{d}@", .{i}), h);
-    for (ends.keep) |h| try named.add(arena, &names, "@KEEP@", h);
+    try testing.expectEqual(b.typed, ends.resolv != null);
+    if (ends.resolv) |h| try named.add(arena, &names, "@RESOLV@", h);
 
     // 2. checkpoint 2: the child's ends, at once.
     walk(&ends);
     out.w.close();
     try expectWalked(&ends);
-    // The launcher's three ends and bwrap's pidfd, for U2 and the keep-fd
-    // it gave up.
-    try testing.expectEqual(before + 4 - 1 - keep.len, fd.liveCount());
+    // The launcher's three ends and bwrap's pidfd; the stdout pipe's
+    // write end gone.
+    try testing.expectEqual(before + 4 - 1, fd.liveCount());
 
     const said = try drain(arena, out.r);
     try testing.expectEqual(@as(u8, 0), try got.child.await());
     got.info_r.close();
     got.ready_r.close();
     got.gate_w.close();
-    try testing.expectEqual(before - 1 - keep.len, fd.liveCount());
+    try testing.expectEqual(before - 1, fd.liveCount());
 
     // Its argv, each number read back as its descriptor's name.
     var lines = std.mem.splitScalar(u8, said, '\n');
@@ -372,11 +354,12 @@ test "spawn: the tier's filters and a project filter, each opened and passed in 
     }));
 }
 
-test "spawn: a keep-fd is kept at its number, which its bwrap-arg names" {
-    try expectSpawn(.{ .keep_fd = true }, comptime cat(&.{
+test "spawn: the resolver from its memfd, the environment from nothing, the hostname" {
+    try expectSpawn(.{ .typed = true }, comptime cat(&.{
         &head,
         &middle,
-        &.{ "--clearenv", "--setenv", "HOME", "/home/u", "--perms", "0644", "--ro-bind-data", "@KEEP@", "/etc/resolv.conf" },
+        &.{ "--perms", "0644", "--ro-bind-data", "@RESOLV@", "/etc/resolv.conf" },
+        &.{ "--clearenv", "--setenv", "HOME", "/home/u", "--setenv", "container", "flong", "--hostname", "c" },
         &init_plain,
         &tail_command,
     }));
@@ -391,7 +374,7 @@ test "spawn: trace, and no groups" {
     }));
 }
 
-test "spawn: a seccomp program refused; U2, the keep-fd and the program opened before it are in the list, nothing spawned" {
+test "spawn: a seccomp program refused; U2 and the program opened before it are in the list, nothing spawned" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -399,12 +382,10 @@ test "spawn: a seccomp program refused; U2, the keep-fd and the program opened b
     msg.mode = .cut;
     const ns1 = try userns();
     defer ns1.close();
-    const k = try fd.adoptInherited(try rawOpen("/dev/null"));
     var s = baseSpec();
     s.seccomp = &.{ "/etc/passwd", "/nonexistent/b.bpf", "/dev/null" };
-    const ks = [_]fd.Fd(.inherited){k};
     const before = fd.liveCount();
-    var ends: bwrap.ChildEnds = .{ .u2 = try userns(), .keep = &ks };
+    var ends: bwrap.ChildEnds = .{ .u2 = try userns() };
     var errbuf: [4096]u8 = undefined;
     const cap = try Capture.begin();
     const r = bwrap.spawn(arena, &s, .{ .bwrap = fakeBwrap(), .self = self_path }, ns1, false, .{ null, null, null }, null, &ends);
@@ -415,8 +396,8 @@ test "spawn: a seccomp program refused; U2, the keep-fd and the program opened b
     try testing.expect(ends.info_w == null and ends.ready_w == null and ends.gate_r == null);
     walk(&ends);
     try expectWalked(&ends);
-    // U2 and the keep-fd gone with the program: nothing else was made.
-    try testing.expectEqual(before - 1, fd.liveCount());
+    // U2 gone with the program: nothing else was made.
+    try testing.expectEqual(before, fd.liveCount());
 }
 
 test "spawn: a start refused after the pipes; the launcher's ends closed, the child's in the list" {
@@ -429,7 +410,7 @@ test "spawn: a start refused after the pipes; the launcher's ends closed, the ch
     defer ns1.close();
     const s = baseSpec();
     const before = fd.liveCount();
-    var ends: bwrap.ChildEnds = .{ .u2 = try userns(), .keep = &.{} };
+    var ends: bwrap.ChildEnds = .{ .u2 = try userns() };
 
     // Every free slot reserved but the six the pipes take: the pidfd's
     // reservation, in Spawn.start, finds the table full.
@@ -466,7 +447,7 @@ test "spawn: a bwrap that cannot be exec'd is a child that exits 127, its ends w
     const errp = try opened(fd.pipe());
     defer errp.r.close();
     const before = fd.liveCount() - 1;
-    var ends: bwrap.ChildEnds = .{ .u2 = try userns(), .keep = &.{} };
+    var ends: bwrap.ChildEnds = .{ .u2 = try userns() };
     const got = try bwrap.spawn(arena, &s, .{ .bwrap = "/nonexistent/bwrap", .self = self_path }, ns1, false, .{ null, null, errp.w.any() }, null, &ends);
     walk(&ends);
     errp.w.close();

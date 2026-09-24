@@ -92,18 +92,20 @@ So nothing is declared by running a command:
   `mkAfter`. flong runs no shell of its own; a hook that wants one names a
   script.
 
-The wrapper itself is the same text for every declaration. `module.nix`
-generates a header of quoted assignments in front of `rootless-wrapper.bash`,
-and the header is the only place a declaration reaches bash: a name, a path or
-a command's word is data there, and the body decides what runs. A list of
-commands is one flat array, each command's length and then its words. The
-launcher's spec takes one `post-start` or `post-stop` per command, and runs
-them in order, stopping at the first that fails; module.nix puts each command
-behind its declaration's hook program, `flong-poststart-<name>` or
-`flong-poststop-<name>`, which puts `path` on `PATH`, drops the machine name
-the record appends to a `postStop` command, and execs the command. Every name
-the header assigns is un-exported, since an assignment to a name the caller's
-environment exports keeps it exported, into the launcher and the hooks.
+A declaration reaches flong as data and nothing else. `module.nix` renders
+each one to `/etc/flong/<name>.zon` (`nix/to-zon.nix`), and `flong launch`
+reads it with the typed parser `flong check` judges it with, so a name, a
+path or a command's word is a value there, never code. The spec holds each
+`postStart` and `postStop` command as one entry, and runs them in order,
+stopping at the first that fails; module.nix puts each command behind its
+declaration's hook program, `flong-poststart-<name>` or
+`flong-poststop-<name>` (the declaration's `postStartProgram` and
+`postStopProgram`), which puts `path` on `PATH`, drops the machine name the
+record appends to a `postStop` command, and execs the command. The caller's
+own commands (`workspace`, `binds`, `guard`, `seccompPolicy`) get `path` as
+the declaration's `commandPath`, in front of `PATH`. The prologue exports
+nothing of its own but what the commands are documented to see, so a
+variable of the caller's reaches them and the launch as it came.
 
 ## `command` is exec'd through the container's environment
 
@@ -111,8 +113,9 @@ The payload script `cd`s into the workspace and runs
 `bash -c '. /etc/set-environment; exec "$@"'` with `command` and the launcher's
 arguments as that bash's positional parameters. None of them is ever the text
 of a script, so a space, `;`, `$` or glob in any argument arrives as that
-character. The spec reaches `flong launch` as argv and bwrap takes each path
-as a whole argument, so nothing on the way splits or expands a word either.
+character. The spec is a value inside `flong launch` and bwrap takes each
+path as a whole argument, so nothing on the way splits or expands a word
+either.
 
 It goes through `/etc/set-environment` because that file is where the
 container's `PATH` comes from: its system profile,
@@ -225,15 +228,17 @@ directory is a tmpfs of 10% of RAM.
   `.trash.*` and deleted. A cache in use is kept for a later launch, or goes
   with the runtime directory at logout. Deleting a live overlay's lower layer
   breaks the session; renaming it does not (measured).
-- **The recheck loops through the wrapper.** A launcher that opened its cache
+- **The recheck relaunches flong.** A launcher that opened its cache
   before a sweep renamed it, and locked it after, finds that the path no
   longer names the inode it locked. A sweep may also have taken the cache
-  and another wrapper made one afresh at the same path, which that wrapper
+  and another launch made one afresh at the same path, which that launch
   still holds shared while it prepares: so the launcher also requires
-  `prepared/` to be there. Either answer execs the wrapper again (`relaunch`
-  in the spec), which prepares afresh or waits on the preparer's lock. There
-  is no count: each turn follows a sweep's rename, an event. A relaunch runs
-  `guard` and `seccompPolicy` again.
+  `prepared/` to be there. Either answer execs flong again,
+  `/proc/self/exe` with the launch's own argv (so a link's name is looked
+  up again), which prepares afresh or waits on the preparer's lock; so do
+  the three points of the prologue that find the cache swept before they
+  hold it. There is no count: each turn follows a sweep's rename, an event.
+  A relaunch runs `guard` and `seccompPolicy` again.
 
 **Integrity is the caller's.** Anything running as the caller can edit the
 cache, and nothing stored in space the caller can write could stop that.
@@ -550,7 +555,7 @@ launcher's stdio, working directory and environment, plus:
 | `machine` | the session's name |
 
 `$uid`, `$gid`, `$home`, `$workspace`, `$workspace_mode` and `$binds` are
-exported by the wrapper. The namespaces are named by descriptors the
+exported by the prologue (`src/launch/assemble.zig`). The namespaces are named by descriptors the
 launcher holds, so nothing is pinned on disk and a pid is never looked up
 again.
 
@@ -598,7 +603,7 @@ at hook time", so it stays sequential.
 
 bwrap's own `--block-fd` gate is fail-open: the payload runs when the launcher
 dies. So flong init, which bwrap execs as the session's pid 1, is the gate.
-Its protocol is its argv, not the environment, so the wrapper's `--clearenv`
+Its protocol is its argv, not the environment, so the spec's `--clearenv`
 cannot drop it and nothing has to be unset before the payload sees its
 environment; the argv is gone at the exec of tini. In order, it:
 
@@ -638,7 +643,7 @@ needs, a person answering a question in it included. Every wait is on an
 event, with no timeout: the gate pipe, the ready byte, a pidfd polled with
 `-1`, `cgroup.events` (`POLLPRI`), a held `flock` (waited for by a helper whose
 pidfd is the event), pasta's exit, the foreground wait. No retry has a cap:
-the cache's recheck loops through the wrapper, and a taken session name waits
+the cache's recheck relaunches flong, and a taken session name waits
 on its holder's release. A failing hook, and a launcher asked to stop, end the
 session through the teardown; a launcher killed mid-hook takes the session
 with it (below). The one clock read is the `^]^]^]` check, which waits for
@@ -1063,9 +1068,8 @@ payload set.
   a container, as toolbox and distrobox do: `name` is the container, `runtime`
   is `flong` and `uid` is the container user's uid. ST-terminated, since VTE
   rejects the BEL form, and written only when stdout is a terminal. The
-  launcher writes them, not the wrapper, which execs it: the launcher clears
-  them in its teardown, whatever stage the launch reached, and the watchdog
-  clears them after a SIGKILL.
+  launcher writes them, so it clears them in its teardown, whatever stage
+  the launch reached, and the watchdog clears them after a SIGKILL.
 
 **A fixed tty filter in every tier**, which no tier or project can remove:
 `ioctl` with request `TIOCSTI`, `TIOCLINUX`, `TIOCSETD` or `TIOCCONS` gets
@@ -1295,8 +1299,9 @@ a session's user, mount, network and pid namespaces as U1's root, change its
 mounts, rules and cgroup, and read or write anything in it. That is the same
 reach the caller has over any process they run. The boundary is between the
 payload and everything else, not between the caller and the payload.
-`guard`, `seccompPolicy` and the wrapper's checks are consistency checks for
-the same reason: the caller can run `flong launch` with any spec.
+`guard`, `seccompPolicy` and the prologue's checks are consistency checks
+for the same reason: the caller can run `flong launch` with any declaration
+file.
 
 **Stronger:**
 
@@ -1320,8 +1325,9 @@ the interactive terminal (a pty of its own).
 
 **Conditions:**
 
-1. Every flong-level mount goes through the walker. The spec's `bwrap-arg` is
-   an allow-list with no path mount in it, and the programs are compiled in.
+1. Every flong-level mount goes through the walker. The spec's only bwrap
+   options are typed (the resolver's file, the environment, the hostname),
+   with no path mount among them, and the programs are compiled in.
 2. Caller and workspace sources are opened with `RESOLVE_NO_SYMLINKS`.
 3. Every session has its own cgroup, `nsdelegate` is checked, and the cgroup2
    view is read-only.
@@ -1409,10 +1415,10 @@ three. The programs `flong launch` runs (bwrap, pasta, its own binary as
 `flong init`, `/run/wrappers/bin/newuidmap` and `newgidmap`) and the tini
 `flong init` execs are compiled in, as build options with no default
 (`-Dbwrap`, `-Dpasta`, `-Dself`, `-Dnewuidmap`, `-Dnewgidmap`, `-Dtini`;
-`build.zig`'s `LaunchPaths`), so the wrapper cannot point the launcher at
-another bwrap, and a build that forgets one fails. So are the two that
-`flong launch DECL.zon` runs in the wrapper's place (STANDALONE.md, S3):
-`-Dcache`, the cache tool (`cache.nix`), and `-Dseccomp`, `flong-seccomp`;
+`build.zig`'s `LaunchPaths`), so no caller can point the launcher at
+another bwrap, and a build that forgets one fails. So are the two its
+prologue runs (STANDALONE.md, S3): `-Dcache`, the cache tool
+(`cache.nix`), and `-Dseccomp`, `flong-seccomp`;
 `flong version` prints every one, `NAME=PATH` a line.
 
 Line numbers that cite the deleted C (`launcher/flong-*.c` and `*.h`,
@@ -1651,16 +1657,22 @@ The native code is tested at four levels, each a check.
   never regenerated: every seccomp refusal and edge, the tooling over a
   checked-in copy of `systemd-analyze syscall-filter`'s dump (so a systemd
   bump changes nothing), flong init's argv refusals, flong sweeper's usage
-  and state-directory refusals, and one case per refusal of the spec; and
-  `flong check` over `tests/golden/decl/`, one declaration a case, each
-  refusal of a declaration with its accepted counterpart (below). What
+  and state-directory refusals; `flong launch`'s entry (its usage, a name
+  with no declaration, a declaration that does not parse or that `flong
+  check` refuses, and one that reaches the prologue); and `flong check`
+  over `tests/golden/decl/`, one declaration a case, each refusal of a
+  declaration with its accepted counterpart (below). The spec's own cases,
+  recorded from the C's argv parser, went with it in S3: each refusal a
+  value can still reach is a case of `tests/zig/spec_test.zig` under its
+  old name. What
   a case derives (store paths, project keys) is filled in as the check
   runs. The `.bpf` files follow golden-update's rule above.
 - **Unit and property tests** (minish, `native-test`): the descriptor
   table's model property (the table always equals `/proc/self/fd`), stale
   handles, fork and each kind; `num.zig` accepts exactly what the C did;
-  valid specs drawn from a model parse back, each single-rule mutation is
-  refused with its message, and `bwrapArgv` has golden argv per branch; the
+  valid spec values drawn from a model pass `spec.validate`, each
+  single-rule mutation is refused with its message, and `bwrapArgv` has
+  golden argv per branch; the
   child-pid reader over any chunking and its 4096-byte bound; the `^]`
   detector as a state machine against a model; the launch's pieces against
   stand-ins (`flong-fake-bwrap`, the spawn probe). **Fuzzing**: the sweep's
@@ -1727,15 +1739,15 @@ ports.
 | `src/msg.zig`, `src/errno.zig`, `src/num.zig` | messages, the trace and the panic handler; glibc's errno texts and names; numbers from outside read exactly as the C read them |
 | `src/sig.zig`, `src/proc.zig` | the signal mask, the signalfd, `awaitFd`, `awaitFdOrExit`, `take`; `fork` (a `noreturn` body, the keep list), `Spawn`, `Child`, `lockWait`, starttime |
 | `src/names.zig`, `src/passwd.zig` | machine and container names; a user's name from `/etc/passwd`, without libc (quirk 19) |
-| `src/spec.zig` | the input contract: argv into a `Spec`, every check that needs nothing but the spec, and bwrap's argv |
+| `src/spec.zig` | the input contract: the `Spec` value, `validate` (every check that needs nothing but the spec) and bwrap's argv |
 | `src/ns.zig` | U1 (newuidmap and newgidmap in parallel) and U2 (the split maps, `max_user_namespaces`); checkpoint 4 |
 | `src/cgroup.zig` | the nsdelegate check, finding or starting the holder, the session cgroup, its limits and leaves; kill, wait, remove |
 | `src/record.zig` | the state directory, records and `leader=`, liveness, the sweep, `postStop`, the watch |
 | `src/tty.zig` | the foreground wait, the pty relay or passthrough, raw mode, the watchdog, `^]^]^]`, the wait for bwrap |
 | `src/main.zig` | `flong`'s root: the dispatch, the start settings and the one panic handler; each subcommand's `main` is handed argv from its word on |
 | `src/mount.zig` | the mount helper, a fork body of `flong launch`'s: sources, the walker, masks, overlays, `/sys`, `/run` read-only; checkpoint 7 |
-| `src/launch.zig` | `flong launch`: `main` (the prologue), `run` and `teardown`, the order of a launch; checkpoints 1, 2, 3, 5 and 6 |
-| `src/launch/` | the launch's pieces, each tested alone: `prologue.zig` (the cache lock, the relaunch, the close of what the wrapper left open, the protected paths), `bwrap.zig` (its spawn), `childpid.zig` (`--info-fd`), `hook.zig` (`postStart`), `pasta.zig` |
+| `src/launch.zig` | `flong launch`: `main` (its words), the declaration loaded and judged, `launch` (the prologue), `run` and `teardown`, the order of a launch; checkpoints 1, 2, 3, 5 and 6 |
+| `src/launch/` | the launch's pieces, each tested alone: `assemble.zig` (the prologue's work in the wrapper's order, building the spec) and its pieces `caller.zig`, `workspace.zig`, `cmd.zig`, `binds.zig`, `refuse.zig`, `depth.zig`, `subid.zig`, `prepare.zig`, `identity.zig`, `groups.zig`, `hometmp.zig` and `resolv.zig`; `lookup.zig` (a name's declaration); `prologue.zig` (the cache lock, the relaunch, the close of what was inherited, the protected paths), `bwrap.zig` (its spawn), `childpid.zig` (`--info-fd`), `hook.zig` (`postStart`), `pasta.zig` |
 | `src/init.zig` | `flong init`: groups, capabilities, the controlling tty, the ready byte, the gate, chdir, exec tini; no allocator; checkpoint 9 |
 | `src/sweeper.zig` | `flong sweeper`: the state directory, its holder, then the watch; no allocator |
 | `src/seccomp/` | `flong-seccomp`: `main.zig` the root, `compile.zig` the policy compiler, `expand.zig`, `render.zig`, `project.zig` the subcommands, `scmp.zig` libseccomp's externs |
@@ -1773,9 +1785,9 @@ sweeper reads a new launcher's records.
 - **One cleanup path.** A program's resources are values that end once, and
   a failure unwinds through its caller to the one place that undoes what
   exists. The launcher keeps every resource in one struct, `Launch`
-  (`src/launch.zig:93-136`): a handle that may not exist yet is optional,
+  (`src/launch.zig:96-142`): a handle that may not exist yet is optional,
   one kept until exit is `Held`, each child a `?proc.Child`, null once
-  reaped, and `gate_opened`. `main` ends `proc.exit(teardown(&l, run(&l)))`:
+  reaped, and `gate_opened`. `launch` ends `proc.exit(teardown(&l, run(&l)))`:
   `run` returns at the first failure, and `teardown` undoes whatever
   exists. A module undoes its own partial work before returning, so the
   launcher never sees half a resource. The mount helper and the other fork
@@ -1791,7 +1803,9 @@ sweeper reads a new launcher's records.
   directories, the cache (locked shared), the holder's cgroup, U1, the info
   pipe's read end (quirk 31), the leader's pidfd, the network namespace and
   pasta's memfd. `Stdio` is 0–2, outside the table, never closed;
-  `inherited` is a descriptor the wrapper handed over, a keep-fd. A number
+  `inherited` is a descriptor adopted from outside the table, which
+  `Spawn.keepInherited` passes on (a launch held one per keep-fd until S3,
+  and holds none now). A number
   leaves the table only as a child's argument (`passFd`), `/proc/self/fd/N`
   (`selfPath`), `/proc/<pid>/fd/N` (`pidPath`), a filesystem context's
   `setFd` or `scmp.exportBpf`. A full table is "too many open descriptors",
@@ -1871,8 +1885,8 @@ sweeper reads a new launcher's records.
 
 | # | order | where | held by |
 |---|---|---|---|
-| 1 | the prologue: the time as `main`'s first statement; block signals, SIGPIPE ignored, SIGCHLD default; parse, refusing root first; adopt the keep-fds; the signalfd, so its number is never a keep-fd's; `launcher-start`; the state directory; the cache lock (swept: relaunch or 75); close what was inherited. Nothing chdirs before step 4. For a declaration (`launchDeclared`): SIGCHLD default; the wrapper's work, in its order (`assemble.run`, itself one linear function); then block signals, SIGPIPE ignored; the spec's checks over the value (`spec.validate`); the signalfd; `launcher-start`; the state directory; the cache lock (swept: relaunch this binary with its argv); the prologue's own shared lock on a cold cache closed; close what was inherited | `launch.zig`'s `main` and `launchDeclared` | the keep-fd launches, the spec's golden cases, the payload-descriptor subtest, tests/transition.nix |
-| 2 | the child's ends close at once after bwrap's spawn, whether or not it succeeded: info, ready and gate write ends, the seccomp files, U2, the keep-fds, the resolver's memfd | `run` | the gate subtests |
+| 1 | the prologue: the time as `main`'s first statement; SIGCHLD default; the wrapper's work, in its order, ahead of the launch's own (`assemble.run`, itself one linear function, its refusals under the declaration's name, 1); then block signals, SIGPIPE ignored; the spec's checks over the value, refusing root first (`spec.validate`); the signalfd; `launcher-start`; the state directory; the cache lock (swept: relaunch this binary with its argv); the prologue's own shared lock on a cold cache closed; close what was inherited. Nothing chdirs before step 4 | `launch.zig`'s `launch`, `launch/assemble.zig`'s `run` | spec_test's validate cases, wrapper_test, golden's launch set, the payload-descriptor subtest |
+| 2 | the child's ends close at once after bwrap's spawn, whether or not it succeeded: info, ready and gate write ends, the seccomp files, U2, the resolver's memfd | `run` | the gate subtests |
 | 3 | the ready pipe's read end closes right after the helper's fork, so the helper alone sees the byte or EOF | `run` | the mount subtests |
 | 4 | U2 is strictly sequential: the grandchild unshares and writes `u`; the helper writes the maps, then `m`; the grandchild then writes `max_user_namespaces` and `n`; only then the helper sends the pid and waits. On failure every pipe closes before any reap, then the map programs are killed and the helpers waited for | `ns.zig` | the U2 tests in `checks.native` |
 | 5 | the gate: the terminal started (the watchdog before raw), queued signals taken, the window size, one byte, then the gate is open | `run` | the ^C, gate and terminal subtests |
@@ -1921,7 +1935,7 @@ behaviour wait for [Open decisions](#open-decisions).
 | # | behaviour | where | verdict |
 |---|---|---|---|
 | 1 | the ready byte written after the helper died gives flong init EPIPE, not SIGPIPE's death: it is its namespace's pid 1, which a default-action signal never kills; it says `telling the launcher the root is built: Broken pipe`, or not, by timing | `init.zig` | Keep; SIGPIPE stays default for the payload |
-| 2 | a relaunch execs the wrapper before inherited descriptors are closed, restoring SIGPIPE and the mask first | `launch/prologue.zig` | Keep |
+| 2 | a relaunch execs flong again (`/proc/self/exe`, with the launch's own argv) before inherited descriptors are closed, restoring SIGPIPE and the mask first | `launch/prologue.zig` | Keep; it execed the wrapper until S3 |
 | 3 | pasta gets `$leader`, `$userns`, `$netns`, `$machine` only when a hook ran | `launch/hook.zig`, `pasta.zig` | Keep: the environment is built once, only when `postStart` has a command, every command gets it, and pasta gets it then |
 | 4 | pasta's `--netns` names the leader by pid, the hook's `$netns` the launcher's descriptor | `launch/pasta.zig` | Keep |
 | 5 | a malformed record under the wanted name is dropped, release returns 0, and the launch refuses `has ended but cannot be released yet` though the name is free | `record.zig` | Keep; open decision 1 |
@@ -1949,7 +1963,7 @@ behaviour wait for [Open decisions](#open-decisions).
 | 27 | removing a cgroup tree recurses without a bound | `cgroup.zig` | Keep; 1,100 nested cgroups peak at 2,672 kB of stack and stop at the descriptor table, as the C did |
 | 28 | uid map extents are uncapped; above 340 the kernel says EINVAL | `spec.zig` | Keep |
 | 29 | a deleted source reads back with ` (deleted)` and misses the protected-path compare | `mount.zig` | Keep |
-| 30 | `relaunch` is not checked absolute: it is exec'd from the wrapper's own working directory and its `$0` may be relative | `spec.zig`, `launch/prologue.zig` | Keep, with no chdir before step 4 |
+| 30 | a relaunch's argv[0] is passed on as it came, relative or not: the exec is of `/proc/self/exe`, and argv[0] is only the name a link's lookup reads | `launch/prologue.zig` | Keep, with no chdir before step 4; until S3 the spec's `relaunch`, the wrapper's own `$0`, was exec'd from the wrapper's working directory |
 | 31 | the info pipe's read end is never closed | `launch.zig` | Keep: `Held` |
 | 32 | exit 125 collides with a payload's own 125 | `launch.zig` | Keep |
 | 33 | the sweeper's waits cap at 256 inodes | `record.zig` | Keep |
@@ -1964,7 +1978,7 @@ behaviour wait for [Open decisions](#open-decisions).
 | 42 | a terminal the caller cannot reopen (after `su`): the `/proc/self/fd/1` reopen fails silently and the relay writes through fd 1 only when poll reports POLLOUT | `tty.zig` | Keep |
 | 43 | a redirected stderr stays where the caller sent it: in relay the payload's stderr is the pty's slave only if the launcher's is a terminal | `tty.zig` | Keep |
 | 44 | after a hang-up the master is closed, and resize and the drain check for it | `tty.zig` | Keep |
-| 45 | `launcher-start` is stamped when `main` begins and printed after the signalfd | `launch.zig` | Keep |
+| 45 | `prologue-start` is stamped when `main` begins and printed once `FLONG_TRACE` is read; `launcher-start` when the launch proper begins, after the signalfd | `launch.zig` | Change (S3): `launcher-start` was `main`'s stamp, printed after the signalfd |
 | 46 | the tooling on inputs no caller gives: an unreadable stdin to `project` compiled the tier without the project's lines, exit 0 (failing open); texts that named the old tools' store paths or followed the locale | `seccomp/` | Change: `project` refuses (`reading the policy: <strerror>`), exit 1; flong's prefixes and the C locale's text; each exit status as before. None is test-asserted |
 
 ### Open decisions
@@ -1985,61 +1999,54 @@ behaviour wait for [Open decisions](#open-decisions).
 
 ### The input contract
 
-The wrapper runs `flong launch` with the whole spec as its arguments: keywords,
-each followed by a fixed number of fields (a `mount`'s set by its kind, a
-command's by its word count), then `--` and the payload's command. An argument is already NUL-terminated, so a path may hold a tab or a
-newline, and bash builds and passes the list with builtins alone; bash cannot
-hold a NUL in a string, so a spec file or a pipe would cost a fork or a
-temporary file per launch. Keywords come in any order; repeatable ones
-accumulate in order. `R` required, `1` at most once, `*` repeatable.
+`flong launch` builds the spec, `spec.Spec`, as a value
+(`src/launch/assemble.zig`), from the declaration and what only the launch
+knows, and `spec.validate` checks it before anything is in the descriptor
+table. Until S3 the spec was the bash wrapper's argv, a keyword and its
+fields each; `validate` runs that parser's checks over the value, and each
+refusal still names its field in the keyword's words (`uidmap`, `user's
+home`, `mount bind-ro source`, `post-stop`, `bwrap-arg --hostname`), which
+is how the tests quote them. A list is empty when the launch has none.
 
-| keyword and fields | | meaning |
-|---|---|---|
-| `machine NAME` | R | the session's name: record, cgroup, `$machine`. `[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}` |
-| `container NAME` | R | the cgroup level between the holder and its sessions; the same charset |
-| `state DIR` | R | `$XDG_RUNTIME_DIR/flong`: the caller's, mode 0700 (checked) |
-| `cache DIR` | R | the cache; the root is `DIR/prepared`; locked shared for the launch |
-| `relaunch ARG` | * | the wrapper's own argv, exec'd when the cache was swept before it was locked |
-| `closure PATH` | R | the container's toplevel, bound at `/run/current-system`; it and its target under `/nix/store/`, with no empty, `.` or `..` component |
-| `uidmap IN OUT COUNT` | R* | an extent of U1's uid map |
-| `gidmap IN OUT COUNT` | R* | the same for gids |
-| `user UID GID HOME` | R | the payload's container uid, gid and home |
-| `group GID` | * | a supplementary group |
-| `chdir DIR` | 1 | where the payload starts (the workspace); `/` when absent |
-| `mount bind-ro DEST SRC`, `bind-rw` | * | a declared bind; the source follows symlinks |
-| `mount bind-ro-exact DEST SRC`, `bind-rw-exact` | * | a caller's bind or the workspace: `SRC` is canonical, and a symlink on it refuses |
-| `mount dev DEST SRC` | * | an `allowedDevices` node: a read-write bind that is not `nodev` |
-| `mount tmpfs DEST MODE SIZE OWNER` | * | `MODE` octal; `SIZE` tmpfs's `size=`, or empty; `OWNER` `root` or `user` |
-| `mount overlay DEST LOWER` | * | reads `LOWER`; writes go with the session |
-| `mount mask DEST` | * | a mode-0 read-only node over an existing `DEST` |
-| `protect PATH` | * | no mount source may equal, lie inside or contain `PATH`, compared canonicalised (a part that does not exist yet is appended, as spelt, to the canonical path of its longest existing prefix) |
-| `seccomp PATH` | * | a compiled BPF program; each becomes one `--add-seccomp-fd`, in order |
-| `nested-userns N` | 1 | `nestedSandbox`: U2's `max_user_namespaces` is `N`, and `--assert-userns-disabled` goes |
-| `holder REL` | R | the holder's cgroup below `user@UID.service`: `app.slice/flong-sessions.service` |
-| `holder-start ARG` | * | argv run when the holder is absent; the first an absolute path, since nothing searches `PATH` |
-| `limit FILE VALUE` | * | an opt-in limit, `FILE` one of `memory.max`, `memory.high`, `memory.swap.max`, `memory.oom.group`, `pids.max`, `cpu.max`, `cpu.weight`, `io.weight` |
-| `post-start N WORD…` | * | one `postStart` command, `N` (decimal, at least 1) words, the first an absolute path; in order, the first failure ending the launch; none, no hook |
-| `post-stop N WORD…` | * | one `postStop` command, the same way, its program under `/nix/store/`; in order, recorded for the sweep |
-| `network` | 1 | start pasta |
-| `pasta-arg ARG` | * | pasta's port and DNS flags |
-| `pasta-wait` | 1 | fixed `forwardPorts`: the teardown waits for pasta's exit |
-| `bwrap-arg ARG` | * | one argument for bwrap, from the allow-list below |
-| `keep-fd N` | * | an open descriptor a `bwrap-arg` names, passed to bwrap only |
-| `trace` | 1 | stage timestamps on stderr, `T <µs> <stage>` |
-| `-- COMMAND…` | R | the payload, run as `tini -g -- COMMAND…` |
+| field (its refusals' word) | meaning |
+|---|---|
+| `machine` | the session's name: record, cgroup, `$machine`. `[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}` |
+| `container` | the cgroup level between the holder and its sessions; the same charset |
+| `state` | `$XDG_RUNTIME_DIR/flong`: the caller's, mode 0700 (checked) |
+| `cache` | the cache; the root is `cache/prepared`; locked shared for the launch |
+| `closure` | the container's toplevel, bound at `/run/current-system`; it and its target under `/nix/store/`, with no empty, `.` or `..` component |
+| `uidmap`, `gidmap` | U1's extents, at least one each, disjoint, none reaching host id 0 |
+| `uid`, `gid`, `home` (`user's uid`, ...) | the payload's container uid, gid and home, each id in its map |
+| `groups` (`group`) | supplementary groups, each in the gid map |
+| `chdir` | where the payload starts (the workspace); `/` by default |
+| `mounts` (`mount KIND destination`, `source`) | `bind-ro`, `bind-rw`: a declared bind, the source following symlinks; `bind-ro-exact`, `bind-rw-exact`: a caller's bind or the workspace, the source canonical, a symlink on it refused; `dev`: an `allowedDevices` node, a read-write bind that is not `nodev`; `tmpfs`: an octal mode, tmpfs's `size=` or none, owned by root or the user; `overlay`: reads the lower, writes go with the session; `mask`: a mode-0 read-only node over an existing destination |
+| `protect` | no mount source may equal, lie inside or contain it, compared canonicalised (a part that does not exist yet is appended, as spelt, to the canonical path of its longest existing prefix) |
+| `seccomp` | compiled BPF programs; each becomes one `--add-seccomp-fd`, in order |
+| `nested_userns` (`nested-userns`) | `nestedSandbox`: U2's `max_user_namespaces`, and `--assert-userns-disabled` goes; 0 is off |
+| `holder` | the holder's cgroup below `user@UID.service`: `app.slice/flong-sessions.service` |
+| `holder_start` (`holder-start`) | argv run when the holder is absent; its program an absolute path, since nothing searches `PATH` |
+| `limits` (`limit`) | opt-in limits, each file once, one of `memory.max`, `memory.high`, `memory.swap.max`, `memory.oom.group`, `pids.max`, `cpu.max`, `cpu.weight`, `io.weight`, with a value |
+| `post_start` (`post-start`) | `postStart`'s commands, each at least its program, an absolute path; in order, the first failure ending the launch; none, no hook |
+| `post_stop` (`post-stop`) | `postStop`'s commands, the same way, each program under `/nix/store/`; in order, recorded for the sweep |
+| `network` | start pasta |
+| `pasta_args` (`pasta-arg`) | pasta's port and DNS flags; only with `network` |
+| `pasta_wait` (`pasta-wait`) | fixed `forwardPorts`: the teardown waits for pasta's exit; only with `network` |
+| `resolv_conf` | a networked session's `/etc/resolv.conf`, whole, which bwrap binds read-only from a memfd |
+| `env` (`bwrap-arg`) | the payload's environment, built from nothing: `--clearenv`, then a `--setenv` for each, its name non-empty and without `=` |
+| `hostname` (`bwrap-arg --hostname`) | bwrap's `--hostname`, not empty |
+| `trace` | stage timestamps on stderr, `T <µs> <stage>` |
+| `command` | the payload, run as `tini -g -- COMMAND…`; not empty |
 
-**`bwrap-arg` is an allow-list**: `--clearenv`, `--setenv VAR VALUE`,
-`--unsetenv VAR`, `--hostname NAME`, `--perms OCTAL` immediately before
-`--ro-bind-data`, and `--ro-bind-data FD DEST` with `FD` a `keep-fd`. The
-parser walks them with their arities and refuses anything else, so a path
-mount here is a wrapper bug the launcher catches (condition 1).
+bwrap is given no option but the fixed part and the three typed ones (the
+resolver's file, the environment, the hostname), so a path mount can only
+be a mount the walker makes (condition 1).
 
 A spec never carries the programs, U2's maps (derived from U1's), the fixed
 mounts, `/sys`, `/run` read-only, the nsdelegate check, or anything about
 seccomp policy beyond the compiled files.
 
 **bwrap's argv** is, in this order, so the fixed part cannot be undone by the
-wrapper's part, and flong init's protocol follows everything:
+typed options, and flong init's protocol follows everything:
 
 ```
 bwrap --userns <U1> --userns2 <U2> [--assert-userns-disabled]
@@ -2057,23 +2064,28 @@ bwrap --userns <U1> --userns2 <U2> [--assert-userns-disabled]
   --perms 0755 --dir /run/user --perms 0700 --tmpfs /run/user/<UID>
   --perms 1777 --tmpfs /tmp
   --ro-bind /sys /.hostsys                           (the mount helper detaches it)
-  <bwrap-arg ...>
+  --perms 0644 --ro-bind-data <memfd> /etc/resolv.conf  (resolv_conf only)
+  --clearenv --setenv VAR VALUE ...                  (env)
+  --hostname NAME                                    (hostname)
   -- flong init <gate-fd> <ready-fd> <groups> <ctty|-> <trace|-> <dir> -- <COMMAND...>
 ```
 
 ### The launch, in order
 
 Steps 6 to 18 are numbered so in `run`'s comments in `src/launch.zig`;
-`main`'s comments number its own statements and name steps 3 to 5 where
-they are made. The call is what that step calls.
+`launch`'s comments number its own statements and name steps 3 to 5 where
+they are made. Before step 1, SIGCHLD goes to its default and the
+prologue does the wrapper's work, building the spec (`assemble.run`; see
+[Launch sequence](#launch-sequence)). The call is what that step calls.
 
 | # | step | call | trace stage |
 |---|---|---|---|
-| 1 | block signals, ignore SIGPIPE, SIGCHLD to its default | `sig.block`, `sig.ignorePipe`, `sig.defaultChld` | `launcher-start` |
-| 2 | parse; refuse uid 0; adopt the `keep-fd`s; then the signalfd, so its number is never one a `keep-fd` names | `spec.parse`, `fd.adoptInherited`, `sig.openSignalfd` | |
+| 0 | SIGCHLD to its default; the prologue, which builds the spec | `sig.defaultChld`, `assemble.run` | `prologue-start` |
+| 1 | block signals, ignore SIGPIPE | `sig.block`, `sig.ignorePipe` | |
+| 2 | the spec's checks, refusing uid 0 first; then the signalfd | `spec.validate`, `sig.openSignalfd` | `launcher-start` |
 | 3 | open and check the state directory | `prologue.stateOpen` (`record.stateOpen`) | |
-| 4 | lock the cache shared; swept: exec `relaunch`, or exit 75 | `prologue.cacheLock`, `prologue.relaunch` | `cache-locked` |
-| 5 | close inherited descriptors except `keep-fd`s and our own | `prologue.closeUntracked` | |
+| 4 | lock the cache shared; swept: exec flong again with the launch's argv | `prologue.cacheLock`, `prologue.relaunchSwept` | `cache-locked` |
+| 5 | close the prologue's own shared lock on a cold cache, then every inherited descriptor but our own | `prologue.closeUntracked` | |
 | 6 | wait for the foreground, choose relay or passthrough, open the pty | `tty.prepare` | |
 | 7 | nsdelegate; find or start the holder | `cgroup.checkNsdelegate`, `cgroup.holderFind` | |
 | 8 | the inline sweep | `record.sweep` | `swept` |
@@ -2109,8 +2121,9 @@ to the teardown, and the gate is never written.
 | status | when |
 |---|---|
 | the payload's | the gate opened: bwrap's status, which is pid 1's, which is tini's, which is the payload's; 128+n when a signal killed it |
-| 125 | the payload never ran: a refusal, a failed step, a failing hook, pasta failing (a host port in use), bwrap failing, flong init's gate EOF. stderr says which |
-| 75 | the cache was swept before it was locked, and there is no `relaunch` |
+| 125 | the payload never ran: a refusal of the spec, a failed step, a failing hook, pasta failing (a host port in use), bwrap failing, flong init's gate EOF, a relaunch that could not exec. stderr says which |
+| 1 | the prologue refused, before the spec: the declaration, the caller, the workspace, a command, the maps, the prepared root |
+| 2 | a usage error, or a name with no declaration |
 | 128+n | a terminating signal n reached the launcher before the gate: the launch was aborted and torn down |
 
 After the gate a signal is forwarded, not acted on, so the payload's status
@@ -2119,8 +2132,12 @@ tells what happened: `^C` is 130 under a pty and in a pipeline, `^]^]^]` is
 collides with a payload's own 125, as it does for `env` and `chroot`. The
 prologue's own refusals, the wrapper's before it, exit 1 under the
 declaration's name (`agent: ...`), and so does a declaration file that
-cannot be read or that `flong check` refuses; a name no directory has a
-declaration for is 2, `flong: no declaration "NAME" (looked for ...)`.
+cannot be read or that `flong check` refuses, under `flong launch`; a name
+no directory has a declaration for is 2, `flong: no declaration "NAME"
+(looked for ...)`, as is `usage: flong launch DECL.zon|NAME [-- ARGS...]`.
+A cache swept before it was locked is no status: flong runs itself again.
+Until S3 the argv spec's launch exited 75 when it had no `relaunch` to
+run.
 
 ### Layouts on disk
 

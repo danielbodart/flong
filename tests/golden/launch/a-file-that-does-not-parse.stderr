@@ -1,0 +1,2 @@
+flong launch: @GOLDEN@/decl/an-unknown-field.zon:12:6: unexpected field 'post_start'
+flong launch: @GOLDEN@/decl/an-unknown-field.zon:12:6: note: supported: 'user', 'command', 'workspace', 'binds', 'guard', 'postStart', 'postStop', 'network', 'overlays', 'masks', 'protect', 'limits', 'seccomp', 'seccompPolicy', 'container', 'closure', 'cuid', 'cgid', 'steps8', 'containerMounts', 'name', 'payload', 'seccompTierFilter', 'seccompFixedFilters', 'seccompProject', 'commandPath', 'postStartProgram', 'postStopProgram'

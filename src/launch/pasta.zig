@@ -14,11 +14,11 @@
 //! session. The launcher never signals pasta by pid; cgroup.kill ends it
 //! (:624-630).
 //!
-//! argv is fixed but for the spec's pasta-arg words, appended verbatim:
-//! module.nix's ports (-t, -u, -T, -U, --host-lo-to-ns-lo) and
-//! --no-map-gw, and the wrapper's --dns-forward per nameserver
-//! (rootless-wrapper.bash:429), whose resolv.conf goes to bwrap by a
-//! keep-fd; pasta keeps no descriptor, that one included. pasta-wait
+//! argv is fixed but for the spec's pasta_args, appended verbatim: the
+//! ports (-t, -u, -T, -U, --host-lo-to-ns-lo) and --no-map-gw, and a
+//! --dns-forward per nameserver family (launch/assemble.zig,
+//! launch/resolv.zig), whose resolv.conf goes to bwrap in a memfd; pasta
+//! keeps no descriptor, that one included. pasta-wait
 //! changes nothing here: it is teardown's (flong-launch.c:816-825).
 //!
 //! Quirk 4, kept: --netns names the session's network namespace by the

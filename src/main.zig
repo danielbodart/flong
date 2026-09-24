@@ -19,9 +19,7 @@
 //! basename that is neither a subcommand nor "flong" is a declaration's
 //! name (STANDALONE.md, "The declaration's command"): the link runs what
 //! `flong launch NAME -- ARGS` does, NAME.zon from the directories
-//! launch/lookup.zig names, /etc/flong first. `flong launch` also takes the
-//! argv spec, keywords then "--" and a command, until the wrapper that
-//! builds one is deleted (STANDALONE.md, S3).
+//! launch/lookup.zig names, /etc/flong first.
 //!
 //! Dispatch reads the kernel's argv and environ and nothing else. It makes
 //! no syscall, so the first the process makes after execve is its

@@ -89,7 +89,8 @@ pub const Word = union(enum) {
     }
 
     /// The number the spec read in it: decimal digits, a leading 0 read as
-    /// one (spec.zig's `number`), so a start of 0100000 is 100000 here where
+    /// one (as the argv spec's parse read it, and assemble.zig's idmaps
+    /// now), so a start of 0100000 is 100000 here where
     /// fl_map's arithmetic read 32768. Null for a negative value, which the
     /// spec refused as not a decimal number; maxInt(u64) for one past it,
     /// past every id the spec accepts.

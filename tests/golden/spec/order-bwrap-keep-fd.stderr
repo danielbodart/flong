@@ -1,1 +1,0 @@
-flong launch: spec: bwrap-arg --ro-bind-data names descriptor 10, which is no keep-fd

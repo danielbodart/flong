@@ -1,1 +1,0 @@
-flong launch: spec: post-stop is not under /nix/store/: '/bin/sh'

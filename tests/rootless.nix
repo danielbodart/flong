@@ -628,19 +628,22 @@ in
         machine.fail("grep -qx payload-ran /tmp/out-patient")
         machine.fail("test -e /tmp/rc-patient")
 
-    @test("a caller of uid 0 is refused, by the wrapper and by the launcher")
+    @test("a caller of uid 0 is refused, by the declaration's link and by flong launch")
     def _():
         # The driver's shell stops at the first failing command, so each
         # status is echoed from the same list.
         out = machine.succeed("cd /srv/work && plain true 2>&1 && echo rc=0 || echo rc=$?")
         assert "refusing to run as root" in out and out.split()[-1] == "rc=1", out
-        # The launcher and the sweeper refuse root themselves, before
-        # reading anything else, for a caller who runs them directly. plain
-        # is a link to flong.
+        # flong launch refuses root itself, for a caller who runs it
+        # directly with a declaration, by its name or its file: the
+        # prologue's first step, under the declaration's name. The sweeper
+        # refuses root before reading anything else. plain is a link to
+        # flong.
         flong = machine.succeed("readlink -f \"$(command -v plain)\"").strip()
         assert flong.endswith("/bin/flong"), flong
-        out = machine.succeed(f"{flong} launch -- true 2>&1 && echo rc=0 || echo rc=$?")
-        assert "refusing to run as root" in out and out.split()[-1] == "rc=125", out
+        for decl in ("plain", "/etc/flong/plain.zon"):
+            out = machine.succeed(f"cd /srv/work && {flong} launch {decl} -- true 2>&1 && echo rc=0 || echo rc=$?")
+            assert out.startswith("plain: refusing to run as root") and out.split()[-1] == "rc=1", (decl, out)
         out = machine.succeed(f"{flong} sweeper /tmp 2>&1 && echo rc=0 || echo rc=$?")
         assert "refusing to run as root" in out and out.split()[-1] == "rc=125", out
         machine.fail("test -e /run/user/0/flong")
@@ -662,7 +665,7 @@ in
     @test("the caller's RLIMIT_STACK reaches the payload unchanged")
     def _():
         # Quirk 20 (DESIGN.md, "Kept behaviour"): nothing between the caller and the payload (the
-        # wrapper, flong launch, bwrap, flong init, tini) sets it.
+        # declaration's link, flong launch, bwrap, flong init, tini) sets it.
         out = machine.succeed(as_user("ulimit -s 4096; plain 'ulimit -s'"))
         assert out == "4096\n", out
         # The soft limit alone, the hard one left as it was: a program that

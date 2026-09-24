@@ -610,8 +610,9 @@ pub fn build(b: *std.Build) void {
     //
     //   test           (-Ddev=true) spec.zig's and launch.zig's own tests,
     //                  and tests/zig/spec_test.zig: bwrapArgv's golden argv
-    //                  per branch, the model property, each single-rule
-    //                  mutation; ns.zig's and passwd.zig's own tests,
+    //                  per branch, spec.validate's refusal of each field
+    //                  over a value, and a valid spec with every field set
+    //                  passing; ns.zig's and passwd.zig's own tests,
     //                  cgroup.zig's and record.zig's in the launch's graph
     //                  (`Launcher.launchModules`, whose cgroup imports proc
     //                  and passwd); src/launch/childpid.zig's own tests and
@@ -619,7 +620,8 @@ pub fn build(b: *std.Build) void {
     //                  chunking, the 4095-byte bound, each refusal, the fuzz
     //                  and its corpus, tests/zig/corpus/launch-childpid/);
     //                  tests/zig/prologue_test.zig, against the spawn probe
-    //                  (flong-proc) for relaunch's exec;
+    //                  (flong-proc), reached through flong-fake-cmd, for
+    //                  relaunchSwept's exec;
     //                  tests/zig/bwrap_test.zig (bwrap.spawn against
     //                  flong-fake-bwrap, tests/zig/fakebwrap.zig: its argv
     //                  per branch, what it holds, checkpoint 2's list;
@@ -698,6 +700,7 @@ pub fn build(b: *std.Build) void {
                 const m = l.m;
                 const opts = b.addOptions();
                 opts.addOptionPath("driver", procDriver(b, target, optimize).getEmittedBin());
+                opts.addOptionPath("fake_cmd", Launcher.fakeCmd(b, target, optimize).getEmittedBin());
                 const t = b.addTest(.{
                     .name = "prologue_test",
                     .root_module = b.createModule(.{
@@ -730,15 +733,13 @@ pub fn build(b: *std.Build) void {
                 });
                 test_step.dependOn(&b.addRunArtifact(t).step);
             }
-            // flong launch DECL.zon's prologue, the declaration's lookup and
-            // the transition's renderer, each module's own tests, in the
-            // launch's graph.
+            // flong launch DECL.zon's prologue and the declaration's
+            // lookup, each module's own tests, in the launch's graph.
             {
                 const sc = Launcher.subcommands(b, target, optimize, false, LaunchPaths.dummy("/nix/store/test-only"));
                 for ([_]struct { []const u8, *std.Build.Module }{
                     .{ "launch_assemble", sc.assemble },
                     .{ "launch_lookup", sc.lookup },
-                    .{ "launch_argv_render", sc.argv_render },
                 }) |x| {
                     const t = b.addTest(.{ .name = x[0], .root_module = x[1] });
                     test_step.dependOn(&b.addRunArtifact(t).step);
@@ -853,6 +854,9 @@ pub fn build(b: *std.Build) void {
                     const m = modules(b, target, optimize);
                     const opts = b.addOptions();
                     opts.addOption([]const u8, "store", dir);
+                    // A file in that store path, which a closure cannot
+                    // lead through: the zig itself.
+                    opts.addOption([]const u8, "store_file", std.fs.realpathAlloc(b.allocator, b.graph.zig_exe) catch @panic("realpath of the zig: storeDir read it"));
                     const t = b.addTest(.{
                         .name = "spec_test",
                         .root_module = b.createModule(.{
@@ -1081,10 +1085,8 @@ const Launcher = struct {
         check: *std.Build.Module,
         /// launch/lookup.zig, which the root's `flong list` shares
         lookup: *std.Build.Module,
-        /// launch/assemble.zig and, transition only, launch/argv_render.zig,
-        /// each a test's root too
+        /// launch/assemble.zig, a test's root too
         assemble: *std.Build.Module,
-        argv_render: *std.Build.Module,
     };
 
     fn subcommands(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, strip: bool, lp: LaunchPaths) Subcommands {
@@ -1101,7 +1103,6 @@ const Launcher = struct {
         const chk = checkModule(bb, m, l.spec, d, t, o);
         const lookup = lookupModule(bb, m, w, t, o);
         const assemble = assembleModule(bb, l, w, d, chk, t, o);
-        const argv_render = argvRenderModule(bb, m, l.spec, t, o);
         const launch = bb.createModule(.{
             .root_source_file = bb.path("src/launch.zig"),
             .target = t,
@@ -1130,7 +1131,6 @@ const Launcher = struct {
                 .{ .name = "check", .module = chk },
                 .{ .name = "assemble", .module = assemble },
                 .{ .name = "lookup", .module = lookup },
-                .{ .name = "argv_render", .module = argv_render },
             },
         });
         // flong init: sys, msg and tini's path compiled in
@@ -1162,7 +1162,7 @@ const Launcher = struct {
                 .{ .name = "cgroup", .module = l.cgroup },
             },
         });
-        return .{ .l = l, .launch = launch, .init = init, .sweeper = sweeper, .config = config, .d = d, .check = chk, .lookup = lookup, .assemble = assemble, .argv_render = argv_render };
+        return .{ .l = l, .launch = launch, .init = init, .sweeper = sweeper, .config = config, .d = d, .check = chk, .lookup = lookup, .assemble = assemble };
     }
 
     /// src/launch/lookup.zig: where a declaration's name leads, for flong
@@ -1209,20 +1209,6 @@ const Launcher = struct {
                 .{ .name = "depth", .module = w.depth },
                 .{ .name = "hometmp", .module = w.hometmp },
                 .{ .name = "resolv", .module = w.resolv },
-            },
-        });
-    }
-
-    /// src/launch/argv_render.zig, transition only: a spec value as the
-    /// wrapper's argv, for `flong launch --dump-argv`.
-    fn argvRenderModule(bb: *std.Build, m: Modules, spec: *std.Build.Module, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
-        return bb.createModule(.{
-            .root_source_file = bb.path("src/launch/argv_render.zig"),
-            .target = t,
-            .optimize = o,
-            .imports = &.{
-                .{ .name = "spec", .module = spec },
-                .{ .name = "mount", .module = m.mount },
             },
         });
     }
@@ -1499,8 +1485,9 @@ const Launcher = struct {
     }
 
     /// flong-fake-cmd (tests/zig/fakecmd.zig): a declaration's command
-    /// and the cache tool's stand-in for wrapper_test, over the launch's
-    /// modules for prologue.relaunchSelf. Static, no libc, stripped.
+    /// and the cache tool's stand-in for wrapper_test, and the swept
+    /// launch's relaunch for prologue_test, over the launch's modules for
+    /// prologue.relaunchSelf and relaunchSwept. Static, no libc, stripped.
     fn fakeCmd(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Step.Compile {
         const l = launchModules(bb, t, o);
         const exe = bb.addExecutable(.{
@@ -1511,7 +1498,11 @@ const Launcher = struct {
                 .optimize = o,
                 .strip = true,
                 .single_threaded = true,
-                .imports = &.{.{ .name = "prologue", .module = prologueModule(bb, l, t, o) }},
+                .imports = &.{
+                    .{ .name = "msg", .module = l.m.msg },
+                    .{ .name = "sig", .module = l.m.sig },
+                    .{ .name = "prologue", .module = prologueModule(bb, l, t, o) },
+                },
             }),
         });
         exe.stack_size = 0;

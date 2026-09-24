@@ -1,11 +1,11 @@
 //! launch/prologue.zig: the pieces of flong launch's prologue, ordering
 //! checkpoint 1 (DESIGN.md; launcher/flong-launch.c:847-925 of 5f1f08e), but
 //! not the prologue itself: the relaunch of a swept launch (quirk 2), the
-//! cache's shared lock, the close of what the wrapper left open, and the
-//! protected paths made canonical (quirk 21). launch.zig's main calls them
-//! in the C's order, one linear function; none of them decides that order.
-//! `flong launch DECL.zon`'s own prologue, which stands in for the wrapper
-//! ahead of checkpoint 1 (STANDALONE.md, S3), shares three things here:
+//! cache's shared lock, the close of what the launch inherited, and the
+//! protected paths made canonical (quirk 21). launch.zig's `launch` calls
+//! them in the C's order, one linear function; none of them decides that
+//! order. The part of the prologue that does rootless-wrapper.bash's work
+//! (launch/assemble.zig, STANDALONE.md, S3) shares three things here:
 //! exit_refused, relaunchSelf (the wrapper's `exec "$self"`) and
 //! kernelName (quirk 21's readlink, which launch/workspace.zig's canon
 //! uses).
@@ -38,9 +38,6 @@ const path_max = sys.path_max;
 
 /// A launch that did not reach its payload (flong-launch.c:43-45).
 pub const exit_not_run = 125;
-/// A launch whose cache was swept, with no relaunch to run
-/// (flong-launch.c:43-45; DESIGN.md, "Exit codes").
-pub const exit_swept = 75;
 /// A refusal of `flong launch DECL.zon`'s own prologue, the part that
 /// stands in for rootless-wrapper.bash (STANDALONE.md, S3): the wrapper's
 /// die (:41-44) printed "$name: <text>" and exited 1, and its callers
@@ -118,39 +115,19 @@ fn stillNamed(cfd: fdt.Dir, cache: [:0]const u8) sig.Error!bool {
     }
 }
 
-/// relaunch (flong-launch.c:156-175): the answer to a swept cache. Each turn
-/// follows a sweep's rename, an event, so there is no count. With no
-/// relaunch argv it says so and returns 75. Otherwise it says it is
-/// relaunching and execs `argv` (the wrapper, run again, prepares afresh or
-/// waits for the preparer's lock) with `envp`, having put back SIGPIPE's
-/// default and `old_mask`, which survive exec (quirk 2, kept: before
-/// closeUntracked, so the wrapper's inherited descriptors reach it; the
-/// launcher's own are close-on-exec). The path is not checked absolute:
-/// the launcher has not changed directory, and the wrapper's $0 may be
-/// relative (quirk 30). It returns only when the exec failed, having said
-/// why: 125. The argv vector is built in `gpa`; if that fails the exec is
-/// said to fail with ENOMEM, where the C had no allocation to fail.
-pub fn relaunch(
-    gpa: Allocator,
-    cache: []const u8,
-    argv: []const [:0]const u8,
-    old_mask: u64,
-    envp: [*:null]const ?[*:0]const u8,
-) u8 {
-    if (argv.len == 0) {
-        msg.say("the cache {s} was swept before this launch locked it", .{cache});
-        return exit_swept;
-    }
-    msg.say("the cache {s} was swept before this launch locked it; relaunching", .{cache});
-    execArgv(gpa, argv[0], argv, old_mask, envp);
-    return exit_not_run;
-}
-
-/// relaunch for a launch from a declaration, which has no relaunch argv:
-/// says it is relaunching, as `relaunch` does, and execs this binary again
-/// with the process's own `argv` (relaunchSelf), with `envp` and
-/// `old_mask` back. It returns only when the exec failed, having said
-/// why: 125.
+/// relaunch (flong-launch.c:156-175): the answer to a swept cache, at the
+/// cache lock of checkpoint 1. Each turn follows a sweep's rename, an
+/// event, so there is no count. It says it is relaunching and execs this
+/// binary again with the process's own `argv` (relaunchSelf: a
+/// declaration, run again, prepares afresh or waits for the preparer's
+/// lock), with `envp`, having put back SIGPIPE's default and `old_mask`,
+/// which survive exec (quirk 2, kept: before closeUntracked, so what the
+/// launch inherited reaches it; the launcher's own descriptors are
+/// close-on-exec). argv[0] is not made absolute: the launcher has not
+/// changed directory (quirk 30). It returns only when the exec failed,
+/// having said why: 125. Until S3 the argv spec named a `relaunch`, the
+/// wrapper's own command line, and exited 75 without one; flong itself is
+/// what runs again now, so there is always one.
 pub fn relaunchSwept(
     gpa: Allocator,
     cache: []const u8,
@@ -173,7 +150,7 @@ pub fn relaunchSwept(
 /// untouched, so a declaration's symlink name is looked up again
 /// (STANDALONE.md, "The declaration's command"), and with `envp`, the
 /// environment it started with. SIGPIPE's default is put back, and the
-/// mask `old_mask` when there is one, as relaunch does (quirk 2). It
+/// mask `old_mask` when there is one, as relaunchSwept does (quirk 2). It
 /// returns only when it could not exec, having said why: error.Reported,
 /// which the prologue exits 1 with, as the wrapper's failed exec ended it.
 pub fn relaunchSelf(
@@ -216,12 +193,12 @@ fn execArgv(
     msg.sayErrno(sys.execve(path, v.ptr, envp), "exec {s}", .{path});
 }
 
-// ---- step 5: what the wrapper held (flong-launch.c:909-925) ----
+// ---- step 5: what the launch inherited (flong-launch.c:909-925) ----
 
 /// Closes every descriptor from 3 up that the table does not hold
 /// (fd.closeUntracked): at this step the table is flong-launch.c:910-914's
-/// keep list, the keep-fds (adopted), the signalfd, the state and sessions
-/// directories and the cache, so whatever else the wrapper held goes.
+/// keep list without its keep-fds, the signalfd, the state and sessions
+/// directories and the cache, so whatever else the caller left open goes.
 /// Failure: "close_range <low>: <strerror>" (flong-util.c:160).
 pub fn closeUntracked() msg.Error!void {
     if (fdt.closeUntracked()) |f| return msg.fail(f.err, "close_range {d}", .{f.low});

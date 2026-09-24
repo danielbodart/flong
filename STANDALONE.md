@@ -284,11 +284,16 @@ e717355), on trunk only:
     `tests/transition.nix`. `path` reaches the caller's commands as the
     declaration's computed `commandPath`, and the hooks through
     module.nix's hook programs, `postStartProgram` and `postStopProgram`,
-    which stay until the sweeper can put `path` on `PATH` itself. The
-    deletion commit takes the wrapper, `transitionWrapper`,
+    which stay until the sweeper can put `path` on `PATH` itself.
+  - Then landed, the deletion: the wrapper, `transitionWrapper`,
     `argv_render.zig`, `--dump-argv`, `tests/transition.nix`, the argv
     spec (parse, its keywords, `bwrap_args`, `keep_fds`, `relaunch`, and
     `launch.zig`'s guess between the two) and the spec's golden cases.
+    Each refusal those cases pinned that a value can still reach is a case
+    of `tests/zig/spec_test.zig` over `spec.validate`, under its old name,
+    or of `launch/assemble.zig`'s own tests; `flong launch`'s entry has a
+    golden set of its own, `tests/golden/launch/`. With no `relaunch` to
+    lack, exit 75 went: a swept cache always relaunches flong.
 - **S4, the reference.** `flong help`, `flong help decl`, and a generated
   reference page for the declaration, from the same walk as
   `decl-options.json`.
