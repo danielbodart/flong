@@ -16,6 +16,10 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           native = import ./native.nix { inherit pkgs; };
+          vmTestPart = file: part: pkgs.testers.runNixOSTest {
+            imports = [ file ];
+            inherit part;
+          };
         in
         # The Zig package's own checks (native.nix): native-test-debug and
         # native-test-release (unit, property and test-libc), native-lint (fdlint,
@@ -24,16 +28,16 @@
         native.checks //
         {
           # Every option that changes what a session sees, launched by a
-          # lingering user with no sudo.
-          basic = pkgs.testers.runNixOSTest {
-            imports = [ ./tests/basic.nix ];
-          };
+          # lingering user with no sudo: tests/basic.nix, in two parts, each
+          # its own VM with about half the subtests (tests/parts.nix).
+          basic-a = vmTestPart ./tests/basic.nix "a";
+          basic-b = vmTestPart ./tests/basic.nix "b";
 
           # The engine itself: identity, the gate, mounts, the lifecycle,
-          # seccomp and the terminal, launched by a lingering user with no sudo.
-          rootless = pkgs.testers.runNixOSTest {
-            imports = [ ./tests/rootless.nix ];
-          };
+          # seccomp and the terminal, launched by a lingering user with no
+          # sudo: tests/rootless.nix, in two parts as basic's are.
+          rootless-a = vmTestPart ./tests/rootless.nix "a";
+          rootless-b = vmTestPart ./tests/rootless.nix "b";
 
           # The seccomp stacks of two tiers, live in one VM: the filters
           # dumped and matched with the build's, and a syscall probe.

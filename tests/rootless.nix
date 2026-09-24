@@ -15,9 +15,21 @@
 # pair of one-file probes. No assertion depends on speed: the one hook that
 # sleeps does so to outlast the start timeout alice's manager gives a unit,
 # lowered to 10 s on this node, and the subtests after it run while it does.
-{ lib, ... }:
+#
+# In two parts, rootless-a and rootless-b (flake.nix), each its own VM with
+# about half the subtests (tests/parts.nix). A subtest that names no part is
+# in part a.
+{ config, lib, ... }:
 
 let
+  # The node's own `config` hides the test's below.
+  inherit (config) part;
+  parts = import ./parts.nix { inherit part; default = "a"; };
+
+  # The part whose last subtest switches to specialisation.changed, and so
+  # the part whose node has it.
+  switchPart = "b";
+
   # One closure for every container: a container's closure depends on its
   # `config` alone, and the mounts are the container's other options.
   # strace is the payload that ptrace separates the tiers by; the probes
@@ -130,7 +142,9 @@ let
   '';
 in
 {
-  name = "flong-rootless";
+  imports = [ parts.module ];
+
+  name = "flong-rootless" + lib.optionalString (part != "all") "-${part}";
 
   nodes.machine = { config, pkgs, ... }: {
     imports = [ ../module.nix ];
@@ -217,9 +231,12 @@ in
     ];
 
     # One switch, to a system whose holder unit differs, with sessions
-    # running.
-    specialisation.changed.configuration = {
-      systemd.user.services.flong-sessions.environment.FLONG_TEST_GENERATION = "changed";
+    # running. Only in the part that switches: evaluating it evaluates the
+    # node again.
+    specialisation = lib.mkIf (lib.elem part [ switchPart "all" ]) {
+      changed.configuration = {
+        systemd.user.services.flong-sessions.environment.FLONG_TEST_GENERATION = "changed";
+      };
     };
 
     # What hostPorts reaches: a banner on the host's loopback, so that a
@@ -504,8 +521,15 @@ in
     import shlex
     import time
 
+    ${parts.prelude}
+
     CG = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/flong-sessions.service"
     STATE = "/run/user/1000/flong"
+
+    # Set by a subtest for later ones in its part: the cache key, and the
+    # policy a logging filter learned.
+    KEY = ""
+    learned_policy = ""
 
     # A command as USER, through her own user manager, with an explicit PATH
     # and the workspace as the current directory. `sudo` is nowhere in it.
@@ -556,7 +580,10 @@ in
     machine.wait_for_unit("user@1001.service")
     machine.wait_for_unit("host-listener.service")
 
-    with subtest("a lingering user launches with no sudo, cold then warm"):
+    @test("a lingering user launches with no sudo, cold then warm")
+    def _():
+        # For "a superseded cache a live session uses is kept", in this part.
+        global KEY
         machine.fail("test -e /run/wrappers/bin/sudo")
         out = machine.succeed(as_user("plain 'id -u; id -G; echo ok'"))
         assert out.split() == ["1000", "100", "ok"], out
@@ -576,7 +603,8 @@ in
         assert again == out, again
         assert machine.succeed(f"stat -c %Y {prepared}") == mtime
 
-    with subtest("no timeouts: a postStart that sleeps 15 s holds the gate"):
+    @test("no timeouts: a postStart that sleeps 15 s holds the gate")
+    def _():
         # It sleeps while the subtests below run, and is checked at the end.
         start("FLONG_TEST_HOOK=sleep patient", "echo payload-ran", "patient")
         # The control, beside it: a unit of alice's whose start takes as
@@ -589,7 +617,8 @@ in
         machine.fail("grep -qx payload-ran /tmp/out-patient")
         machine.fail("test -e /tmp/rc-patient")
 
-    with subtest("a caller of uid 0 is refused, by the wrapper and by the launcher"):
+    @test("a caller of uid 0 is refused, by the wrapper and by the launcher")
+    def _():
         # The driver's shell stops at the first failing command, so each
         # status is echoed from the same list.
         out = machine.succeed("cd /srv/work && plain true 2>&1 && echo rc=0 || echo rc=$?")
@@ -604,7 +633,8 @@ in
         assert "refusing to run as root" in out and out.split()[-1] == "rc=125", out
         machine.fail("test -e /run/user/0/flong")
 
-    with subtest("the payload gets none of the caller's environment"):
+    @test("the payload gets none of the caller's environment")
+    def _():
         out = machine.succeed(as_user(
             "FLONG_SENTINEL=x FLONG_TRACE=1 plain "
             "'env | cut -d= -f1; echo \"xdg=$XDG_RUNTIME_DIR\"' 2>&1"))
@@ -617,7 +647,8 @@ in
         assert "xdg=/run/user/1000" in names, out
         assert "launcher-start" in out, out
 
-    with subtest("the caller's RLIMIT_STACK reaches the payload unchanged"):
+    @test("the caller's RLIMIT_STACK reaches the payload unchanged")
+    def _():
         # ZIG.md quirk 20: nothing between the caller and the payload (the
         # wrapper, flong-launch, bwrap, flong-init, tini) sets it.
         out = machine.succeed(as_user("ulimit -s 4096; plain 'ulimit -s'"))
@@ -635,7 +666,8 @@ in
         out = machine.succeed(as_user("ulimit -s 6144; plain 'ulimit -s'"))
         assert out == "6144\n", out
 
-    with subtest("a hook without a network"):
+    @test("a hook without a network")
+    def _():
         machine.succeed("rm -f /tmp/poststart-* /tmp/poststop-*")
         out = machine.succeed(as_user("hooked 'tail -n +2 /proc/net/route | wc -l'"))
         assert out.strip() == "0", out
@@ -648,7 +680,8 @@ in
         # The hook's daemon went with the session on a clean exit.
         daemon_gone(name)
 
-    with subtest("a hook with a network"):
+    @test("a hook with a network")
+    def _():
         machine.succeed("rm -f /tmp/poststart-* /tmp/poststop-*")
         out = machine.succeed(as_user(
             "nethook 'exec 3<>/dev/tcp/127.0.0.1/18123 && read -r banner <&3 && echo \"$banner\"; "
@@ -660,7 +693,8 @@ in
         _, _, hook_routes = machine.succeed("cat /tmp/poststart-box-*").split()
         assert hook_routes == "0", hook_routes
 
-    with subtest("no process of a session, its hook or its pasta has host uid 0"):
+    @test("no process of a session, its hook or its pasta has host uid 0")
+    def _():
         start("nethook", "sleep infinity", "nethook")
         name = machine.wait_until_succeeds("session-of box").strip()
         leaves = machine.succeed("no-host-root")
@@ -678,7 +712,8 @@ in
         # The hook's daemon went with the session on SIGTERM.
         daemon_gone(name)
 
-    with subtest("limits are written into the session's cgroup"):
+    @test("limits are written into the session's cgroup")
+    def _():
         start("limited", "sleep infinity", "limited")
         name = machine.wait_until_succeeds("session-of box").strip()
         leaf = f"{CG}/box/{name}/sandbox"
@@ -692,11 +727,13 @@ in
         assert sorted(enabled) == ["cpu", "memory", "pids"], enabled
         stop(name, "limited")
 
-    with subtest("a caller without a subordinate id range is refused"):
+    @test("a caller without a subordinate id range is refused")
+    def _():
         out = machine.succeed(as_user("plain true 2>&1; echo rc=$?", user="carol"))
         assert "subUidRanges" in out and out.split()[-1] == "rc=1", out
 
-    with subtest("the sweeper releases a session whose launcher was SIGKILLed"):
+    @test("the sweeper releases a session whose launcher was SIGKILLed")
+    def _():
         machine.succeed("rm -f /tmp/poststart-* /tmp/poststop-*")
         start("hooked", "sleep infinity", "sweep")
         name = machine.wait_until_succeeds("session-of box").strip()
@@ -709,7 +746,8 @@ in
         daemon_gone(name)
         assert machine.succeed(f"cat /tmp/poststop-{name}").split() == [name]
 
-    with subtest("the gate: a failing hook, or a launcher killed in its hook, and the payload never runs"):
+    @test("the gate: a failing hook, or a launcher killed in its hook, and the payload never runs")
+    def _():
         out = machine.succeed(as_user("FLONG_TEST_HOOK=fail hooked 'echo payload-ran' 2>&1; echo rc=$?"))
         assert "the hook fails" in out and "postStart failed" in out, out
         # The status ends the output, but was not always on a line of its
@@ -737,7 +775,8 @@ in
         machine.wait_until_succeeds(f"test ! -e /proc/{hook_sleep}")
         machine.wait_until_succeeds(f"test -s /tmp/poststop-{name}")
 
-    with subtest("the hook runs as the caller, and the payload cannot undo it"):
+    @test("the hook runs as the caller, and the payload cannot undo it")
+    def _():
         for launcher in ("fenced", "fencednested"):
             start(launcher, "fence-probe; sleep infinity", launcher)
             machine.wait_until_succeeds(f"grep -q probe-done /tmp/out-{launcher}")
@@ -765,7 +804,8 @@ in
             machine.succeed(f"test ! -e {leaf}/out")
             stop(name, launcher)
 
-    with subtest("ten concurrent cold launches, whose ten sweeps run a dead session's postStop once"):
+    @test("ten concurrent cold launches, whose ten sweeps run a dead session's postStop once")
+    def _():
         machine.succeed("rm -f /tmp/poststop-* /tmp/daemon-*")
         start("hooked", "sleep infinity", "dead")
         name = machine.wait_until_succeeds("session-of box").strip()
@@ -796,7 +836,8 @@ in
         machine.succeed(as_user("plain true"))
         assert machine.succeed(f"cat /tmp/poststop-{name}").split() == [name]
 
-    with subtest("a superseded cache a live session uses is kept"):
+    @test("a superseded cache a live session uses is kept")
+    def _():
         start("plain", "sleep infinity", "live")
         name = machine.wait_until_succeeds("session-of box").strip()
         pid = payload_pid(name)
@@ -815,7 +856,8 @@ in
         machine.succeed(as_user("plain true"))
         machine.succeed(f"test ! -e {old}")
 
-    with subtest("no user manager: refused loudly, or a delegated system unit"):
+    @test("no user manager: refused loudly, or a delegated system unit")
+    def _():
         # No runtime directory at all.
         out = machine.succeed(as_dave("plain true 2>&1; echo rc=$?"))
         assert "users.users.dave.linger = true" in out and out.split()[-1] == "rc=1", out
@@ -830,7 +872,8 @@ in
             rt + " -p Delegate=yes -p DelegateSubgroup=launcher"))
         assert out.splitlines() == ["268435456", "64", "50000 100000", "1000"], out
 
-    with subtest("the declaration's mounts"):
+    @test("the declaration's mounts", part="b")
+    def _():
         # Made here rather than by tmpfiles, whose syntax needs a space escaped.
         machine.succeed("mkdir -p '/srv/ro dir' && echo read-only-marker > '/srv/ro dir/marker'")
         out = machine.succeed(as_user("mounts " + shlex.quote(
@@ -866,7 +909,8 @@ in
         out = machine.succeed(as_user("FLONG_TEST_DENY=1 mounts true 2>&1; echo rc=$?"))
         assert "the guard refuses" in out and out.split()[-1] == "rc=1", out
 
-    with subtest("a mask one level below a writable bind holds against a rename"):
+    @test("a mask one level below a writable bind holds against a rename", part="b")
+    def _():
         out = machine.succeed(as_user("mounts " + shlex.quote(
             "mv /rw/secret /rw/secret.real 2>/dev/null && echo moved || echo move-refused; "
             "rm -f /rw/secret 2>/dev/null && echo removed || echo remove-refused; "
@@ -876,7 +920,8 @@ in
         assert out.split() == ["move-refused", "remove-refused", "write-refused", "masked", "no-real"], out
         machine.succeed("grep -qx should-be-masked /srv/rw/secret")
 
-    with subtest("a bind that reaches flong's state or a protected path is refused"):
+    @test("a bind that reaches flong's state or a protected path is refused", part="b")
+    def _():
         for path in ("/run/user/1000", "/run/user/1000/flong", "/srv/protected", "/srv"):
             out = machine.succeed(as_user(f"FLONG_TEST_BIND={path} mounts true 2>&1; echo rc=$?"))
             assert "which no session may reach" in out and out.split()[-1] == "rc=125", (path, out)
@@ -884,12 +929,14 @@ in
         out = machine.succeed(as_user("cd /run/user/1000 && plain true 2>&1; echo rc=$?"))
         assert "which no session may reach" in out and out.split()[-1] == "rc=125", out
 
-    with subtest("a symlink in the prepared root ends the launch, and makes nothing on the host"):
+    @test("a symlink in the prepared root ends the launch, and makes nothing on the host", part="b")
+    def _():
         out = machine.succeed(as_user("esc true 2>&1; echo rc=$?"))
         assert "a symlink is on the way" in out and out.split()[-1] == "rc=125", out
         machine.succeed("test -z \"$(ls -A /srv/race/view)\"")
 
-    with subtest("the mount helper's refusals: a destination twice, a directory for a file, a file on the way"):
+    @test("the mount helper's refusals: a destination twice, a directory for a file, a file on the way", part="b")
+    def _():
         # What the wrapper and module.nix's assertions keep a declaration
         # from asking (rootless-wrapper.bash:100-116, 138-178; module.nix:685),
         # so a copy of plain's wrapper hands the launcher one more mount
@@ -938,7 +985,8 @@ in
         machine.succeed("test -z \"$(ls -A /srv/work/adir)\" && test \"$(cat /srv/work/afile)\" = file")
         machine.succeed("rm -r /srv/work/adir /srv/work/afile /tmp/plain-mount")
 
-    with subtest("the swap race: nothing escapes the workspace"):
+    @test("the swap race: nothing escapes the workspace", part="b")
+    def _():
         out = machine.succeed(as_user("race-mounts 20"))
         lines = out.splitlines()
         assert lines[-1] == "a=143", out
@@ -956,7 +1004,8 @@ in
         assert fields["Seccomp"].strip() == "2", out
         return int(fields["Seccomp_filters"])
 
-    with subtest("the default tier is strict, and applied"):
+    @test("the default tier is strict, and applied", part="b")
+    def _():
         # The tier, the audit mask, the tty filter and the namespace mask.
         assert filters("plain") == 4
         # ptrace is in parity and not in strict, so it gets the tier's errno.
@@ -967,13 +1016,15 @@ in
         out = machine.succeed(as_user("plain 'unshare -U true 2>&1; echo rc=$?'"))
         assert "Operation not permitted" in out and out.split()[-1] != "rc=0", out
 
-    with subtest("tiers and loosenings differ on ptrace"):
+    @test("tiers and loosenings differ on ptrace", part="b")
+    def _():
         for launcher in ("parity", "debugged"):
             out = machine.succeed(as_user(f"{launcher} 'strace true 2>&1; echo rc=$?'"))
             assert "+++ exited with 0 +++" in out and out.split()[-1] == "rc=0", (launcher, out)
         assert filters("debugged") == 4
 
-    with subtest("nestedSandbox allows a nested user namespace and a mount in it"):
+    @test("nestedSandbox allows a nested user namespace and a mount in it", part="b")
+    def _():
         # No namespace mask.
         assert filters("nested") == 3
         out = machine.succeed(as_user(
@@ -981,7 +1032,8 @@ in
             "unshare -Urm sh -c \"mount -t tmpfs nested /tmp && echo mount-ok\"'"))
         assert out.split() == ["userns-ok", "mount-ok"], out
 
-    with subtest("the tty filter refuses TIOCSTI, also with bit 32 set"):
+    @test("the tty filter refuses TIOCSTI, also with bit 32 set", part="b")
+    def _():
         assert machine.succeed("sysctl -n dev.tty.legacy_tiocsti").strip() == "1"
         for launcher in ("plain", "nested"):
             out = machine.succeed(as_user(
@@ -994,13 +1046,15 @@ in
         out = machine.succeed(as_user("tty-probe"))
         assert out.split() == ["stdin-tty", "EPERM", "EPERM", "ok"], out
 
-    with subtest("^C ends the payload with 130, under a pty and in a pipeline"):
+    @test("^C ends the payload with 130, under a pty and in a pipeline", part="b")
+    def _():
         for mode in ("pty", "pipe"):
             out = machine.succeed(as_user(f"interrupt {mode}"))
             # The terminal echoes the ^C in front of the status.
             assert any(l.endswith("launcher=130") for l in out.splitlines()), (mode, out)
 
-    with subtest("the terminal, relayed: the escape, a resize, the watchdog, SIGCONT, a hang-up, stderr"):
+    @test("the terminal, relayed: the escape, a resize, the watchdog, SIGCONT, a hang-up, stderr", part="b")
+    def _():
         # ZIG.md's L0 tty characterization of the C (launcher/flong-tty.c),
         # through ptydrive (tests/ptydrive.py): plain as the foreground job
         # of a pty of its own, the terminal on stdin and stdout, so the
@@ -1080,7 +1134,10 @@ in
         assert err == "err\n", err
         machine.succeed("rm /tmp/ptydrive-err")
 
-    with subtest("log = true allows and logs, and what it logs is a policy"):
+    @test("log = true allows and logs, and what it logs is a policy", part="b")
+    def _():
+        # For the two subtests of a project's policy, in this part.
+        global learned_policy
         since = machine.succeed("date +%s").strip()
         out = machine.succeed(as_user("learner 'strace true 2>&1; echo rc=$?'"))
         assert "+++ exited with 0 +++" in out and out.split()[-1] == "rc=0", out
@@ -1093,7 +1150,8 @@ in
         assert "ptrace" in learned, learned
         learned_policy = "allow " + " ".join(learned)
 
-    with subtest("a project's policy compiles, is cached, and applies"):
+    @test("a project's policy compiles, is cached, and applies", part="b")
+    def _():
         cache = f"{STATE}/seccomp"
         machine.succeed(f"rm -rf {cache}")
         # A snippet that prints nothing compiles nothing.
@@ -1128,7 +1186,8 @@ in
         assert "the policy snippet fails" in out and out.split()[-1] == "rc=1", out
         assert machine.succeed(f"ls {cache}").split() == cached
 
-    with subtest("a launch with a project policy writes nothing to stderr"):
+    @test("a launch with a project policy writes nothing to stderr", part="b")
+    def _():
         # Cold, compiling the policy, and warm, reusing it: nothing is said on
         # success, the compiler's stats line included (ZIG.md quirk 34).
         cache = f"{STATE}/seccomp"
@@ -1147,7 +1206,9 @@ in
             "FLONG_TEST_POLICY='allow no_such_call' project true 2>&1; echo rc=$?"))
         assert "unknown syscall no_such_call" in out and out.split()[-1] == "rc=1", out
 
-    with subtest("no timeouts: after its 15 s, the hook opens the gate and the payload runs"):
+    # In the part of the subtest that started the hook.
+    @test("no timeouts: after its 15 s, the hook opens the gate and the payload runs", part="a")
+    def _():
         machine.wait_until_succeeds("test -s /tmp/rc-patient")
         assert machine.succeed("cat /tmp/rc-patient").strip() == "0"
         machine.succeed("grep -qx payload-ran /tmp/out-patient")
@@ -1160,7 +1221,9 @@ in
         machine.wait_until_succeeds(
             "systemctl -M alice@ --user show -p Result start-timeout | grep -qx Result=timeout")
 
-    with subtest("switch-to-configuration leaves running sessions alone"):
+    # Last in its part: the node runs the changed system after it.
+    @test("switch-to-configuration leaves running sessions alone", part="${switchPart}")
+    def _():
         start("plain", "sleep infinity", "switch")
         name = machine.wait_until_succeeds("session-of box").strip()
         sweeper = machine.succeed(f"cat {CG}/supervisor/cgroup.procs").strip()
@@ -1169,5 +1232,7 @@ in
         assert machine.succeed(f"cat {CG}/supervisor/cgroup.procs").strip() == sweeper
         assert machine.succeed("session-of box").strip() == name
         stop(name, "switch")
+
+    ${parts.done}
   '';
 }

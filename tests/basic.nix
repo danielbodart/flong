@@ -7,9 +7,16 @@
 #
 # Every launch is made by a lingering alice through her own user manager, on a
 # host with no sudo at all.
-{ lib, ... }:
+#
+# In two parts, basic-a and basic-b (flake.nix), each its own VM with about
+# half the subtests (tests/parts.nix). A subtest that names no part is in
+# part b.
+{ config, lib, ... }:
 
 let
+  inherit (config) part;
+  parts = import ./parts.nix { inherit part; default = "b"; };
+
   # How a hook reaches the session's network namespace. The hook is the
   # caller, and the namespace belongs to the session's user namespace, which
   # it must enter first to hold any capability there.
@@ -24,7 +31,9 @@ let
   holderCgroup = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/flong-sessions.service";
 in
 {
-  name = "flong-basic";
+  imports = [ parts.module ];
+
+  name = "flong-basic" + lib.optionalString (part != "all") "-${part}";
 
   nodes.machine = { pkgs, ... }: {
     imports = [ ../module.nix ];
@@ -672,6 +681,8 @@ in
       import re
       import shlex
 
+      ${parts.prelude}
+
       HOOK_DIR = "${hookDir}"
       STATE = "/run/user/1000/flong"
       CG = "${holderCgroup}"
@@ -752,13 +763,15 @@ in
       NO_SESSION_CGROUPS = f"test -z \"$(find {CG} -mindepth 2 -maxdepth 2 -type d)\""
       PREPARED = f"{STATE}/demo-*/prepared"
 
-      with subtest("runs as the declared user, in the declared workspace"):
+      @test("runs as the declared user, in the declared workspace", part="a")
+      def _():
           out = machine.succeed(by_caller("${launcher} 'id -un; pwd; cat marker'"))
           assert "alice" in out, out
           assert "/srv/work" in out, out
           assert "in-the-workspace" in out, out
 
-      with subtest("command is an argument list, with the launcher's arguments appended verbatim"):
+      @test("command is an argument list, with the launcher's arguments appended verbatim", part="a")
+      def _():
           # Nothing is read by a shell: not the fixed arguments, and not the
           # launcher's -- a double space, a command substitution, a variable,
           # quotes, a glob and an empty argument each arrive as exactly that
@@ -782,7 +795,8 @@ in
           ], out
           machine.fail("test -e /srv/shared/argv-ran")
 
-      with subtest("command runs with the container's PATH, from its set-environment"):
+      @test("command runs with the container's PATH, from its set-environment", part="a")
+      def _():
           # hello is in alice's per-user profile and not in the system
           # profile, so a bare `hello` is found only if
           # /etc/set-environment was sourced before the exec -- and the
@@ -791,7 +805,8 @@ in
           out = machine.succeed(by_caller("${userPath} 'from the profile; $(false) *'"))
           assert out.strip() == "from the profile; $(false) *", out
 
-      with subtest("a clean launch writes nothing to stderr"):
+      @test("a clean launch writes nothing to stderr", part="a")
+      def _():
           # Nothing is to be said on success: a line on every launch is a line
           # in every consumer's output.
           out = machine.succeed(by_caller("${launcher} 'true' 2>&1"))
@@ -803,7 +818,8 @@ in
       # (flong-record.c:337-341), and rec_set_leader appends leader= once
       # bwrap has said the child's pid (:391-398); nothing else is written
       # before the hook runs.
-      with subtest("a record holds poststop=, cgroup= and leader=, byte for byte, during a hook"):
+      @test("a record holds poststop=, cgroup= and leader=, byte for byte, during a hook", part="a")
+      def _():
           machine.succeed("rm -f /tmp/recorded-hook /tmp/recorded-go /tmp/recorded-stopped")
           machine.succeed(by_caller("${recorded} 'true'") + " >/tmp/recorded-out 2>&1 &")
           try:
@@ -826,7 +842,8 @@ in
           out = machine.succeed("cat /tmp/recorded-out")
           assert out == "", out
 
-      with subtest("a record without a postStop holds cgroup= and leader=, byte for byte"):
+      @test("a record without a postStop holds cgroup= and leader=, byte for byte", part="a")
+      def _():
           name = start_session("sleep 300")
           try:
               record = machine.succeed(f"cat {STATE}/sessions/{name}")
@@ -839,7 +856,8 @@ in
           machine.wait_until_fails(f"test -e {STATE}/sessions/{name}")
           machine.wait_until_fails(f"test -e {CG}/demo/{name}")
 
-      with subtest("the payload holds descriptors 0-2 and nothing else"):
+      @test("the payload holds descriptors 0-2 and nothing else", part="a")
+      def _():
           # flong-init closes everything above stderr before it execs tini
           # (src/init.zig:240-241): bwrap leaks its namespace descriptors,
           # and the seccomp and pipe ends reach it too. The `; true` keeps
@@ -850,7 +868,8 @@ in
           out = machine.succeed(by_caller("${launcher} 'exec 7</dev/null; ls /proc/$$/fd; true'"))
           assert out.split() == ["0", "1", "2", "7"], out
 
-      with subtest("nothing in the session runs as root"):
+      @test("nothing in the session runs as root", part="a")
+      def _():
           # pid 1 is tini, and the engine drops before starting it, so there is
           # no process in here for a root phase to have belonged to. That no
           # process of a session has host uid 0 is checks.rootless's.
@@ -858,38 +877,45 @@ in
           assert out.split()[0] == "1000", out
           assert "Uid:\t1000" in out, out
 
-      with subtest("the supplementary groups come with the user"):
+      @test("the supplementary groups come with the user", part="a")
+      def _():
           out = machine.succeed(by_caller("${launcher} 'id -Gn'"))
           assert "audio" in out, out
 
-      with subtest("the container's tmpfiles rules are applied to the root"):
+      @test("the container's tmpfiles rules are applied to the root", part="a")
+      def _():
           out = machine.succeed(by_caller("${launcher} 'cat /srv/by-tmpfiles/marker; readlink /srv/by-tmpfiles/link'"))
           assert "made-by-tmpfiles" in out, out
           assert "/srv/by-tmpfiles/marker" in out, out
 
-      with subtest("the system is reachable at /run/current-system"):
+      @test("the system is reachable at /run/current-system", part="a")
+      def _():
           # A bind over the mount point rather than a symlink written from
           # inside, which nothing unprivileged could have written.
           machine.succeed(by_caller("${launcher} 'test -x /run/current-system/sw/bin/bash'"))
 
-      with subtest("TMPDIR exists and belongs to the payload"):
+      @test("TMPDIR exists and belongs to the payload", part="a")
+      def _():
           out = machine.succeed(by_caller("${launcher} 'echo $TMPDIR; stat -c %U:%a \"$TMPDIR\"'"))
           assert "/home/alice/tmp" in out, out
           assert "alice:700" in out, out
 
-      with subtest("stdin reaches the payload when the launcher is not on a tty"):
+      @test("stdin reaches the payload when the launcher is not on a tty", part="a")
+      def _():
           # Off a terminal the launcher relays no pty, and the pipe itself must
           # reach the payload rather than arrive empty with nothing said.
           out = machine.succeed(by_caller("echo from-the-pipe | ${launcher} 'cat'"))
           assert "from-the-pipe" in out, out
 
-      with subtest("the hostname is the container's, not the session's"):
+      @test("the hostname is the container's, not the session's", part="a")
+      def _():
           # The session's name carries a pid and a random number to keep
           # concurrent sessions apart, and is not what the payload should see.
           out = machine.succeed(by_caller("${launcher} 'cat /proc/sys/kernel/hostname'"))
           assert out.strip() == "demo", out
 
-      with subtest("XDG_RUNTIME_DIR exists and belongs to the payload"):
+      @test("XDG_RUNTIME_DIR exists and belongs to the payload", part="a")
+      def _():
           # /run is a tmpfs made fresh at every start, and nothing inside a
           # session can create a directory in it -- so the launcher must, or
           # the variable names a directory that is not there.
@@ -897,18 +923,21 @@ in
           assert "/run/user/1000" in out, out
           assert "alice:700" in out, out
 
-      with subtest("the root carries a machine id"):
+      @test("the root carries a machine id", part="a")
+      def _():
           # Written by a booted container's init, and a session has no init --
           # so without the prepare step every reader gets ENOENT.
           out = machine.succeed(by_caller("${launcher} 'cat /etc/machine-id'"))
           assert len(out.strip()) == 32, out
 
-      with subtest("every entry in the declaration's tmpfs list is mounted"):
+      @test("every entry in the declaration's tmpfs list is mounted", part="a")
+      def _():
           machine.succeed("test -e /srv/shared/declared/host-only")
           out = machine.succeed(by_caller("${launcher} 'ls -A /srv/shared/declared | wc -l'"))
           assert out.strip().endswith("0"), out
 
-      with subtest("a declared path holding a space, a colon or a backslash is mounted as declared"):
+      @test("a declared path holding a space, a colon or a backslash is mounted as declared", part="a")
+      def _():
           # Python's "\\" is one backslash, and single quotes carry it to
           # the session's shell, where double quotes leave it alone.
           odd_in = "/srv/odd: in\\side"
@@ -922,7 +951,8 @@ in
               "${launcher} 'stat -c %U \"/srv/tmp masked\"; touch \"/srv/tmp masked/mine\" && echo wrote'"))
           assert out.split() == ["alice", "wrote"], out
 
-      with subtest("privateNetwork gives the session loopback and nothing else"):
+      @test("privateNetwork gives the session loopback and nothing else", part="a")
+      def _():
           # sysfs is per-namespace, so this needs no tools in the container.
           # A session never shares the host's network, so the interface beside
           # loopback is pasta's, in a networked session.
@@ -936,12 +966,14 @@ in
           out = machine.succeed(by_caller("${netless} 'tail -n +2 /proc/net/route | wc -l; cat /proc/net/ipv6_route | grep -vc \" lo$\" || true'"))
           assert out.split() == ["0", "0"], out
 
-      with subtest("a private session without a network has no resolv.conf"):
+      @test("a private session without a network has no resolv.conf", part="a")
+      def _():
           # It has nowhere to send a query, so it is not told of anywhere.
           out = machine.succeed(by_caller("${netless} 'test -e /etc/resolv.conf && echo present || echo absent'"))
           assert out.strip() == "absent", out
 
-      with subtest("the hook runs as the caller, in the session's namespace, before any egress"):
+      @test("the hook runs as the caller, in the session's namespace, before any egress", part="a")
+      def _():
           # The hook is the only moment a session's namespace can be steered
           # from outside, and what makes it safe is that it happens before the
           # namespace has anywhere to go: an empty route table at hook time is
@@ -955,12 +987,14 @@ in
           assert routes == "0", f"the namespace had {routes} routes at hook time"
           assert name.startswith("netless-"), name
 
-      with subtest("the declaration binds single files and a socket, at paths of its choosing"):
+      @test("the declaration binds single files and a socket, at paths of its choosing", part="a")
+      def _():
           # tmpfiles writes the file's content without a newline, hence echo.
           out = machine.succeed(by_caller("${netless} 'cat /run/bound/file; echo; test -S /run/bound/sock && echo socket'"))
           assert out.split() == ["declared-file", "socket"], out
 
-      with subtest("the payload cannot write through a read-only file bind, though it owns the file"):
+      @test("the payload cannot write through a read-only file bind, though it owns the file", part="a")
+      def _():
           # EROFS for the write and for the chmod alike: the mount refuses
           # both, whoever owns the file. The read-write bind beside it takes a
           # write.
@@ -979,7 +1013,8 @@ in
           assert lines[5] == "written", out
           machine.succeed("grep -qx written /srv/bound/rw")
 
-      with subtest("a socket bound read-only still connects"):
+      @test("a socket bound read-only still connects", part="a")
+      def _():
           # As Docker's docker.sock:ro does: connect() is not a write to the
           # filesystem, so a read-only mount does not refuse it.
           out = machine.succeed(by_caller("${netless} '"
@@ -990,7 +1025,8 @@ in
           assert sent == "sent", out
           machine.wait_until_succeeds("grep -qx through-a-read-only-bind /tmp/bound-sock-received")
 
-      with subtest("the workload cannot change what the hook installed, even after unshare -U"):
+      @test("the workload cannot change what the hook installed, even after unshare -U", part="a")
+      def _():
           machine.succeed(by_caller("${hooked} \"bash $(readlink -f /etc/flong-tamper)\"")
                           + " >/tmp/tamper.out 2>&1 &")
           machine.wait_until_succeeds("grep -q attempted /tmp/tamper.out")
@@ -1017,7 +1053,8 @@ in
           assert "dport 19999 drop" in rules, rules
           machine.wait_until_fails(f"test -e {STATE}/sessions/{name}")
 
-      with subtest("postStop runs when a session ends"):
+      @test("postStop runs when a session ends", part="a")
+      def _():
           machine.succeed("rm -f /tmp/stopped")
           machine.succeed(by_caller("${hooked} 'true'"))
           name = machine.succeed("cat /tmp/poststart-facts").split()[4]
@@ -1026,7 +1063,8 @@ in
           machine.fail(f"test -e {HOOK_DIR}/hook-sock-{name}")
           machine.fail(f"pgrep -f hook-sock-{name}")
 
-      with subtest("and when its launcher was killed, from the next launch's sweep"):
+      @test("and when its launcher was killed, from the next launch's sweep", part="a")
+      def _():
           # No trap survives SIGKILL, so the sweep has to -- and it has to run
           # the dead session's postStop rather than its own: the launch that
           # sweeps here is `netless`, over the same container, and has none.
@@ -1058,7 +1096,8 @@ in
           finally:
               machine.succeed(f"kill -CONT {paused}")
 
-      with subtest("postStart and postStop inherit descriptors 0-2 and nothing else"):
+      @test("postStart and postStop inherit descriptors 0-2 and nothing else", part="a")
+      def _():
           # Each hook's ls lists 0-2 and the directory it reads, 3; its
           # control, with 7 opened by the hook, shows that a descriptor the
           # hook was handed would be listed too.
@@ -1083,7 +1122,8 @@ in
       def reach(target):
           return f"nc -d -w 3 {target} </dev/null 2>/dev/null || true"
 
-      with subtest("rules a hook installs are in place before any egress exists"):
+      @test("rules a hook installs are in place before any egress exists", part="a")
+      def _():
           # The hook saw no route at all, and pasta added some afterwards: the
           # rule was installed into a namespace with nowhere to go. And it
           # holds once there is somewhere -- 19999 is a host port the session
@@ -1096,7 +1136,8 @@ in
           assert int(routes) > 0, out
           assert "host-19999" not in out, out
 
-      with subtest("hostPorts reach the host's loopback, and nothing else on it does"):
+      @test("hostPorts reach the host's loopback, and nothing else on it does", part="a")
+      def _():
           out = machine.succeed(by_caller("${networked} '"
               + reach("127.0.0.1 18123") + "; echo ---; "
               + reach("127.0.0.1 18124") + "; echo ---; "
@@ -1111,7 +1152,8 @@ in
           assert "host-18123" not in gw_named, out
           assert "host-18124" not in gw_unnamed, out
 
-      with subtest("a networked session resolves through the host's loopback resolver"):
+      @test("a networked session resolves through the host's loopback resolver", part="a")
+      def _():
           # The premise: the host's resolver is a stub on its loopback, in
           # both families, and on nothing else.
           machine.succeed("grep -qx 'nameserver 127.0.0.1' /etc/resolv.conf")
@@ -1141,7 +1183,8 @@ in
           assert via4.strip() == "192.0.2.53", out
           assert via6.strip() == "192.0.2.53", out
 
-      with subtest("a family the host has no nameserver in is neither forwarded nor listed"):
+      @test("a family the host has no nameserver in is neither forwarded nor listed", part="a")
+      def _():
           # pasta sends a family's queries to the host's first nameserver of
           # that family, and for a family with none it has only the unspecified
           # address. The resolver here answers on 127.0.0.1 AND ::1, so a query
@@ -1185,7 +1228,8 @@ in
           finally:
               machine.succeed("cp /tmp/resolv.conf.both /etc/resolv.conf")
 
-      with subtest("with forwardPorts auto, whatever the session listens on reaches it from the host"):
+      @test("with forwardPorts auto, whatever the session listens on reaches it from the host", part="a")
+      def _():
           # Declared nowhere: pasta finds the listener in its once-a-second
           # scan and publishes the same port on the host.
           # Listening on the session's loopback only, as a dev server does:
@@ -1195,7 +1239,8 @@ in
           machine.wait_until_succeeds("nc -d -w 3 127.0.0.1 18300 | grep -q from-auto", timeout=30)
           machine.wait_until_succeeds(NO_SESSIONS)
 
-      with subtest("a forwarded port reaches the session from the host"):
+      @test("a forwarded port reaches the session from the host", part="a")
+      def _():
           # And a second listener on a port that is not forwarded, left up past
           # the one-second scan with which pasta's default `auto` would have
           # forwarded it -- so that "nothing else" is a statement about -t
@@ -1220,7 +1265,8 @@ in
 
       # pasta attaches to the session's namespace through the launcher's
       # descriptors, and lives in the session's cgroup.
-      with subtest("a clean exit releases pasta"):
+      @test("a clean exit releases pasta")
+      def _():
           machine.succeed(by_caller("${networked} 'sleep 1'") + " >/dev/null 2>&1 &")
           name = session_of("netless")
           machine.wait_until_succeeds(pasta_for(name))
@@ -1228,7 +1274,8 @@ in
           machine.fail(f"test -e {CG}/netless/{name}")
           machine.wait_until_fails(pasta_for())
 
-      with subtest("a killed session's pasta is reaped by the next launch"):
+      @test("a killed session's pasta is reaped by the next launch")
+      def _():
           # The leak this has to catch: pasta alive for as long as the host
           # runs after its session is gone. It is in the session's cgroup,
           # which outlives a SIGKILLed launcher until a sweep kills it; the
@@ -1256,7 +1303,8 @@ in
           finally:
               machine.succeed(f"kill -CONT {paused}")
 
-      with subtest("SIGTERM to the launcher ends the session before releasing it"):
+      @test("SIGTERM to the launcher ends the session before releasing it")
+      def _():
           # The launcher owns its session: asked to stop, it kills the
           # session's cgroup and waits for it to empty, and only then runs
           # postStop and removes it. Releasing first would do both under a
@@ -1276,7 +1324,8 @@ in
       for port in (18123, 18124, 19999):
           machine.succeed(f"systemctl stop listen-{port}")
 
-      with subtest("a session whose hook refuses does not run"):
+      @test("a session whose hook refuses does not run")
+      def _():
           # The payload is `sleep 300`: if the launcher merely gave up and the
           # session outlived it, it would be running with nothing installed
           # in its namespace and nobody left to install it.
@@ -1285,7 +1334,8 @@ in
           machine.succeed(NO_SESSIONS)
           machine.succeed(NO_SESSION_CGROUPS)
 
-      with subtest("the session's cgroup carries its limits"):
+      @test("the session's cgroup carries its limits")
+      def _():
           # Both facts in one read, and from the host deliberately: the session
           # has a cgroup namespace of its own, so from inside it the limit is on
           # an ancestor it cannot see and /sys/fs/cgroup/memory.max says "max".
@@ -1305,7 +1355,8 @@ in
 
       # A session does not outlive its launcher, and a lock still held means
       # the session is not the sweep's, whatever else the sweep sees.
-      with subtest("a SIGKILLed launcher takes its payload with it"):
+      @test("a SIGKILLed launcher takes its payload with it")
+      def _():
           name = start_session("sleep 300")
           leader = leader_of(name)
           machine.succeed(f"kill -9 {launcher_pid(name)}")
@@ -1314,7 +1365,8 @@ in
           machine.wait_until_fails(f"test -e {CG}/demo/{name}")
           machine.wait_until_fails(f"test -e {STATE}/sessions/{name}")
 
-      with subtest("the sweep never releases a session whose lock is held"):
+      @test("the sweep never releases a session whose lock is held")
+      def _():
           # The launcher is stopped, so it holds its record's lock and
           # reacts to nothing, and the session's pid 1 is killed: half of
           # what makes a session dead, and not the half that is the lock.
@@ -1342,7 +1394,8 @@ in
           machine.fail(f"test -e {STATE}/sessions/{name}")
           machine.fail(f"test -e {CG}/netless/{name}")
 
-      with subtest("a leftover from a superseded closure is swept"):
+      @test("a leftover from a superseded closure is swept")
+      def _():
           # The cache is keyed on the closure hash, so a nixos-rebuild strands
           # the previous generation's cache in a directory nothing of the new
           # generation would look at again unless the sweep does. A cache is
@@ -1370,7 +1423,8 @@ in
           # The cache this launch actually uses is not swept with it.
           machine.succeed(f"test -e {PREPARED}/etc/passwd")
 
-      with subtest("the identity comes from the container, not from the module"):
+      @test("the identity comes from the container, not from the module")
+      def _():
           # Nothing declares 1000, 100 or /home/alice to flong: they are read
           # out of the prepared root's passwd, so this proves the read rather
           # than an agreement between two copies of the same number.
@@ -1380,34 +1434,41 @@ in
           assert home == "/home/alice", out
           assert tmpdir == "1000:100", out
 
-      with subtest("a tmpfs masks part of a read-write bind"):
+      @test("a tmpfs masks part of a read-write bind")
+      def _():
           machine.succeed("test -e /srv/shared/masked/host-only")
           out = machine.succeed(by_caller("${launcher} 'ls -A /srv/shared/masked | wc -l'"))
           assert out.strip().endswith("0"), out
 
-      with subtest("the masked path is writable by the payload's user"):
+      @test("the masked path is writable by the payload's user")
+      def _():
           machine.succeed(by_caller("${launcher} 'echo scratch > /srv/shared/masked/mine; test -s /srv/shared/masked/mine'"))
           machine.fail("test -e /srv/shared/masked/mine")
 
-      with subtest("writes to the bind reach the host"):
+      @test("writes to the bind reach the host")
+      def _():
           machine.succeed(by_caller("${launcher} 'echo through > /srv/shared/passthrough'"))
           machine.succeed("grep -q through /srv/shared/passthrough")
 
-      with subtest("an overlay reads the lower layer"):
+      @test("an overlay reads the lower layer")
+      def _():
           out = machine.succeed(by_caller("${launcher} 'cat /opt/layered/seed'"))
           assert "from-the-lower-layer" in out, out
 
-      with subtest("overlay writes are discarded, not passed down"):
+      @test("overlay writes are discarded, not passed down")
+      def _():
           machine.succeed(by_caller("${launcher} 'echo scratch > /opt/layered/new; test -e /opt/layered/new'"))
           machine.fail("test -e /srv/lower/new")
           machine.succeed("test -e /srv/lower/seed")
 
-      with subtest("the caller's binds are mounted at their own paths"):
+      @test("the caller's binds are mounted at their own paths")
+      def _():
           out = machine.succeed(by_caller("${launcher} 'cat /srv/companion/marker; cat /srv/reference/marker'"))
           assert "in-the-companion" in out, out
           assert "read-only-reference" in out, out
 
-      with subtest("a bind is read-only unless it says :rw"):
+      @test("a bind is read-only unless it says :rw")
+      def _():
           # /srv/reference is root-owned, so a write there fails anyway: what
           # proves the mount is EROFS rather than EACCES.
           machine.succeed(by_caller("${launcher} 'echo written > /srv/companion/from-session'"))
@@ -1416,7 +1477,8 @@ in
           assert "Read-only file system" in out, out
           machine.fail("test -e /srv/reference/from-session")
 
-      with subtest("the command is told about the caller's binds, with their modes"):
+      @test("the command is told about the caller's binds, with their modes")
+      def _():
           # A mount the process does not know about is half of what the
           # caller asked for, so the paths reach it in the environment: one
           # list, a PATH:MODE per line. The declaration's own binds are not
@@ -1424,46 +1486,54 @@ in
           out = machine.succeed(by_caller("${launcher} 'printf \"%s\\n\" \"$FLONG_BINDS\"'"))
           assert out.splitlines() == ["/srv/companion:rw", "/srv/reference:ro"], out
 
-      with subtest("a bind naming ':' is refused, like a workspace"):
+      @test("a bind naming ':' is refused, like a workspace")
+      def _():
           err = machine.fail(by_caller("${badBinds} 2>&1"))
           assert "bind contains ':'" in err, err
 
-      with subtest("a bind snippet that fails aborts the launch"):
+      @test("a bind snippet that fails aborts the launch")
+      def _():
           machine.fail(by_caller("${failingBinds}"))
 
-      with subtest("a workspace printed as PATH:ro is bound read-only, and the guard is told"):
+      @test("a workspace printed as PATH:ro is bound read-only, and the guard is told")
+      def _():
           out = machine.succeed(by_caller("${roWorkspace} 'pwd; cat marker; touch from-session 2>&1 || true'"))
           assert "/srv/work" in out, out
           assert "in-the-workspace" in out, out
           assert "Read-only file system" in out, out
           machine.fail("test -e /srv/work/from-session")
 
-      with subtest("the exit status of the command is the exit status of the launcher"):
+      @test("the exit status of the command is the exit status of the launcher")
+      def _():
           machine.succeed(by_caller("${launcher} 'exit 0'"))
           machine.fail(by_caller("${launcher} 'exit 3'"))
 
       # The launcher is the caller's own program, and the host has no sudo
       # to grant it with.
-      with subtest("an unprivileged user runs the launcher with no sudo rule"):
+      @test("an unprivileged user runs the launcher with no sudo rule")
+      def _():
           machine.fail("test -e /run/wrappers/bin/sudo")
           out = machine.succeed(by_caller("${launcher} 'id -un'"))
           assert "alice" in out, out
 
-      with subtest("workspace is evaluated as the invoking user, not as root"):
+      @test("workspace is evaluated as the invoking user, not as root")
+      def _():
           # The line above was alice's, through her own manager.
           uid = machine.succeed("cat /tmp/workspace-uid").strip()
           assert uid == "1000", f"workspace ran as uid {uid}, expected alice"
 
       # There is no root phase to fall back to, and root has no subordinate
       # range.
-      with subtest("the launcher refuses to run as root"):
+      @test("the launcher refuses to run as root")
+      def _():
           machine.succeed("echo untouched > /tmp/workspace-args")
           err = machine.fail("${launcher} 'true' 2>&1")
           assert "refusing to run as root" in err, err
           # Refused before the workspace snippet ran.
           assert machine.succeed("cat /tmp/workspace-args").strip() == "untouched"
 
-      with subtest("guard runs after workspace and sees the resolved path"):
+      @test("guard runs after workspace and sees the resolved path")
+      def _():
           # The guard above refuses unless $workspace is already resolved, so
           # every launch in this file proves the ordering. Assert it directly
           # too, or a guard silently emptied of its check would still pass.
@@ -1472,33 +1542,40 @@ in
           err = machine.fail(by_caller("${badWorkspace} 2>&1"))
           assert "workspace contains" in err, err
 
-      with subtest("a guard's exit 0 allows the launch rather than ending it"):
+      @test("a guard's exit 0 allows the launch rather than ending it")
+      def _():
           out = machine.succeed(by_caller("${guardExit} 'echo the-payload-ran'"))
           assert "the-payload-ran" in out, out
 
-      with subtest("a guard cannot change the workspace it judged"):
+      @test("a guard cannot change the workspace it judged")
+      def _():
           out = machine.succeed(by_caller("${guardReassign} 'pwd; test -e /srv/reference && echo reference-bound || true'"))
           assert out.split() == ["/srv/work"], out
 
-      with subtest("workspace sees the launcher's arguments"):
+      @test("workspace sees the launcher's arguments")
+      def _():
           machine.succeed(by_caller("${launcher} 'true'"))
           assert machine.succeed("cat /tmp/workspace-args").strip() == "true"
           machine.succeed(by_caller("${launcher} 'false || true'"))
           assert machine.succeed("cat /tmp/workspace-args").strip() == "false || true"
 
-      with subtest("a workspace naming a colon is refused, not mounted"):
+      @test("a workspace naming a colon is refused, not mounted")
+      def _():
           machine.succeed("test -d '/srv/odd:name'")
           err = machine.fail(by_caller("${badWorkspace} 2>&1"))
           assert "workspace contains" in err, err
 
-      with subtest("the default workspace is the directory the launcher starts in"):
+      @test("the default workspace is the directory the launcher starts in")
+      def _():
           out = machine.succeed(by_caller("cd /srv/work && ${defaultWorkspace}"))
           assert "/srv/work" in out, out
 
-      with subtest("a workspace snippet that fails aborts the launch"):
+      @test("a workspace snippet that fails aborts the launch")
+      def _():
           machine.fail(by_caller("${failingWorkspace}"))
 
-      with subtest("a bind mount nested inside a tmpfs reaches through it"):
+      @test("a bind mount nested inside a tmpfs reaches through it")
+      def _():
           # The tmpfs hides the host's /srv/nested ...
           out = machine.succeed(by_caller("${launcher} 'ls -A /srv/nested'"))
           assert "hidden" not in out, out
@@ -1507,21 +1584,25 @@ in
           out = machine.succeed(by_caller("${launcher} 'cat /srv/nested/keep/marker'"))
           assert "through-the-tmpfs" in out, out
 
-      with subtest("a symlink on the way to a mount point in home ends the launch, and makes nothing on the host"):
+      @test("a symlink on the way to a mount point in home ends the launch, and makes nothing on the host")
+      def _():
           machine.fail(by_caller("${symlinkOverlay}"))
           machine.fail("test -e /srv/escape-target/inner")
 
-      with subtest("a mask hides a file inside a read-write bind, and leaves the host's alone"):
+      @test("a mask hides a file inside a read-write bind, and leaves the host's alone")
+      def _():
           out = machine.succeed(by_caller("${launcher} 'cat /srv/shared/secret 2>&1 || echo refused; ls /srv/shared'"))
           assert "should-be-masked" not in out, out
           assert "refused" in out, out
           machine.fail(by_caller("${launcher} 'echo x > /srv/shared/secret'"))
           assert "should-be-masked" in machine.succeed("cat /srv/shared/secret")
 
-      with subtest("a mask over a path the session does not have fails the launch"):
+      @test("a mask over a path the session does not have fails the launch")
+      def _():
           machine.fail(by_caller("${badMask}"))
 
-      with subtest("a file renamed over a masked one on the host shows through"):
+      @test("a file renamed over a masked one on the host shows through")
+      def _():
           # What `masks` warns of: the mask is on the file, and a rename on
           # the host detaches it in the session's namespace.
           machine.succeed(by_caller("${launcher} 'cat /srv/shared/renamed 2>&1 || echo before-refused; sleep 6; cat /srv/shared/renamed 2>&1 || echo after-refused'")
@@ -1532,7 +1613,8 @@ in
           out = machine.succeed("cat /tmp/renamed-out")
           assert "renamed-in" in out, out
 
-      with subtest("the directories on the way to a bind inside home are the payload's"):
+      @test("the directories on the way to a bind inside home are the payload's")
+      def _():
           out = machine.succeed(by_caller("${launcher} 'stat -c %U /home/alice/deep /home/alice/deep/er; touch /home/alice/deep/er/beside && echo wrote; cat /home/alice/deep/er/keep/marker'"))
           assert out.split()[:2] == ["alice", "alice"], out
           assert "wrote" in out, out
@@ -1541,7 +1623,8 @@ in
           # root's, which the session sees as root.
           assert machine.succeed(by_caller("${launcher} 'stat -c %U /srv'")).strip() == "root"
 
-      with subtest("nothing is left behind"):
+      @test("nothing is left behind")
+      def _():
           # No record, no session's cgroup, and no pasta. Nothing of a
           # session is anywhere else: its root was an overlay
           # in its own mount namespace.
@@ -1549,13 +1632,15 @@ in
           machine.succeed(NO_SESSION_CGROUPS)
           machine.fail(pasta_for())
 
-      with subtest("the prepared root is reused rather than rebuilt"):
+      @test("the prepared root is reused rather than rebuilt")
+      def _():
           before = machine.succeed(f"stat -c %Y {PREPARED}").strip()
           machine.succeed(by_caller("${launcher} 'true'"))
           after = machine.succeed(f"stat -c %Y {PREPARED}").strip()
           assert before == after, f"prepared root was rebuilt: {before} -> {after}"
 
-      with subtest("the cache is named for the prepare steps as well as the closure"):
+      @test("the cache is named for the prepare steps as well as the closure")
+      def _():
           # A root prepared by an older flong is not a root this one would
           # build, so the directory has to stop matching when prepare changes.
           # Nothing in one VM run can change prepare and look again, so what is
@@ -1564,5 +1649,7 @@ in
           # carries the maps too, which decide the root's owners.
           name = machine.succeed(f"basename $(dirname {PREPARED})").strip()
           assert re.fullmatch(r"demo-[a-z0-9]{8}-[a-z0-9]{8}-1000\.100\.100000\.100000\.100", name), name
+
+      ${parts.done}
     '';
 }
