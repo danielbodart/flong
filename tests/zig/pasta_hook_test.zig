@@ -1,5 +1,5 @@
 //! src/launch/hook.zig and src/launch/pasta.zig from outside (the `test`
-//! step; ZIG.md, "Phase 7", L4): the Spawn each builds, argv, envp, stdio,
+//! step; the Zig port's L4): the Spawn each builds, argv, envp, stdio,
 //! the kept descriptors, the directory and the cgroup, against golden
 //! tables read from what flong-launch.c:586-675 (a7919be) builds: run_hook's
 //! setenv calls and fl_spawn, start_pasta's pushes and fl_spawn. @X@ in a

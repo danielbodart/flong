@@ -1,5 +1,5 @@
 //! launch/bwrap.zig and sig.awaitFdOrExit from outside (the `test` step;
-//! ZIG.md, "Phase 7", L4): bwrap's spawn against a stand-in
+//! the Zig port's L4): bwrap's spawn against a stand-in
 //! (flong-fake-bwrap, tests/zig/fakebwrap.zig, built for it), which says
 //! the argv and the descriptors it was started with.
 //!

@@ -1,5 +1,5 @@
-//! spec.zig from outside (minish, the `test` step; ZIG.md, "Tests" and
-//! "Phase 7", L1): bwrapArgv's golden argv per branch (plain, relay,
+//! spec.zig from outside (minish, the `test` step; DESIGN.md, "Tests";
+//! the Zig port's L1): bwrapArgv's golden argv per branch (plain, relay,
 //! nestedSandbox, a project filter, keep-fds, trace); valid specs drawn
 //! from a model parse back to the model; and each single-rule mutation of a
 //! valid spec is refused with its message, one line on stderr.

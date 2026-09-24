@@ -1,7 +1,7 @@
 //! spec.zig: what a launch is asked to do, parsed from argv, and every check
 //! that needs nothing but the spec: launcher/flong-spec.c:417-708 and the
-//! checks it calls (:106-415), with flong-spec.h's struct as `Spec` (ZIG.md,
-//! "Phase 7", L1). The line numbers are those of 5f1f08e.
+//! checks it calls (:106-415), with flong-spec.h's struct as `Spec` (the Zig
+//! port's L1). The line numbers are those of 5f1f08e.
 //!
 //! The wrapper passes the whole spec as flong-launch's arguments: a sequence
 //! of keywords, each followed by a fixed number of fields, then "--" and the

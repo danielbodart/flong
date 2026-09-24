@@ -2,7 +2,7 @@
 //! (tests/zig/abi.h, translated per target by build.zig's `abi` step):
 //! every struct field's offset and size, every constant and syscall number,
 //! compiled for x86_64-linux-musl and aarch64-linux-musl, so only Zig's
-//! headers are read, never the host's (ZIG.md, "test-libc"). P4 of phase 0
+//! headers are read, never the host's (DESIGN.md, "Tests": test-libc). P4 of phase 0
 //! (spike/proofs/p4, archived in ~/Projects/flong-spikes-archive/zig) moved
 //! here; since phase 4 the mount structs and constants checked are
 //! sys.zig's own (the mount helper's), and `mine` keeps only clone3's,
@@ -71,7 +71,7 @@ const openat_expected = switch (builtin.cpu.arch) {
 };
 
 // Zig's bundled headers, not another set: linux/version.h is 6.13.4
-// (ZIG.md, "Measured"), and a header newer than that would define
+// (DESIGN.md, "What the port measured"), and a header newer than that would define
 // STATMOUNT_MNT_UIDMAP (6.15).
 const version_expected = (6 << 16) | (13 << 8) | 4;
 

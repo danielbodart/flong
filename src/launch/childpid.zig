@@ -1,6 +1,6 @@
 //! launch/childpid.zig: step 13, bwrap's child-pid, read from --info-fd
-//! (launcher/flong-launch.c:450-523 of 5f1f08e; ZIG.md, "Phase 7", L4, and
-//! "Tests": the child-pid parser over split reads and the 4096-byte bound).
+//! (launcher/flong-launch.c:450-523 of 5f1f08e; the Zig port's L4; DESIGN.md,
+//! "Tests": the child-pid reader over split reads and the 4096-byte bound).
 //!
 //! bwrap writes a JSON object on --info-fd once it has cloned the sandbox's
 //! pid 1: `{\n    "child-pid": N`, then `,\n    "<ns>-namespace": M` per
@@ -17,7 +17,7 @@
 //! those handles; so is the info pipe's read end, held and never closed
 //! (quirk 31: bwrap would die of SIGPIPE at its next write, :480-484).
 //!
-//! A deviation from ZIG.md's per-binary module list, which names only
+//! A deviation from the port's plan, whose module list named only
 //! `launch.zig`: the launch's helpers are split by concern into modules
 //! under src/launch/, this one taking no Launch struct, only what it reads.
 
@@ -86,7 +86,7 @@ fn span(s: []const u8, at: usize, comptime set: []const u8) usize {
 ///                                info pipe is readable (it wins a tie),
 ///                                false when bwrap exited first
 ///                                (sig.awaitFdOrExit over the info pipe and
-///                                bwrap's pidfd; ZIG.md, "sig")
+///                                bwrap's pidfd; sig.zig)
 ///   read([]u8) sys.Result(usize) one read of the info pipe's read end
 ///
 /// Refusals, each said once and returned as error.Reported:

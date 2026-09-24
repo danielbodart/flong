@@ -18,7 +18,8 @@ reported, never used as a pass mark.
 ## Launch sequence
 
 The launcher is a bash wrapper, run as the caller, that execs `flong-launch`,
-a static Zig program. Nothing in either runs as host root, and nothing asks for it.
+a Zig program, static and without libc. Nothing in either runs as host root,
+and nothing asks for it.
 
 The wrapper works out what only the launch can know:
 
@@ -52,7 +53,9 @@ The wrapper works out what only the launch can know:
 On the warm path the wrapper forks nothing but the snippets the declaration
 chose: every test is a builtin, and there is no command substitution outside
 a snippet. A bash launcher measured 61 ms and a python one 106 ms, against
-C's 19 ms, which is why everything after the spec is native code.
+the C launcher's 19 ms, which is why everything after the spec is native
+code. The Zig launcher that replaced the C is within the runs' spread of it
+(`packages.bench`, [What the port measured](#what-the-port-measured)).
 
 ## Data is data; shell is for what only launch knows
 
@@ -476,7 +479,8 @@ It costs about 1 ms for 3 mounts and 1.5 ms for 12.
   declared mounts, so a declaration under `/sys` lands on the session's own
   sysfs, or fails, rather than being covered without a word. With it,
   `nproc`, Go, Node and Java honour declared limits; without it `lscpu`
-  fails. It costs 0.1 ms in C, against 9 ms through `nsenter` and `sh`.
+  fails. It costs 0.1 ms in the mount helper (measured when it was C),
+  against 9 ms through `nsenter` and `sh`.
 - **The cgroup view is the payload's own cgroup namespace**, rooted at the
   sandbox leaf by bwrap's `--unshare-cgroup` (bwrap is created in the leaf).
   The helper joins that namespace before it mounts cgroup2, so the mount's
@@ -989,7 +993,10 @@ and window size to it, and relays bytes both ways; bwrap gets
 `--new-session` and flong-init takes the pty as its controlling terminal. The
 caller's terminal is raw only between the gate and the payload's exit.
 SIGWINCH, SIGTERM, SIGHUP, SIGINT and SIGCONT are handled, and `^]^]^]` within
-a second ends the session (exit 137), as nspawn's escape does. Measured:
+a second ends the session (exit 137), as nspawn's escape does. The escape is
+read with the rest of stdin, which the relay reads only once the payload has
+taken what was read before, so while the payload reads no input `^]^]^]`
+waits (quirk 10, `src/tty.zig:594`). Measured:
 launch cost within noise (15.5 against 15.4 ms), about
 10 µs per keystroke round trip, and throughput within noise.
 
@@ -1148,7 +1155,10 @@ and i386, sweeping every argument with the union of every stack's constants
 so rows line up. nspawn stacked 5 filters (587, 479, 492, 11 and 16
 instructions). flong's were byte-identical to the build's, most recently
 attached first: tier (1550 instructions), audit mask (26), tty filter (19),
-namespace mask (49). nspawn is no longer in the tree, so `checks.parity` now
+namespace mask (49). These counts were first measured with the C compiler;
+the Zig compiler's filters are the C's byte for byte (123 comparisons over
+every tier and variant, and `golden`'s `.bpf` files, recorded from the C),
+so they stand. nspawn is no longer in the tree, so `checks.parity` now
 keeps this true by checking the byte-for-byte match and that `strict` only
 ever refuses more than `parity`.
 
@@ -1352,71 +1362,564 @@ Component costs are quoted in their sections, with their harness.
 
 ## The native launcher
 
-Three programs, installed side by side by `native.nix`'s `launcher` set:
-`flong-launch`, `flong-init` and `flong-sweeper`, Zig (`src/launch.zig`,
-`src/init.zig`, `src/sweeper.zig`), static, stripped, with no libc. The
-store paths they run (bwrap, pasta, tini, flong-init) and
-`/run/wrappers/bin/newuidmap` and `newgidmap` are compiled in, so the wrapper
-cannot point the launcher at another bwrap.
+Four programs and the tests' fixtures, all Zig 0.15.2: `flong-seccomp`, the
+policy compiler, with its `expand`, `render` and `project` subcommands, which
+links libc through libseccomp; and `flong-launch`, `flong-init` (pid 1 in the
+session) and `flong-sweeper` (the holder unit's process), static, stripped
+and without libc. The programs `flong-launch` runs (bwrap, pasta, the
+`flong-init` beside it, `/run/wrappers/bin/newuidmap` and `newgidmap`) and
+the tini `flong-init` execs are compiled in, as build options with no
+default (`-Dbwrap`, `-Dpasta`, `-Dinit`, `-Dnewuidmap`, `-Dnewgidmap`,
+`-Dtini`; `build.zig:56-62, 77, 585, 1206-1226`), so the wrapper cannot
+point the launcher at another bwrap, and a build that forgets one fails.
 
-The launcher began as C, not Zig: the BPF and the runtime were identical, but
-a clean Zig build took 78–93 s against C's 1.6 s and needs a 1.8 GiB
-compiler, and a typed config format would repeat checks the Nix module's types
-already make. `ZIG.md` is the decision to port it anyway, and what the port
-has measured since; the C was deleted when the Zig launched as it did.
+Line numbers that cite the deleted C (`launcher/flong-*.c` and `*.h`,
+`seccomp/flong-seccomp.c`, `tests/parity/*.c`) are those of the C as it last
+stood, `launcher/` at a103e76 (unchanged since a7919be), unless the citing
+file names another commit. Every Zig module's `//!` comment names the C it
+ports. The port's phases (0 to 8) and the launcher's milestones (L0 to L5),
+which some comments name, are those of its plan, `ZIG.md`, deleted when the
+port was done and in git at e717355. `build.zig` and the modules the seccomp
+set is built from (`src/seccomp/`, `sys`, `fd`, `msg`, `errno`, `num`) still
+cite `ZIG.md` by section: editing them, even a comment, moves the seccomp
+set's store path and with it every project cache key (quirk 36), so they
+change with the next edit that moves it anyway.
+
+### Why Zig, and what it cost
+
+The launcher began as C: a clean Zig build took 78–93 s against C's 1.6 s
+and needed a 1.8 GiB compiler, for identical BPF and runtime. It moved to
+Zig anyway, one program at a time on trunk (2026-09-23 to 24), so that
+descriptor and process bugs are hard to write: every descriptor is a typed
+handle in one table, a forked child cannot return into its parent's
+cleanup, and raw syscalls live in one layer that a linter enforces. Each
+program ran beside the C it replaced, with a check comparing the two,
+before the C was deleted. The decisions that stand:
+
+- **Zig 0.15.2, from nixpkgs' `zig_0_15`** (the locked nixpkgs' unqualified
+  `zig` is 0.16). Build time is a cost to report and mitigate, never a
+  reason to reconsider the language. minish (property tests) and zwanzig
+  (static analysis) are lazy dependencies pinned to tags (minish v0.1.0,
+  zwanzig v0.15.1, `build.zig.zon:8-16`).
+- **flong-seccomp keeps libseccomp**, so its filters are libseccomp's bytes;
+  the other three have no libc, with glibc's errno texts in `errno.zig`
+  and an `/etc/passwd` reader in `passwd.zig` for the one `getpwuid`.
+- **Nothing observable changed.** Every string a test asserts, every exit
+  status, bwrap's and pasta's argv, the record bytes and the BPF bytes
+  are the C's, but flong-seccomp's usage line, which names the
+  subcommands (quirk 16), and the texts [Kept behaviour](#kept-behaviour)
+  lists as changed. What a test cannot see is recorded there too, as kept,
+  done another way, or changed.
+- **aarch64 is cross-built**, not run: `cross-aarch64` builds the static
+  programs for it and compiles flong-seccomp and bpfdump unlinked; the VM
+  tests are x86_64's.
+- **Timing is reported, never gated.**
+
+What it cost and what it bought, from [What the port
+measured](#what-the-port-measured):
+
+- **Behaviour is the C's.** flong-seccomp's filters were the C's byte for
+  byte over 123 comparisons (every tier and variant, the fixed filters, the
+  refusal corpus), and 87,000 fuzzed policies differed in nothing. The
+  seccomp tooling's text, keys and filters equalled the awk and bash's over
+  109 comparisons. flong-init as pid 1 made the C's syscalls call for call
+  on five paths under `strace -f`, the C's allocations aside, with no
+  syscall of start code before them. The mount helper gave the C's output
+  and status under every mount, refusal and protected-path case, and the
+  swap race escaped 0 of 40 under each. The sweeper's readers equalled the
+  C's over 10,000 inputs each, and both sweepers left byte-identical
+  records, cgroups and `postStop` logs. The fixtures' 111 comparisons were
+  equal. flong-launch gave the C's bwrap, pasta and flong-init argv, every
+  child's environment and descriptors, its own descriptors, stdout, stderr
+  and status over six launch variants, and an `strace -f` of both over 40
+  launches the same calls in the same order in each process, the kept
+  mechanisms aside. `golden` pins what the C printed, recorded from it once
+  and never regenerated.
+- **Build cost.** Each Nix build starts with an empty Zig cache, so every
+  derivation compiles its build runner and compiler-rt again. Rebuilt from
+  nothing, each bit-identical: the seccomp set 10.9–11.6 s, the launcher
+  set 19.6 s (the C launcher's set 16.8 s), the fixtures 8.5–9.3 s;
+  `native-test` 15.7 s in Debug and 26.9 s in ReleaseSafe; `native-lint`
+  4.5 s; `native-analyze` 76–88 s, most of it building zwanzig. `zig_0_15`
+  is a 231.6 MiB download, 926 MiB unpacked, and a build input only: no
+  output may refer to it.
+- **Size.** Zig binaries are larger and closures smaller: flong-launch
+  446,448 bytes static against the C's 234,976 dynamic (which linked the Zig
+  mount helper), flong-init 40,312 against 17,408, flong-sweeper 142,272
+  against 49,808, flong-seccomp 144,784 with its subcommands (the C compiler
+  alone was 17,256). Over the port the launcher set's closure fell from
+  54,318,016 bytes to 44,256,760, and flong-seccomp's from 48,454,728 to
+  38,057,520 (the C compiler's held gcc's runtime library and its source).
+- **Speed.** `packages.bench` put each Zig program within the runs' spread
+  of the C's on every row (no network, pasta with a hook, a forwarded port,
+  cold); the cold row's order between C and Zig flipped between two pairs
+  of runs. A project's policy compiles in one process in 31.6 ms cold and
+  3.4 ms warm, where the bash it replaced took 85.8 and 42.4 ms.
+- **What the types and checks caught.** The handle table catches double
+  closes, use after close, a closed alias, stale copies in structs and in
+  fork children, and one kind used as another; each of the port's planted
+  mutations (a child ignoring its keep list, a close without the generation
+  bump, a spawn skipping the signal reset, `dup2` without staging, a stale
+  signalfd in a child, a wait ignoring POLLHUP) was caught by `native-test`.
+  The prototype's table itself had three bugs the port fixed: a fork child
+  and a spawned child that failed silently, and a child leaked when its
+  pidfd found no slot. Differential fuzzing of the seccomp tooling found
+  four differences from the bash, each fixed.
+- **CI.** One `nix flake check` took 7 min 49 s to 14 min 53 s while the
+  port ran. As a matrix of one job per check with the Cachix cache, a push
+  that changes the native code takes about 5–6 min (5 min 38 s for a103e76,
+  run 35995141108; 5 min 54 s for e717355, run 35996579837, its longest leg
+  `native-test-release` at 4 min 34 s) and one that changes only docs about
+  3–4 min (3 min 18 s and 3 min 39 s, runs 35991513067 and 35992523422).
+
+### What the port measured
+
+Measured on the development host (32 cores, kernel 6.18.51, Zig 0.15.2,
+x86_64, ReleaseSafe) unless named; the code cites these rows. The
+binary sizes and closures are the tree's after L5; the timings are L4's.
+
+| what | value |
+|---|---|
+| start code, `stack_size = 0` and `single_threaded` | no syscall before `main`; as pid 1 under bwrap the first call after `execve` is `main`'s. With Zig's default stack the start code reads and then sets `RLIMIT_STACK` to 16 MiB (`start.zig:545-578`), which the payload's `ulimit -s` then shows; without `single_threaded`, an `arch_prctl(ARCH_SET_FS)` (`:504-519`) |
+| a returning single-threaded `main` | ends in `exit`, not `exit_group` (`posix.zig:777-789`) |
+| panics | Zig's default ends in `abort`; pid 1 drops its own SIGABRT and dies of SIGSEGV (`posix.zig:680-727`). `std.debug.FullPanic(msg.onPanic)` prints one line and exits 125 through bwrap |
+| `std.os.linux` | wraps neither `clone3` nor `setns` (raw calls, numbers 435 and 308 on x86_64); `std.posix` turns errnos a caller must see into `unreachable` (`posix.zig:5478-5481` and others); `linux.sigaction` asserts on SIGKILL and SIGSTOP (`linux.zig:1857-1861`); `O.TMPFILE` is one bit, where the kernel's `O_TMPFILE` is `__O_TMPFILE\|O_DIRECTORY` |
+| `clone3(CLONE_INTO_CGROUP\|CLONE_PIDFD)` | into an `O_PATH` leaf of a `Delegate=yes` unit the child starts in the leaf and `waitid(P_PIDFD)` reaps it; into `system.slice`, EACCES; after `setns(CLONE_NEWUSER)` it still lands (`checks.native`'s `proc:` subtests) |
+| a `noreturn` fork body | a body that returns does not compile (`tests/zig/compile_fail/fork_body_returns.zig`); a working body runs once and the parent's `defer` once, in the parent; a panicking body exits 125 with one line |
+| Zig's bundled headers | `any-linux-any` is kernel 6.13.4 (`LINUX_VERSION_CODE` 396548; no `STATMOUNT_MNT_UIDMAP`); translate-c with `-target <arch>-linux-musl` reads only them, never `pkgs.linuxHeaders`. Every struct and constant of `sys.zig` equals them on x86_64 and aarch64 (`abi`) |
+| lazy dependencies | an unguarded `lazyDependency` makes an offline `zig build install` fail fetching it (`build_runner.zig:370`); `zig_0_15.fetchDeps { fetchAll = true; }` is one fixed-output derivation of 2.2 MiB (minish 0.1.0, zwanzig 0.15.1, zwanzig's chilli 0.2.2), linked at `$ZIG_GLOBAL_CACHE_DIR/p` |
+| a `b.path` outside a set's fileset | lazy: a set configures and installs from `build.zig`, `build.zig.zon` and its own sources; a step that reads the missing path fails naming it |
+| Nix's fixup and Zig outputs | strips `bin/` only, with `strip -S`, and no aarch64 ELF; an unstripped artifact names Zig's `lib/std` and trips `disallowedReferences`, so `build.zig` strips every installed artifact |
+| aarch64 | every static program builds; under qemu-aarch64 `statmount` is ENOSYS (qemu's), so the mount calls have run on x86_64 only; a library leaves the page size to `getauxval` (`std/heap.zig:82`) |
+| the mount calls under `unshare -Urm` | `fsopen`/`fsconfig`/`fsmount`, `move_mount`, `statmount` by the statx unique id (stable across the move), `mount_setattr` read-only then EROFS, `open_tree(OPEN_TREE_CLONE)` inheriting it, `openat2`'s `RESOLVE_BENEATH` (EXDEV) and `NO_SYMLINKS`/`NO_MAGICLINKS` (ELOOP) |
+| the walker against the symlink swapper (`checks.native`) | a path open that follows symlinks escaped 11–108 of 200; the walk 0 of 400, with each swapper |
+| zwanzig v0.15.1 | its CLI reports no leak, and a handle stored in a struct counts as escaped, so leaks are the table's; models match on the method name alone (`receiver_type` and `fqn` do not resolve imported types); a close model for `fd.closeChecked`, `reapNow(.kill)` and `try c.await()` as an ending are not honoured, which only loses findings |
+| terminal, kernel 6.18 | a write to the pty master after the last slave closed succeeds, so no test asserts the C's EIO for input writes |
+| a sweeper's `waitEmpty` | can wait forever when another process of the user removes the cgroup inside the kernel's 10 ms `cgroup.events` delay, as the C could; kept |
+| derivations, `nix build --rebuild`, empty Zig cache | seccomp 10.9–11.6 s, launcher 19.6 s, fixtures 8.5–9.3 s, each bit-identical; `native-test` 15.7 s Debug, 26.9 s ReleaseSafe; `native-analyze` 76–88 s; `native-lint` 4.5–8 s; `cross-aarch64` 7–19 s |
+| binaries, stripped | flong-launch 446,448 bytes, flong-init 40,312, flong-sweeper 142,272, static, no INTERP, `PT_GNU_STACK` size 0; flong-seccomp 144,784 (libc, libseccomp); fixtures bpfdump 43,872, syscall-probe 22,104, swapper 20,584, ioctl-probe 19,080 |
+| closures | the launcher set 44,256,760 bytes (54,318,016 with the C, before phase 3); flong-seccomp 38,057,520 (48,454,728 with the C); the fixtures 38,019,032 |
+| `packages.bench`, C against Zig, medians of 20 over three runs, ms | flong-init: no network C 31.0–31.8, Zig 29.5–33.5; flong-launch (6acfa9b against a103e76's tree): no network 32.5–33.6 against 30.8–34.0, pasta and an nft hook 53.1–60.1 against 52.5–59.3, a forwarded port 72.0–79.0 against 71.4–73.9, cold 355.7–358.2 against 374.7–382.0, and in an earlier pair cold 368.2–379.4 against 352.9–374.0 |
+| a project's policy compiled at launch | cold 31.6 ms, warm 3.4 ms (the bash: 85.8 and 42.4 ms), medians of 21 on the host |
+| CI | one `nix flake check` job: 5 min 55 s before the port, 7 min 49 s to 14 min 53 s during it; a matrix of one job per check: see [Why Zig](#why-zig-and-what-it-cost) |
+
+### The build
+
+**`native.nix`** holds one builder, `zigSet`, and one derivation per install
+set, each over only the sources that set imports, so an edit elsewhere moves
+none of its store paths. `launcher/default.nix` and `seccomp/default.nix`
+import it (so `module.nix`, `flake.nix` and the tests import them as
+before), and `tests/parity/default.nix` and `tests/probes.nix` import the
+fixtures.
+
+| set | installs | its sources |
+|---|---|---|
+| `seccomp` | `flong-seccomp`; `-Dself=$out`, the project key's compiler path | `src/seccomp/` and the shared modules (`sys`, `msg`, `errno`, `num`, `fd`) |
+| `launcher` | `flong-launch`, `flong-init`, `flong-sweeper`; the compiled-in programs as `-D` options, `-Dinit` the `flong-init` in the same `$out` | `src/` but `seccomp/` and `fixtures/` |
+| `fixtures` | `bpfdump` (libc, libseccomp), `syscall-probe`, `swapper`, `ioctl-probe` | `src/fixtures/`, `scmp.zig`, `sys`, `msg`, `errno` and `fd` |
+
+A set is `stdenv.mkDerivation` with the `zig_0_15` hook, whose own build and
+check phases are off: its build would be a second full build, and its check
+runs `zig build test`, which needs the dependencies. The one build is the
+install phase, `zig build install -Dset=<set>` with the hook's
+`--release=safe -Dcpu=baseline`, then the set's assertions
+(`native.nix:167-177, 210-229`): the static programs static with no
+interpreter, no stack size in any `PT_GNU_STACK`, `flong-launch` with no
+symbol table and naming the `flong-init` beside it, `bpfdump` needing
+libseccomp. `disallowedReferences = [ zig_0_15 ]` holds for every set. A
+`build.zig` or `build.zig.zon` edit moves every set; only its own sources,
+the shared modules, those two files, libseccomp or Zig move `seccomp`'s
+store path, which is part of every project key (quirk 36), so a launcher
+edit orphans no cache. An edit to a shared module, even to a comment, moves
+it.
+
+The lazy dependencies, minish and zwanzig, come from one fixed-output
+derivation, `zig_0_15.fetchDeps` with `fetchAll = true`, linked into the
+Zig cache by the checks that pass `-Ddev=true` alone. Without `-Ddev` no
+step touches them, since an unguarded lazy dependency makes an offline
+build fail fetching it. After a `build.zig.zon` change, the hash is set to
+`lib.fakeHash`, `native-test-debug` built, and the `got:` hash copied in.
+
+**`build.zig`** steps:
+
+| step | what |
+|---|---|
+| `install` | the set `-Dset` names; a missing compiled-in path fails it |
+| `test` | unit and property tests (minish), Debug or ReleaseSafe with `-Drelease=true`; the fuzz targets with their corpus replayed first; the launch's pieces against stand-ins (`flong-fake-bwrap`, the spawn probe); needs `-Ddev=true` |
+| `test-libc` | Zig against what it ports: `errno.zig` against glibc, `num.zig` against `strtoull`, `scmp.zig` against `seccomp.h`, `cfmakeraw` against glibc's, the fixtures' number readers, `sys.O_TMPFILE` against `fcntl.h`, the hook's environment against `setenv`, and `abi` for the host |
+| `abi` | every kernel struct and constant of `sys.zig` against Zig's bundled headers through translate-c, x86_64 and aarch64, each asserting it read its own arch's; `-Dabi-plant` must fail it |
+| `compile-fail` | 14 files in `tests/zig/compile_fail/` that must fail, each with its message |
+| `lint` | `tools/fdlint.zig` over `src/` and `tests/zig/`, and over its planted files |
+| `fmt` | `zig fmt --check` |
+| `analyze` | zwanzig over `src/`, and the 27 planted bugs of `tests/zig/analyze/bugs.zig` it must report, and no more; needs `-Ddev=true` |
+| `cross` | aarch64: flong-launch, flong-init and flong-sweeper (dummy paths) and the three static fixtures built, flong-seccomp and bpfdump compiled unlinked, `abi`'s half |
+| `integration`, `launch-driver`, `test-launch`, `test-paths` | the drivers `checks.native` runs (`flong-walker`, `flong-proc`, `flong-tty`, `flong-launch-driver`), the record writer against `tests/golden/records/`, and `tests/golden/paths.txt` against `spec.clean` and `mount.overlaps`, built only by `tests/integration.nix` |
+
+Every installed artifact is ReleaseSafe, stripped by the build,
+`single_threaded`, and `stack_size = 0`.
+
+**The checks** are `nix flake check`'s: `native-test-debug` and
+`native-test-release` (`test test-libc`), `native-lint` (`lint compile-fail
+fmt`), `native-analyze`, `cross-aarch64` (on x86_64), `launcher`, `seccomp`,
+`golden`, `integration`, the VM tests `native`, `basic-a`, `basic-b`,
+`rootless-a`, `rootless-b` and `parity`, the eight `assertions-N` shards and
+`shellcheck`. `native` boots one node with a lingering user, subordinate
+ranges and a delegated user manager, for what the build sandbox cannot do:
+`clone3` into a cgroup, U1 and U2 through the real `newuidmap`, the walker
+against a symlink swapper, the spawn probe, the terminal through a pty, the
+sweepers over hostile records. `golden` runs flong's programs in the build
+sandbox against cases recorded from the C (`tests/golden/`): argv, stdin
+and redirections against stdout, stderr, status and the working directory
+afterwards, byte for byte, with store paths and project keys filled in as
+the check runs. A fixed case changes only as [Kept
+behaviour](#kept-behaviour) lists.
+
+**golden's filters and libseccomp.** A `.bpf` case depends on libseccomp as
+well as on flong, so `tests/golden/seccomp/LIBSECCOMP` holds the version it
+was recorded with, and `golden` fails `libseccomp changed: run
+golden-update` when the build's differs. `nix run .#golden-update` rewrites
+the `.bpf` files and `LIBSECCOMP` and nothing else, and is used only when
+the version differs and `bpfdump eval`'s text over the old and the new
+bytes is identical, so what a policy means has not changed; its commit is
+its own and shows both. A byte change at the same version is a bug in
+flong. When `eval`'s text differs, libseccomp changed what a policy means:
+stop and decide, never update.
+
+**Running them.** `nix run .#gate` builds every x86_64 check through
+nix-fast-build (parallel evaluators, each check built as soon as it
+evaluates, those a binary cache has skipped), six evaluators by default,
+each restarted past 6 GiB, so one gate at a time on a machine. `nix run
+.#gate-aarch64` evaluates aarch64's checks without building them. The dev
+shell has `zig_0_15`, libseccomp and strace, for `zig build test -Ddev=true`
+and the like. **CI** (`.github/workflows/ci.yml`) lists the checks, builds
+each in its own job with KVM, and evaluates the other outputs; a push to
+trunk green on every job is released. Every job reads the `danielbodart`
+Cachix cache; a job that is not a VM test pushes flong's own outputs, by an
+allow-list of names, and a fork's pull request pushes nothing.
+
+### Tests
+
+The native code is tested at four levels, each a check.
+
+- **`golden`**, black-box: flong's programs run in the build sandbox, argv,
+  stdin and inherited descriptors against stdout, stderr and status
+  (`tests/golden.nix`). Fixed cases (`tests/golden/<set>/`) were recorded
+  from the C, or from the awk and bash for the seccomp tooling, and are
+  never regenerated: every seccomp refusal and edge, the tooling over a
+  checked-in copy of `systemd-analyze syscall-filter`'s dump (so a systemd
+  bump changes nothing), flong-init's argv refusals, flong-sweeper's usage
+  and state-directory refusals, and one case per refusal of the spec. What
+  a case derives (store paths, project keys) is filled in as the check
+  runs. The `.bpf` files follow golden-update's rule above.
+- **Unit and property tests** (minish, `native-test`): the descriptor
+  table's model property (the table always equals `/proc/self/fd`), stale
+  handles, fork and each kind; `num.zig` accepts exactly what the C did;
+  valid specs drawn from a model parse back, each single-rule mutation is
+  refused with its message, and `bwrapArgv` has golden argv per branch; the
+  child-pid reader over any chunking and its 4096-byte bound; the `^]`
+  detector as a state machine against a model; the launch's pieces against
+  stand-ins (`flong-fake-bwrap`, the spawn probe). **Fuzzing**: the sweep's
+  readers (records, session forms, `cgroup.events`, the own-cgroup and
+  mountinfo readers, `/proc/<pid>/stat`'s field 22, closed inodes, inotify
+  events) and the child-pid reader never panic, in ReleaseSafe, 10,000
+  cases each under a fixed seed and a random one printed on failure, after
+  replaying `tests/zig/corpus/`; each token run must accept at least 1% of
+  its inputs. **Mutations** were planted once in a scratch copy, each
+  caught by `native-test`: a child ignoring its keep list, `retainOnly`
+  without its final `close_range`, `close` without the generation bump,
+  `Spawn` skipping the signal reset, `dup2` without staging, a fork child
+  keeping a stale signalfd, `awaitFd` ignoring POLLHUP or POLLERR (the
+  harness's kill bounds the hang).
+- **`test-libc`**: what the no-libc code reimplements, against glibc and
+  the headers (see the `build.zig` table), and `abi`'s structs and
+  constants against Zig's bundled headers on both arches.
+- **`checks.native`** (one node, a lingering user with subordinate ranges, a
+  delegated user manager): `clone3(CLONE_INTO_CGROUP)` into an `O_PATH`
+  leaf; the spawn probe (held descriptors equal the keep list, the signal
+  mask and dispositions default, stdio remapped over every permutation);
+  the walker against the symlink swapper, 0 escapes in 400; a session's
+  cgroup killed, waited for and removed; U1 and U2 through the real
+  `newuidmap`, and SIGTERM during U2's wait leaving no helper or pipe; the
+  holder, limits and passwd; both sweepers over one state directory of
+  launcher-written and hostile records, and the watch before the first
+  sweep; the terminal through a pty (the relay, EIO, the drain, the window,
+  the watchdog after a SIGKILL, a root-owned pty the caller cannot reopen).
+
+The VM tests (`basic-*`, `rootless-*`, `parity`) run the shipped launcher
+end to end. **The record contract**: the bytes the launcher writes are
+pinned by `tests/golden/records/`, against which both the writer test and
+basic's record subtest compare, so a sweeper of an older release reads a
+newer launcher's records. **Mirrors of the spec in Nix**: `module.nix`'s
+`clean`, duplicate destinations and `overlaps` refuse at evaluation what
+`spec.clean` and the mount helper refuse at launch; `tests/golden/paths.txt`
+holds (path, verdict) cases that both `test-paths` and the module's
+`hostAssertions` read, marking those meant to differ (the module's check is
+lexical, the launcher's canonical). The mask depth rule has no launcher
+counterpart.
 
 ### Files
 
+Each module's `//!` comment is the specification of what it declares: what it
+does, when it is called and how it fails, with the file and lines of the C it
+ports.
+
 | file | owns |
 |---|---|
-| `src/sys.zig`, `src/fd.zig` | the syscall layer, and every descriptor in one table: kinds, owned and held handles, the keep list |
-| `src/msg.zig`, `src/errno.zig`, `src/num.zig` | messages, trace, panics; an errno's text as glibc gives it; numbers read as the C read them |
-| `src/proc.zig`, `src/sig.zig` | the process layer: `fork` (a `noreturn` body, the keep list), `Spawn`, `Child`, `lockWait`, starttime; the signal mask, the signalfd, `awaitFd` |
-| `src/spec.zig` | the input contract: argv into `Spec`, and every check that needs nothing but the spec; bwrap's argv |
-| `src/ns.zig`, `src/passwd.zig` | U1 (newuidmap and newgidmap in parallel) and U2 (the split maps, `max_user_namespaces`); a user's name without libc |
-| `src/cgroup.zig` | the nsdelegate check, finding or starting the holder, the session cgroup and its leaves, limits, kill, wait, remove |
-| `src/record.zig`, `src/names.zig` | the state directory, the cache lock, records, liveness, the sweep, `postStop`, the watch; machine and container names |
+| `src/sys.zig` | the syscall layer: every raw call, on `std.os.linux` alone, each returning the value or the errno; the kernel structs std lacks, each size and offset asserted |
+| `src/fd.zig` | the descriptor table: handles, kinds, `Held`, `Stdio`, `inherited`, `retainOnly`, `closeUntracked`, `selfPath` and `pidPath` |
+| `src/msg.zig`, `src/errno.zig`, `src/num.zig` | messages, the trace and the panic handler; glibc's errno texts and names; numbers from outside read exactly as the C read them |
+| `src/sig.zig`, `src/proc.zig` | the signal mask, the signalfd, `awaitFd`, `awaitFdOrExit`, `take`; `fork` (a `noreturn` body, the keep list), `Spawn`, `Child`, `lockWait`, starttime |
+| `src/names.zig`, `src/passwd.zig` | machine and container names; a user's name from `/etc/passwd`, without libc (quirk 19) |
+| `src/spec.zig` | the input contract: argv into a `Spec`, every check that needs nothing but the spec, and bwrap's argv |
+| `src/ns.zig` | U1 (newuidmap and newgidmap in parallel) and U2 (the split maps, `max_user_namespaces`); checkpoint 4 |
+| `src/cgroup.zig` | the nsdelegate check, finding or starting the holder, the session cgroup, its limits and leaves; kill, wait, remove |
+| `src/record.zig` | the state directory, records and `leader=`, liveness, the sweep, `postStop`, the watch |
 | `src/tty.zig` | the foreground wait, the pty relay or passthrough, raw mode, the watchdog, `^]^]^]`, the wait for bwrap |
-| `src/mount.zig` | the mount helper, a fork body of `flong-launch`'s: sources, the walker, masks, overlays, `/sys`, `/run` read-only |
-| `src/launch.zig`, `src/launch/` | `flong-launch`: the order of a launch, bwrap's spawn, the child pid, the hook, pasta, the gate, the one teardown path, exit codes |
-| `src/sweeper.zig` | `flong-sweeper`, the holder unit's process: the state directory, its holder, then `record.watch`; no allocator |
-| `src/init.zig` | `flong-init`, pid 1 in the session: groups, capabilities, controlling tty, ready byte, the gate, chdir, exec tini; no allocator |
+| `src/mount.zig` | the mount helper, a fork body of `flong-launch`'s: sources, the walker, masks, overlays, `/sys`, `/run` read-only; checkpoint 7 |
+| `src/launch.zig` | `flong-launch`: `main` (the prologue), `run` and `teardown`, the order of a launch; checkpoints 1, 2, 3, 5 and 6 |
+| `src/launch/` | the launch's pieces, each tested alone: `prologue.zig` (the cache lock, the relaunch, the close of what the wrapper left open, the protected paths), `bwrap.zig` (its spawn), `childpid.zig` (`--info-fd`), `hook.zig` (`postStart`), `pasta.zig` |
+| `src/init.zig` | `flong-init`: groups, capabilities, the controlling tty, the ready byte, the gate, chdir, exec tini; no allocator; checkpoint 9 |
+| `src/sweeper.zig` | `flong-sweeper`: the state directory, its holder, then the watch; no allocator |
+| `src/seccomp/` | `flong-seccomp`: `main.zig` the root, `compile.zig` the policy compiler, `expand.zig`, `render.zig`, `project.zig` the subcommands, `scmp.zig` libseccomp's externs |
+| `src/fixtures/` | the tests' programs: `bpfdump`, `syscall-probe`, `swapper`, `ioctl-probe` |
+| `tools/fdlint.zig` | the lint |
 
-Dependencies point one way: `sys`; then `msg`, `errno`, `num`, `fd`; then
-`sig`, `proc`; `record` uses `cgroup`; `mount` uses no `proc`. The records
-the launcher writes are the ones the C wrote, byte for byte
-(`tests/golden/records/`).
+Dependencies point one way: `sys`; then `msg`, `errno`, `num` and `fd`; then
+`sig` and `proc`; `record` uses `cgroup`; `mount` uses no `proc`. `sys`
+imports none of flong's modules. `flong-launch` imports spec, ns, cgroup,
+record, mount, tty, passwd, names, proc, sig, fd, sys, msg, errno and num,
+and `src/launch/`; `flong-sweeper` record, cgroup, names, proc, sig and the
+shared modules; `flong-init` sys, msg and errno only. The records the
+launcher writes are the C's, byte for byte as `tests/golden/records/` pins
+them (`launch_test.zig`'s writer test, basic's record subtest), so an old
+sweeper reads a new launcher's records.
 
 ### Conventions
 
-- **Errors.** A function that can fail prints why, once, where it failed,
-  and returns -1; its caller unwinds without printing again. Messages are
-  `flong-launch: <what>: <strerror>`, or a refusal in plain words in the
-  user's terms ("a symlink is on the way to /srv/x").
-- **One cleanup path.** `flong-launch` keeps every resource in one struct,
-  each descriptor -1 and each pid 0 until it exists. `main` is
-  `rc = run(&l); return teardown(&l, rc);`: `run` returns at the first
-  failure, and `teardown` undoes whatever exists. A module undoes its own
-  partial work before returning -1, so the launcher never sees half a
-  resource.
-- **Descriptors.** Everything is opened `O_CLOEXEC`. Every program starts
-  through `fl_spawn` and every helper through `fl_fork`, each of which closes
-  everything not named in `keep`, since a fork keeps descriptors whatever
-  their flags: a helper holding the record's lock keeps a dead session alive
-  for the sweep, and a watchdog holding the pty master keeps the session's
-  terminal from hanging up.
-- **Signals.** `main` blocks TERM, HUP, INT, QUIT, WINCH and CONT first and
-  reads them from a signalfd, so every wait ends on one as an event and none
-  interrupts a step half done. SIGPIPE is ignored. SIGCHLD is reset to its
-  default, in the sweeper too: an ignored SIGCHLD survives `execve`, the
-  kernel then reaps children itself, and `waitid` says `ECHILD`, which would
-  lose a helper's, a hook's or pasta's failure. A terminating signal still
-  queued at the gate is taken off the signalfd there, which aborts the
-  launch, so the teardown's own waits end only on a signal that comes later.
-- **No root.** The launcher and the sweeper refuse a caller of uid 0, and the
-  launcher a map that reaches host id 0.
+- **Errors are values.** `sys.zig` returns `Result(T)`, the value or the
+  kernel's errno, and ignoring one is a compile error. A function that fails
+  says why, once, where it failed, and returns `error.Reported`; its callers
+  pass that up without printing again. The one other error is
+  `error.Aborted`: a terminating signal ended a wait, which prints nothing
+  and leaves the signal for the exit status. Messages are `<prog>: <what>:
+  <strerror>`, or a refusal in plain words in the user's terms ("a symlink
+  is on the way to /srv/x"). Each is one unbuffered write, cut at 1022 bytes
+  and a newline in the launcher, its children and the sweeper, and whole, as
+  one `writev`, in flong-init and flong-seccomp, as the C printed them
+  (quirk 22). `errno.zig` holds glibc's texts, so the programs without libc
+  say what glibc would. `std.posix` is banned: it turns errnos a caller must
+  see into `unreachable`. Numbers from outside go through `num.zig`'s
+  checked arithmetic.
+- **One cleanup path.** A program's resources are values that end once, and
+  a failure unwinds through its caller to the one place that undoes what
+  exists. The launcher keeps every resource in one struct, `Launch`
+  (`src/launch.zig:93-136`): a handle that may not exist yet is optional,
+  one kept until exit is `Held`, each child a `?proc.Child`, null once
+  reaped, and `gate_opened`. `main` ends `proc.exit(teardown(&l, run(&l)))`:
+  `run` returns at the first failure, and `teardown` undoes whatever
+  exists. A module undoes its own partial work before returning, so the
+  launcher never sees half a resource. The mount helper and the other fork
+  bodies own nothing past their exit.
+- **Handles, not numbers.** Every descriptor is a handle, a slot and a
+  generation in one table of 1024 (`fd.zig:119`), opened `O_CLOEXEC`.
+  Closing bumps the generation, so every copy (in a struct, a keep list, a
+  forked child) is stale and panics if used, instead of reaching whatever
+  file reused the number (quirk 40). The kind is in the type, so a read on
+  a directory, a `dir` where a cgroup is wanted, or a network namespace
+  handed to a mount-namespace `setns` does not compile. `Held(k)` is a
+  handle with no `close`, for what lives until exit: the state and sessions
+  directories, the cache (locked shared), the holder's cgroup, U1, the info
+  pipe's read end (quirk 31), the leader's pidfd, the network namespace and
+  pasta's memfd. `Stdio` is 0–2, outside the table, never closed;
+  `inherited` is a descriptor the wrapper handed over, a keep-fd. A number
+  leaves the table only as a child's argument (`passFd`), `/proc/self/fd/N`
+  (`selfPath`), `/proc/<pid>/fd/N` (`pidPath`), a filesystem context's
+  `setFd` or `scmp.exportBpf`. A full table is "too many open descriptors",
+  where the C got `EMFILE` (quirk 41).
+- **Children.** `proc.fork` runs a body that is `noreturn`, so a child
+  never returns into its parent's frames and no parent `defer` runs in it;
+  a body that can return does not compile. It keeps only its keep list
+  (`retainOnly`), since a fork keeps descriptors whatever their flags: a
+  helper holding the record's lock keeps a dead session alive for the
+  sweep, and a watchdog holding the pty master keeps the session's terminal
+  from hanging up. `Spawn` builds a program's argv, environment, stdio and
+  kept descriptors before `clone3`, and resets the signal mask and
+  dispositions in the child. Every child is made by `clone3` with a pidfd,
+  into its cgroup when it has one, and its pidfd's slot is taken first. A
+  `Child` ends once: awaited, reaped now (`.kill` or `.wait`, said at each
+  site), or released unreaped; nothing kills implicitly. Every root is `pub
+  fn main() noreturn` and every body ends in `exit_group`, since a
+  returning single-threaded `main` ends in `exit`. Nothing with a side
+  effect is deferred across a fork.
+- **Signals.** The launcher blocks TERM, HUP, INT, QUIT, WINCH and CONT
+  first and reads them from a signalfd, so every wait ends on one as an
+  event and none interrupts a step half done. SIGPIPE is ignored. SIGCHLD is
+  reset to its default, in the sweeper too: an ignored SIGCHLD survives
+  `execve`, the kernel then reaps children itself, and `waitid` says
+  `ECHILD`, which would lose a helper's, a hook's or pasta's failure. A
+  terminating signal still queued at the gate is taken off the signalfd
+  there, which aborts the launch, so the teardown's own waits end only on a
+  signal that comes later. A child that did not keep the signalfd holds a
+  stale handle, which every wait tests before use. The sweeper has no
+  signalfd: SIGTERM kills it.
+- **Panics.** Every root installs one handler: `<prog>: internal error:
+  <msg>`, one line, then `exit_group` with the program's failure status
+  (125 but for flong-seccomp's 1). Zig's default ends in `abort`, whose
+  SIGABRT pid 1 would drop. A handle used stale is a panic, so it fails
+  closed. When `flong-launch` panics it skips the teardown: the sweeper
+  releases the session, the watchdog restores the terminal and
+  `--die-with-parent` ends the payload; in the mount helper a panic's 125
+  reads as a failed mount. flong-sweeper must not panic on any record a
+  caller can write, since its exit stops the holder and every session: its
+  readers are fuzzed.
+- **Start code.** Every program is single-threaded with `stack_size = 0`,
+  so Zig's start code makes no syscall before `main` and `RLIMIT_STACK`
+  reaches bwrap, tini, the payload and the hooks as the caller set it
+  (quirk 20). No segfault handler; SIGPIPE is left as it came, for `main`
+  to set (`keep_sigpipe`).
+- **Allocation.** flong-init and flong-sweeper allocate nothing: fixed
+  buffers, and flong-init execs tini from the kernel's own argv.
+  flong-launch has one arena over `page_allocator`, never freed, and builds
+  a fork body's inputs before the fork; the mount helper uses `page_allocator` in
+  its child. flong-seccomp has an arena over libc's allocator. No
+  general-purpose allocator.
+- **Lint and analysis.** `tools/fdlint.zig` checks, over Zig's tokens, what
+  the compiler cannot: `std.os`, `std.fs`, `std.c`, `std.posix` and
+  `std.process` outside the syscall layer (`sys`, `fd`, `proc`, `sig`, the
+  fixtures and tests); `.posix` anywhere; a C symbol (`extern`, `export`,
+  `@cImport`) outside `scmp.zig` and the tests that compare with C; a descriptor's `.raw`
+  number outside the syscall layer; argv and environ outside the roots and
+  `Spawn`; a handle's fields outside `fd.zig`; `debug.print` and `std.log`;
+  `catch unreachable` without `// proven: <why>` on its line; a
+  general-purpose allocator. zwanzig reports a double close or a use after
+  close through one open model per function that makes a handle and closes
+  for `close`, `await`, `reapNow` and `release`; each minting function gets
+  its model when it is written, and the planted bugs keep the models
+  honest. Leaks are the table's `liveCount` and a property that the table
+  always equals `/proc/self/fd`.
+- **Ordering.** What types cannot hold is each one linear function with
+  numbered comments, never split into helpers, listed below.
+- **No root.** The launcher and the sweeper refuse a caller of uid 0, and
+  the launcher a map that reaches host id 0.
 - **No dead code**: no test-only knob, no variant kept for comparison, no
-  fallback that nothing reaches.
+  fallback that nothing reaches. What a test needs of the C it ports is
+  built in the test.
+
+**The ordering checkpoints**, each cited by number where it is written:
+
+| # | order | where | held by |
+|---|---|---|---|
+| 1 | the prologue: the time as `main`'s first statement; block signals, SIGPIPE ignored, SIGCHLD default; parse, refusing root first; adopt the keep-fds; the signalfd, so its number is never a keep-fd's; `launcher-start`; the state directory; the cache lock (swept: relaunch or 75); close what was inherited. Nothing chdirs before step 4 | `launch.zig`'s `main` | the keep-fd launches, the spec's golden cases, the payload-descriptor subtest |
+| 2 | the child's ends close at once after bwrap's spawn, whether or not it succeeded: info, ready and gate write ends, the seccomp files, U2, the keep-fds | `run` | the gate subtests |
+| 3 | the ready pipe's read end closes right after the helper's fork, so the helper alone sees the byte or EOF | `run` | the mount subtests |
+| 4 | U2 is strictly sequential: the grandchild unshares and writes `u`; the helper writes the maps, then `m`; the grandchild then writes `max_user_namespaces` and `n`; only then the helper sends the pid and waits. On failure every pipe closes before any reap, then the map programs are killed and the helpers waited for | `ns.zig` | the U2 tests in `checks.native` |
+| 5 | the gate: the terminal started (the watchdog before raw), queued signals taken, the window size, one byte, then the gate is open | `run` | the ^C, gate and terminal subtests |
+| 6 | teardown: finish the terminal, close the gate, kill, reap (short-circuiting), wait the sandbox and hooks leaves, `postStop`, pasta only with `pasta-wait`, remove or close | `teardown` | basic's teardown subtests |
+| 7 | the mount helper: umask, sort, duplicates; the namespaces through the leader's pidfd, as the caller; `setns(U1)`, then root; its own mount namespace and the sources; the ready byte; the session's mount namespace, its root, then its network and cgroup namespaces before sysfs and cgroup2; `/.hostsys` detached; the mounts in sorted order; `/run` read-only last | `mount.run` | the mount subtests, the walker |
+| 8 | the watchdog forks before raw mode, only when stdin is a terminal, keeping its pipe, the leader and 0–2 | `tty.zig` | the watchdog subtest |
+| 9 | flong-init: groups, the bounding set, the ambient set, capabilities, the controlling tty, INT and QUIT default and an empty mask, the ready byte then close, the gate byte, chdir, close all but 0–2, the trace, exec | `init.zig` | the init golden cases, basic's groups and capabilities |
+| 10 | records: `O_TMPFILE`, `LOCK_EX\|LOCK_NB`, one write, linked through `/proc/self/fd` with the uncounted EEXIST loop; `leader=` at the offset; unlink before close | `record.zig` | the record-bytes subtest, the writer test |
+| 11 | the sweeper adds its inotify watch before the first sweep | `record.watch` | `checks.native`'s watch subtest |
+
+### The kernel floor
+
+flong needs Linux 6.13 or later. Nothing asserts it (`module.nix`'s host
+assertions leave it to this section and the README): on an older kernel a
+launch fails loudly at the first call the kernel lacks. Each row was checked
+against the kernel source at the release named and the one before it (the
+syscall table, `include/uapi/linux/`, or the code that parses the
+parameter):
+
+| since | what | used for |
+|---|---|---|
+| 5.2 | `fsopen`, `fsconfig`, `fsmount`, `move_mount`, `open_tree` | every mount the helper makes |
+| 5.3, 5.4 | `clone3`, `pidfd_open`; `waitid(P_PIDFD)` | every child, and waiting on it |
+| 5.6 | `openat2` with `RESOLVE_*` | the walker, exact binds |
+| 5.7 | `CLONE_INTO_CGROUP` | a child created in its leaf, never migrated |
+| 5.9 | `close_range` | a child's keep list; flong-init; the prologue |
+| 5.11 | overlayfs mountable in a user namespace; `CLOSE_RANGE_CLOEXEC` | overlay mounts; `Spawn`'s child marking all but its keep list close-on-exec (`proc.zig:300`) |
+| 5.12 | `mount_setattr` | read-only and the other flags after attaching |
+| 5.14 | `cgroup.kill` | ending a session |
+| 6.8 | `statmount` with `STATMOUNT_MNT_BASIC`, `STATX_MNT_ID_UNIQUE` | the walker telling a host bind's mounts from the session's (`mount.zig:345-358`) |
+| 6.11 | `PIDFD_GET_{CGROUP,MNT,NET}_NAMESPACE` | the helper entering the session's namespaces through the leader's pidfd (`fd.zig:701-710`) |
+| 6.13 | overlay layers by descriptor: `lowerdir+` through `FSCONFIG_SET_FD` (`fsparam_file_or_string` in `fs/overlayfs/params.c`; 6.8 to 6.12 take `lowerdir+` as a string only) | overlay mounts (`mount.zig:299-306`) |
+
+The VM tests run 6.18.51. The ABI is Zig's bundled uapi headers (6.13.4),
+not the host's: `abi` holds every struct and constant `sys.zig` declares
+equal to them on x86_64 and aarch64.
+
+### Kept behaviour
+
+What the port kept of the C that a user might call a bug, what it does
+another way, and what it changed. The code cites these by number. **Keep**:
+reproduced. **Mechanism**: done another way, no visible effect. **Change**:
+a visible difference. **Fix**: a prototype's bug, fixed. Fixes of kept
+behaviour wait for [Open decisions](#open-decisions).
+
+| # | behaviour | where | verdict |
+|---|---|---|---|
+| 1 | the ready byte written after the helper died gives flong-init EPIPE, not SIGPIPE's death: it is its namespace's pid 1, which a default-action signal never kills; it says `telling the launcher the root is built: Broken pipe`, or not, by timing | `init.zig` | Keep; SIGPIPE stays default for the payload |
+| 2 | a relaunch execs the wrapper before inherited descriptors are closed, restoring SIGPIPE and the mask first | `launch/prologue.zig` | Keep |
+| 3 | pasta gets `$leader`, `$userns`, `$netns`, `$machine` only when a hook ran | `launch/hook.zig`, `pasta.zig` | Keep: the environment is built only when a hook runs, and pasta gets it then |
+| 4 | pasta's `--netns` names the leader by pid, the hook's `$netns` the launcher's descriptor | `launch/pasta.zig` | Keep |
+| 5 | a malformed record under the wanted name is dropped, release returns 0, and the launch refuses `has ended but cannot be released yet` though the name is free | `record.zig` | Keep; open decision 1 |
+| 6 | `postStop` counts any reap error but an abort as run | `record.zig` | Keep |
+| 7 | teardown's reaps short-circuit on the first failure, the rest zombies until exit | `launch.zig` | Keep |
+| 8 | holder-start's pidfd is closed unreaped on an abort | `cgroup.zig` | Keep, `Child.release()` |
+| 9 | the C closed the watchdog's pidfd at once and reaped it by pid | `tty.zig` | Mechanism: the pidfd is kept, `reapNow(.wait)` in `finish`, same order |
+| 10 | `^]^]^]` stalls while the payload reads no input: stdin is polled only when nothing read is still waiting for the payload | `tty.zig:594` | Keep; open decision 1 |
+| 11 | the U2 handshake bytes' values are never checked | `ns.zig` | Keep |
+| 12 | `limit io.weight` is accepted and never emitted by the module | `spec.zig` | Keep; open decision 1 |
+| 13 | the seccomp compiler's duplicate check ignores negative (pseudo) syscall numbers | `seccomp/compile.zig` | Keep; open decision 1 |
+| 14 | a `masked_eq` with mask 0 passes the int-argument check | `seccomp/compile.zig` | Keep |
+| 15 | policy numbers are `strtoull` base 0 behind a leading-digit check | `num.zig`, `seccomp/compile.zig` | Keep exactly what the C accepted, pinned by `test-libc` and the golden corpus |
+| 16 | an argument to `flong-seccomp` was a usage error | `seccomp/main.zig` | Change: `expand`, `render` and `project` are subcommands; anything else prints the new usage line, exit 2 |
+| 17 | libseccomp exports with one `write` | `seccomp/scmp.zig` | Keep, to stdout or the project's temp file |
+| 18 | strerror texts | `errno.zig` | Keep glibc's |
+| 19 | `getpwuid` | `passwd.zig` | Change, forced by no libc: `/etc/passwd` only; an NSS-only user gets the `uid N` form; the tested text is unchanged |
+| 20 | `RLIMIT_STACK` passes through to children | `init.zig`, `build.zig` | Keep, `stack_size = 0` and rootless's `ulimit -s` subtest |
+| 21 | `realpath` for `postStop`, the closure and the protected paths | `launch/prologue.zig`, `record.zig`, `spec.zig` | Mechanism: an `O_PATH` open and the readlink of its `selfPath`, which needs a free descriptor and `/proc` where glibc's needs neither; the longest-existing-prefix rule unchanged; `access(X_OK)` is `faccessat` |
+| 22 | message lengths: the launcher's, the mount helper's and the sweeper's cut at 1023 bytes; flong-init's, flong-seccomp's and the tooling's whole | `msg.zig` | Keep the lengths; Mechanism: one write or `writev` per message, where the C's stdio wrote some in pieces |
+| 23 | the C waited for the info pipe or bwrap with epoll | `sig.zig` | Mechanism: one `poll`, the descriptor winning a tie |
+| 24 | the prototype's fork child exited 125 silently when `retainOnly` failed, its spawned child 127 | `proc.zig` | Fix: printed first, as the C did |
+| 25 | the prototype's `Child.deinit` killed an unreaped child | `proc.zig` | Change: no implicit kill; each site says `.kill` or `.wait`, as the C did |
+| 26 | the prototype leaked a child when adopting its pidfd failed | `fd.zig`, `proc.zig` | Fix: the slot is reserved before `clone3` |
+| 27 | removing a cgroup tree recurses without a bound | `cgroup.zig` | Keep; 1,100 nested cgroups peak at 2,672 kB of stack and stop at the descriptor table, as the C did |
+| 28 | uid map extents are uncapped; above 340 the kernel says EINVAL | `spec.zig` | Keep |
+| 29 | a deleted source reads back with ` (deleted)` and misses the protected-path compare | `mount.zig` | Keep |
+| 30 | `relaunch` is not checked absolute: it is exec'd from the wrapper's own working directory and its `$0` may be relative | `spec.zig`, `launch/prologue.zig` | Keep, with no chdir before step 4 |
+| 31 | the info pipe's read end is never closed | `launch.zig` | Keep: `Held` |
+| 32 | exit 125 collides with a payload's own 125 | `launch.zig` | Keep |
+| 33 | the sweeper's waits cap at 256 inodes | `record.zig` | Keep |
+| 34 | the project compile never shows the compiler's stats line on success | `seccomp/project.zig` | Keep |
+| 35 | a project that denies every name renders `allow ` with no name, refused (`missing syscall name`) | `seccomp/project.zig` | Keep |
+| 36 | the project key is sha256 of the compiler's store path, `\n`, and the rendered policy without its trailing newline; the compiler reads the policy plus one newline | `seccomp/project.zig`, `native.nix` | Keep both. The path moves only with the seccomp set's sources, `build.zig*`, libseccomp or Zig; caches are orphaned when it moves |
+| 37 | the project's temp file was `mktemp`'s, then `mv -T` | `seccomp/project.zig` | Mechanism: `.KEY.<6 random>`, `O_CREAT\|O_EXCL`, 0600, opened again by name as the shell's `>` did (a umask without the owner's write bit refuses it, as before), `renameat` |
+| 38 | the tooling's prefixes (`flong-seccomp-project:`, `flong-seccomp-render:`), the compiler's captured `flong-seccomp: line N:` lines, an expand failure's unprefixed line and exit 1 | `seccomp/` | Keep; only the usage lines changed |
+| 39 | the C's terminal teardown was safe on the zero struct, whose fds are 0 | `tty.zig` | Moot: optionals |
+| 40 | a stale or wrong-kind descriptor reached the wrong file in C silently | `fd.zig` | New: a panic, 125; fails closed |
+| 41 | the table is full at 1024 | `fd.zig` | Matches `EMFILE` at the default soft limit |
+| 42 | a terminal the caller cannot reopen (after `su`): the `/proc/self/fd/1` reopen fails silently and the relay writes through fd 1 only when poll reports POLLOUT | `tty.zig` | Keep |
+| 43 | a redirected stderr stays where the caller sent it: in relay the payload's stderr is the pty's slave only if the launcher's is a terminal | `tty.zig` | Keep |
+| 44 | after a hang-up the master is closed, and resize and the drain check for it | `tty.zig` | Keep |
+| 45 | `launcher-start` is stamped when `main` begins and printed after the signalfd | `launch.zig` | Keep |
+| 46 | the tooling on inputs no caller gives: an unreadable stdin to `project` compiled the tier without the project's lines, exit 0 (failing open); texts that named the old tools' store paths or followed the locale | `seccomp/` | Change: `project` refuses (`reading the policy: <strerror>`), exit 1; flong's prefixes and the C locale's text; each exit status as before. None is test-asserted |
+
+### Open decisions
+
+1. **Fixes of kept behaviour**, each its own commit with a test: the
+   malformed-record refusal (quirk 5; recommended: treat a dropped record as
+   released, so the create retries); `limit io.weight` (quirk 12;
+   recommended: keep until module.nix emits it or drops it); pseudo-number
+   duplicates (quirk 13; recommended: keep, since no policy of the repo has
+   one); the `^]` stall (quirk 10; recommended: poll stdin while input is
+   buffered).
+2. **Sweeper resilience.** A sweeper failure stops the holder and every
+   session (`module.nix`'s holder unit); flong relies on its readers being
+   panic-free. The alternative, sweeping in a forked child. Recommended:
+   keep.
+3. **When nixpkgs drops `zig_0_15`:** port to the next Zig in one commit, or
+   add a second nixpkgs input. Recommended: port forward.
 
 ### The input contract
 
@@ -1498,26 +2001,30 @@ bwrap --userns <U1> --userns2 <U2> [--assert-userns-disabled]
 
 ### The launch, in order
 
+Steps 6 to 18 are numbered so in `run`'s comments in `src/launch.zig`;
+`main`'s comments number its own statements and name steps 3 to 5 where
+they are made. The call is what that step calls.
+
 | # | step | call | trace stage |
 |---|---|---|---|
-| 1 | block signals, ignore SIGPIPE, SIGCHLD to its default | `main` | `launcher-start` |
-| 2 | parse; refuse uid 0; then the signalfd, so its number is never one a `keep-fd` names | `spec_parse` | |
-| 3 | open and check the state directory | `state_open` | |
-| 4 | lock the cache shared; swept: exec `relaunch`, or exit 75 | `cache_lock` | `cache-locked` |
-| 5 | close inherited descriptors except `keep-fd`s and our own | `fl_close_from` | |
-| 6 | wait for the foreground, choose relay or passthrough, open the pty | `tty_prepare` | |
-| 7 | nsdelegate; find or start the holder | `cg_check_nsdelegate`, `cg_holder_find` | |
-| 8 | the inline sweep | `rec_sweep` | `swept` |
-| 9 | the record, locked, with `poststop=` and `cgroup=` | `rec_create` | `recorded` |
-| 10 | U1, then U2 | `ns_create` | `U1-mapped`, `U2-made` |
-| 11 | the session cgroup, limits, leaves | `cg_session_create` | `cgroup-made` |
-| 12 | open the seccomp files; the info, ready and gate pipes; bwrap in the sandbox leaf | `fl_spawn` | |
-| 13 | read `--info-fd` until `child-pid`; hold the leader's pidfd and network namespace; append `leader=` | `rec_set_leader` | `bwrap-child` |
-| 14 | fork the mount helper, which prepares sources, waits for the ready byte, then mounts `/sys`, the declared mounts and `/run` read-only | `fl_fork`, `flong_mount_main` (`src/mount.zig`) | `sandbox-ready`, `mounts-done` |
-| 15 | `postStart` in the hooks leaf, waited for | `fl_spawn`, `fl_reap` | `hook-done` |
-| 16 | pasta in the pasta leaf, ready when the spawned pasta exits 0 | `fl_spawn`, `fl_reap` | `pasta-up` |
-| 17 | save modes, start the watchdog, then raw (relay); take queued signals; copy the window size; write the gate byte | `tty_start`, `fl_take_signal` | `gate-open` |
-| 18 | wait for bwrap | `tty_wait` | `bwrap-exited` |
+| 1 | block signals, ignore SIGPIPE, SIGCHLD to its default | `sig.block`, `sig.ignorePipe`, `sig.defaultChld` | `launcher-start` |
+| 2 | parse; refuse uid 0; adopt the `keep-fd`s; then the signalfd, so its number is never one a `keep-fd` names | `spec.parse`, `fd.adoptInherited`, `sig.openSignalfd` | |
+| 3 | open and check the state directory | `prologue.stateOpen` (`record.stateOpen`) | |
+| 4 | lock the cache shared; swept: exec `relaunch`, or exit 75 | `prologue.cacheLock`, `prologue.relaunch` | `cache-locked` |
+| 5 | close inherited descriptors except `keep-fd`s and our own | `prologue.closeUntracked` | |
+| 6 | wait for the foreground, choose relay or passthrough, open the pty | `tty.prepare` | |
+| 7 | nsdelegate; find or start the holder | `cgroup.checkNsdelegate`, `cgroup.holderFind` | |
+| 8 | the inline sweep | `record.sweep` | `swept` |
+| 9 | the record, locked, with `poststop=` and `cgroup=` | `cgroup.sessionPath`, `record.create` | `recorded` |
+| 10 | U1, then U2 | `ns.create` | `U1-mapped`, `U2-made` |
+| 11 | the session cgroup, limits, leaves | `cgroup.sessionCreate` | `cgroup-made` |
+| 12 | the protected paths made canonical; open the seccomp files; the info, ready and gate pipes; bwrap in the sandbox leaf | `prologue.protectPaths`, `bwrap.spawn` | |
+| 13 | read `--info-fd` until `child-pid`; hold the leader's pidfd and network namespace; append `leader=` | `childpid.wait`, `fd.pidfdOpen`, `fd.openNetns`, `Record.setLeader` | `bwrap-child` |
+| 14 | fork the mount helper, which prepares sources, waits for the ready byte, then mounts `/sys`, the declared mounts and `/run` read-only; wait for it or bwrap | `proc.fork` with `mount.run`, `sig.awaitFdOrExit`, `Child.await` | `sandbox-ready`, `mounts-done` |
+| 15 | `postStart` in the hooks leaf, waited for | `hook.build`, `Spawn.start`, `Child.await`, `hook.done` | `hook-done` |
+| 16 | pasta in the pasta leaf, ready when the spawned pasta exits 0 | `pasta.build`, `Pasta.start`, `Child.await`, `pasta.done` | `pasta-up` |
+| 17 | save modes, start the watchdog, then raw (relay); take queued signals; copy the window size; write the gate byte | `tty.start`, `sig.take`, `tty.resize` | `gate-open` |
+| 18 | wait for bwrap | `tty.wait` | `bwrap-exited` |
 | 19 | teardown | `teardown` | `poststop-done`, `pasta-gone`, `released` |
 
 A failure or a terminating signal at any step before the gate goes straight

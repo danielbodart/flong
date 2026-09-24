@@ -1,4 +1,4 @@
-//! launch/childpid.zig from outside (minish, the `test` step; ZIG.md,
+//! launch/childpid.zig from outside (minish, the `test` step; DESIGN.md,
 //! "Tests": the child-pid parser over split reads and the 4096-byte bound,
 //! and fuzzing). `childpid.wait` is driven by a scripted source standing
 //! for the info pipe and bwrap's pidfd: its bytes served in chunks the test
@@ -22,7 +22,7 @@
 //!
 //! This is its own test root, not a target of tests/zig/fuzz.zig: that file
 //! is the sweep's, and trunk's; the branch adds only to build.zig's
-//! launcher block (ZIG.md, "Phase 7").
+//! launcher block (the Zig port's phase 7).
 
 const std = @import("std");
 const builtin = @import("builtin");

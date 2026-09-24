@@ -1,5 +1,6 @@
 # What checks.native and the build-sandbox proofs run: every proof in
-# tests/proofs/ (ZIG.md, "Phase 0: proofs" and "Phase 2"). Never a flake
+# tests/proofs/ (the Zig port's phases 0 and 2;
+# tests/proofs/README.md). Never a flake
 # output or package: flake.nix reaches it only through checks.integration,
 # which builds every derivation here, and checks.native, which puts `vm` on
 # its node.
@@ -35,7 +36,7 @@
 # ~/Projects/flong-spikes-archive/zig.
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:10-19
-# does, since zig_0_15 is that nixpkgs' (ZIG.md, "Decided").
+# does, since zig_0_15 is that nixpkgs' (DESIGN.md, "Why Zig, and what it cost").
 {
   pkgs ?
     let
@@ -79,8 +80,8 @@ let
     name: p: lib.optionalAttrs (p ? bins) { "${name}-bins" = p.bins; }
   ) proofs;
 
-  # The drivers checks.native runs against flong's own modules (ZIG.md,
-  # "The Nix build": tests/integration.nix): static, no libc, stripped, as
+  # The drivers checks.native runs against flong's own modules (DESIGN.md,
+  # "The build"): static, no libc, stripped, as
   # an installed artifact is.
   drivers = zigSet {
     pname = "flong-drivers";
@@ -104,7 +105,7 @@ let
     ];
   };
 
-  # Phase 7's L1 (ZIG.md): the spec and what it imports.
+  # The Zig port's L1: the spec and what it imports.
   specFiles = [
     ../src/sys.zig
     ../src/fd.zig
@@ -118,7 +119,7 @@ let
     ../src/spec.zig
   ];
 
-  # Phase 7's L2 (ZIG.md): the launch's halves, driven from checks.native.
+  # The Zig port's L2: the launch's halves, driven from checks.native.
   # Static, no libc, stripped, no stack size, as the launcher will be.
   launch-driver = zigSet {
     pname = "flong-launch-driver";

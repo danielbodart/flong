@@ -1,7 +1,8 @@
 # Plan: one `flong` binary, ZON declarations, no bash wrapper
 
-This plan starts after [ZIG.md](ZIG.md) lands, meaning its L5 and phase 8
-are done. Its goals, in order:
+This plan starts where the Zig port ended: every native program is Zig, and
+what the port established is DESIGN.md's [The native
+launcher](DESIGN.md#the-native-launcher). Its goals, in order:
 
 1. **One binary for the libc-free programs.** `flong-launch`, `flong-init`
    and `flong-sweeper` become subcommands of one static binary, `flong`,
@@ -29,12 +30,12 @@ yet; the phase that checks it is named.
 The user decided these on 2026-09-24:
 
 - **The libc-free programs merge; the compiler stays separate.**
-  `flong-seccomp` links glibc for libseccomp (ZIG.md, "Decided": keep
-  libseccomp, byte-identical BPF). Merging it would put libc start code
-  into every sandbox's pid 1, which undoes P2's "no syscall before `main`"
-  (ZIG.md, Measured). It would also move the project cache key on every
-  launcher edit: that key hashes the compiler's store path (ZIG.md, quirk
-  36).
+  `flong-seccomp` links glibc for libseccomp (DESIGN.md, "Why Zig, and what
+  it cost": keep libseccomp, byte-identical BPF). Merging it would put libc start code
+  into every sandbox's pid 1, which undoes "no syscall before `main`"
+  (DESIGN.md, "What the port measured": start code). It would also move the project cache key on every
+  launcher edit: that key hashes the compiler's store path (DESIGN.md, "Kept
+  behaviour", quirk 36).
 - **ZON is the declaration format**, following capsper. The schema lives in
   the type; an unknown field or a wrong type is a parse error with a line
   number. Each field's doc comment is its only description.
@@ -67,7 +68,7 @@ The user decided these on 2026-09-24:
 - **Two validators today.** Nix `assertions` (`module.nix:676`,
   `assertionsFor`) and the launcher's spec checks (`src/spec.zig`) judge
   many of the same things. `tests/golden/paths.txt` exists to keep them in
-  step (ZIG.md, "Mirrors of the spec in Nix"). One parser, run at build
+  step (DESIGN.md, "Tests": mirrors of the spec in Nix). One parser, run at build
   time by `flong check`, replaces the Nix mirror.
 - **Three languages on the launch path.** Nix renders a header,
   `rootless-wrapper.bash` (457 lines) computes the runtime facts, and Zig
@@ -85,7 +86,7 @@ The user decided these on 2026-09-24:
 ### The binary
 
 - **`flong`** is static, has no libc and is stripped, with the settings
-  every root has today (ZIG.md, "Per binary").
+  every root has today (DESIGN.md, "Conventions").
   - Subcommands: `launch`, `init`, `sweeper`, `check`, `version`, `help`.
   - The test fixtures that need no libc (`syscall-probe`, `swapper`,
     `ioctl-probe`) become hidden subcommands only if that simplifies
@@ -99,7 +100,7 @@ The user decided these on 2026-09-24:
   - Dispatch is the first thing in `main` and makes no syscall, so P2's
     property holds; the strace check in `tests/native.nix` confirms it.
 - **`flong init`** keeps reusing the kernel's argv slots for tini's argv
-  (ZIG.md, "Allocation"). The slot indices shift by one for the
+  (DESIGN.md, "Conventions": allocation). The slot indices shift by one for the
   subcommand word, and a unit test pins them.
 - **Message prefixes** become `flong launch: …`, `flong init: …` and
   `flong sweeper: …` in S1. The same commit updates every asserted string
@@ -216,7 +217,7 @@ and no exec.
 What a native release needs that Nix supplies today:
 
 - **Paths compiled in.** `-Dbwrap`, `-Dpasta`, `-Dtini`, `-Dnewuidmap` and
-  `-Dnewgidmap` (ZIG.md, "build.zig") become optional fields in the
+  `-Dnewgidmap` (DESIGN.md, "The native launcher") become optional fields in the
   config. A missing one is looked up on `PATH` at `check` time, never
   silently at launch.
 - **The root.** Today a session's root is a NixOS container closure plus
@@ -232,12 +233,13 @@ What a native release needs that Nix supplies today:
   there. The BPF golden files (`tests/golden/seccomp/*.bpf`) prove the
   bytes are unchanged.
 - **Release artifacts.** CI builds `flong` and `flong-seccomp` for x86_64
-  and aarch64 (ZIG.md already cross-builds them) and attaches them to the
+  and aarch64 (`cross-aarch64` already cross-builds them) and attaches them to the
   release that each trunk push publishes (`.github/workflows/ci.yml`).
 
 ## Phases
 
-The same pattern as ZIG.md, on trunk only:
+The same pattern as the Zig port (its plan, ZIG.md, is in git at
+e717355), on trunk only:
 - characterization tests land first;
 - each phase is one or more commits, each through `nix run .#gate`, each
   pushed as a fast-forward;
@@ -275,9 +277,9 @@ The same pattern as ZIG.md, on trunk only:
 - **S5, outside Nix.** Only if pursued: decide the root first; then the release
   artifacts and a README section on using flong without Nix.
 
-## Constraints kept from ZIG.md
+## Constraints kept from the Zig port
 
-- **Every ordering checkpoint** (ZIG.md, "Ordering checkpoints") still
+- **Every ordering checkpoint** (DESIGN.md, "The ordering checkpoints") still
   holds in the linear functions it names. `flong launch` adds its own
   linear prologue ahead of checkpoint 1, for the wrapper's order above.
 - **Asserted strings and exit codes stay as they are**, except the

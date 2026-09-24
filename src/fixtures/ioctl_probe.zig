@@ -1,5 +1,5 @@
 //! ioctl-probe REQUEST: prints the errno name of ioctl(0, REQUEST, buf), or
-//! ok (ZIG.md, "Phase 6"). The C that tests/probes.nix held until phase 6
+//! ok (the Zig port's phase 6). The C that tests/probes.nix held until phase 6
 //! (b), line by line. The buffer, 256 zero bytes, holds whatever a request
 //! it is asked about writes back: TCGETS on a real terminal writes a whole
 //! termios. The request is passed whole, all 64 bits, which the C library's

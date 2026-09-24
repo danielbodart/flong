@@ -1,5 +1,5 @@
-//! fdlint: the rules the compiler and zwanzig cannot express (ZIG.md, "Lint
-//! and analysis"), over Zig's own tokens, so comments and strings never
+//! fdlint: the rules the compiler and zwanzig cannot express (DESIGN.md,
+//! "Conventions": lint and analysis), over Zig's own tokens, so comments and strings never
 //! match and an alias is caught where it is made.
 //!
 //!   fdlint [--skip DIR]... [--as LABEL FILE]... PATH...
@@ -19,7 +19,7 @@
 //!                  Only after `std.`, so callconv(.c) and builtin.os pass.
 //!                  Not in the syscall layer, src/fixtures/, tests
 //!   posix          .posix anywhere, which makes real errnos unreachable
-//!                  (ZIG.md, "The syscall layer"). Not in tests
+//!                  (DESIGN.md, "Conventions"). Not in tests
 //!   extern         extern fn, var or const, extern "lib", @extern, export,
 //!                  @cImport; extern struct, union and enum pass. Not in
 //!                  src/seccomp/scmp.zig, tests/zig/abi.zig,
@@ -32,7 +32,7 @@
 //!                  src/proc.zig (Spawn's default envp), tests
 //!   handle-guts    .slot, .gen: a handle's fields. Not in src/fd.zig, tests
 //!   adopt-foreign  .adoptForeign, which went with the C launcher's
-//!                  mount-helper shim (ZIG.md, phase 7's L5). Not in tests
+//!                  mount-helper shim (the Zig port's L5). Not in tests
 //!   debug-output   debug.print, std.log: messages go through msg.zig. Not
 //!                  in tests
 //!   catch-unreachable

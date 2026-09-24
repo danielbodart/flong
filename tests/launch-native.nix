@@ -1,5 +1,5 @@
-# Phase 7's L2 in checks.native (ZIG.md, "Tests": checks.native; "Phase
-# 7", L2): a testScript fragment, Python run in tests/native.nix's scope
+# The Zig port's L2 in checks.native (DESIGN.md, "Tests":
+# checks.native): a testScript fragment, Python run in tests/native.nix's scope
 # (`machine`, `shlex`, `as_alice`), after the common setup: alice, uid
 # 1000, lingering, subordinate ids 100000-165535, a delegated unit per
 # as_alice, and flong-launch-driver (tests/zig/launchdriver.zig) on PATH.

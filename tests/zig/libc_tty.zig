@@ -1,4 +1,4 @@
-//! sys.cfmakeraw against glibc's (ZIG.md, "test-libc"): the kernel's
+//! sys.cfmakeraw against glibc's (DESIGN.md, "Tests": test-libc): the kernel's
 //! struct termios as the launcher saves it (TCGETS), and glibc's own
 //! struct with the same flags, line and control characters, each made raw,
 //! must agree field for field, over every flag bit alone, all of them, and

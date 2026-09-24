@@ -1,5 +1,5 @@
-//! tests/golden/paths.txt against the launcher's functions (ZIG.md,
-//! "Mirrors of the spec in Nix"): each case's verdict is what spec.clean,
+//! tests/golden/paths.txt against the launcher's functions (DESIGN.md,
+//! "Tests": mirrors of the spec in Nix): each case's verdict is what spec.clean,
 //! mount.overlaps or the mount helper's duplicate refusal says, whatever
 //! module.nix says of it (module.nix asserts its own side against the same
 //! file). Built and run by tests/integration.nix's spec-paths, the only

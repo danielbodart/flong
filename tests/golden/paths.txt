@@ -1,7 +1,7 @@
 # Paths, and what flong's two readers of a declaration say of them: the
 # launcher (the Zig in tests/zig/paths.zig, through the functions it runs)
 # and module.nix's mirrors, which refuse at evaluation what the launcher
-# would refuse at launch (ZIG.md, "Mirrors of the spec in Nix"). One
+# would refuse at launch (DESIGN.md, "Tests": mirrors of the spec in Nix). One
 # declaration each, read by both; module.nix asserts its own verdicts
 # against this file.
 #

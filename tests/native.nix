@@ -2,10 +2,10 @@
 # lingering user with subordinate ids and a delegated user manager, the
 # proofs' binaries on PATH (tests/integration.nix's `vm`), and each proof's
 # testScript fragment after the common setup below, in tests/proofs/ name
-# order (ZIG.md, "Tests", checks.native). Before them, flong-init past its
+# order (DESIGN.md, "Tests": checks.native). Before them, flong-init past its
 # argv, the walker, and flong-proc: clone3 into a cgroup, a fork after
-# setns(CLONE_NEWUSER), a session swept, and the C and the Zig sweepers
-# over the same records (phase 5); src/tty.zig through flong-tty and
+# setns(CLONE_NEWUSER), a session swept, and the sweeper over the records
+# the C sweeper's output pins (phase 5); src/tty.zig through flong-tty and
 # ptydrive (phase 7's L3). A fourth VM beside basic, rootless and parity;
 # nothing in it is about time.
 #
@@ -18,11 +18,11 @@ let
   # The launcher's output, for its flong-init (src/init.zig).
   launcher = import ../launcher { pkgs = hostPkgs; };
   # rootless.nix's ioctl-probe and swapper; the swapper races the walker
-  # (ZIG.md phase 4).
+  # (the Zig port's phase 4).
   probes = import ./probes.nix;
 
-  # The walker's fixture and runs (ZIG.md, "Tests", checks.native; phase
-  # 4): flong-walker (tests/zig/walker.zig) drives src/mount.zig's walk,
+  # The walker's fixture and runs (DESIGN.md, "Tests": checks.native;
+  # the port's phase 4): flong-walker (tests/zig/walker.zig) drives src/mount.zig's walk,
   # masks and source check as root of a user and mount namespace of its
   # own, over a tmpfs at /tmp/walk. Each run prints "$ ARGS", what it said
   # and "rc=N"; the race prints its counts. Run under `unshare --user
@@ -108,8 +108,8 @@ let
     race swapper y
   '';
 
-  # The sweeper's differential fixture (ZIG.md phase 5, "the record
-  # contract"): sweep-diff PROGRAM builds one state directory of records a
+  # The sweeper's differential fixture (the port's phase 5; DESIGN.md,
+  # "Tests": the record contract): sweep-diff PROGRAM builds one state directory of records a
   # launcher writes and hostile ones, and the sessions they name under a
   # holder h of the calling unit's, runs PROGRAM as the holder's sweeper in
   # h/supervisor until it blocks in its inotify read, adds a record, lets it
@@ -263,8 +263,8 @@ let
     main 2>&1 | sed -e "s|$cg|CG|g" -e '/ Killed  *sleep 600$/d'
   '';
 
-  # postStop once, and the watch before the first sweep (ZIG.md phase 5,
-  # ordering checkpoint 11; flong-record.c:193-217, 755-825): sweep-order
+  # postStop once, and the watch before the first sweep (the port's phase 5,
+  # DESIGN.md's ordering checkpoint 11; flong-record.c:193-217, 755-825): sweep-order
   # PROGRAM runs PROGRAM as the holder's sweeper over three records, all
   # dead but one. `gated`'s postStop (psGate) holds the first sweep until
   # told. `late` comes before it in the directory's order and its lock is
@@ -373,7 +373,7 @@ in
       integration.vm
       (probes pkgs)
       # The caller's terminal and shell for flong-tty, rootless.nix's L0
-      # driver (ZIG.md phase 7 L3).
+      # driver (the Zig port's L3).
       (pkgs.writers.writePython3Bin "ptydrive" { flakeIgnore = [ "E501" ]; } (builtins.readFile ./ptydrive.py))
     ];
   };
@@ -426,7 +426,7 @@ in
         out = init_run("/dev/null", "/")
         assert out == "flong-init: the gate closed without opening: not starting the payload\nrc=125\n", out
         # The gate open, DIR missing (:235-239): the message is over 1 KiB
-        # and printed whole (ZIG.md quirk 22), then too long a DIR.
+        # and printed whole (quirk 22), then too long a DIR.
         for dir, text in (("/nonexistent/" + "/".join(["d" * 200] * 6), "No such file or directory"),
                           ("/" + "/".join(["d" * 200] * 21), "File name too long")):
             out = init_run("/tmp/init-gate", dir)
@@ -676,7 +676,7 @@ in
         ], out
 
     with subtest("tty: the relay both ways, EIO, the drain, the window, the watchdog, a hang-up then SIGWINCH, and a terminal alice cannot reopen"):
-        # ZIG.md phase 7 L3: src/tty.zig through flong-tty
+        # The Zig port's L3: src/tty.zig through flong-tty
         # (tests/zig/ttydriver.zig), which drives it as the launcher does,
         # PROGRAM standing in for bwrap and the payload; ptydrive
         # (tests/ptydrive.py) plays the caller's terminal and shell, as for

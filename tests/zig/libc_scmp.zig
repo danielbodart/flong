@@ -1,5 +1,5 @@
 //! test-libc: src/seccomp/scmp.zig against seccomp.h, through translate-c
-//! of the libseccomp flong-seccomp links (ZIG.md, "Tests"): every constant,
+//! of the libseccomp flong-seccomp links (DESIGN.md, "Tests"): every constant,
 //! the struct's layout, the enum values, each extern's arity, and the calls
 //! themselves, once, as flong-seccomp and bpfdump make them.
 

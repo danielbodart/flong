@@ -1,4 +1,4 @@
-//! flong-sweeper's root (ZIG.md, "Per binary"): launcher/flong-sweeper.c,
+//! flong-sweeper's root (DESIGN.md, "Files"): launcher/flong-sweeper.c,
 //! line by line (:18-42). The C was deleted in phase 5 (b), and its line
 //! numbers here are those of c9571be.
 //!
@@ -16,7 +16,7 @@
 //! buffers (record.zig). Its exit stops the holder and every session
 //! (module.nix:936-941), so it must not panic on any record a caller can
 //! write; a panic says one line, "flong-sweeper: internal error: <msg>",
-//! and exits 125 (ZIG.md, open decision 2). Messages are cut at 1023
+//! and exits 125 (DESIGN.md, open decision 2). Messages are cut at 1023
 //! bytes, as the C's (quirk 22).
 
 const std = @import("std");

@@ -1,11 +1,11 @@
-//! proc.zig and sig.zig from outside (minish, the `test` step; ZIG.md,
+//! proc.zig and sig.zig from outside (minish, the `test` step; DESIGN.md,
 //! "Tests"): fork and its keep list, Spawn against the spawn probe
 //! (`flong-proc probe`, tests/zig/procdriver.zig), Child's endings,
 //! lockWait, the signalfd, awaitFd's POLLHUP and POLLERR, the pidfd's slot
 //! reserved before clone3, and the spike's model property grown to forks
 //! and spawns: after any sequence the table, a model of it and the kernel's
 //! /proc/self/fd agree, and each child holds what it was given. Each test
-//! is one of ZIG.md's mutations' catcher; the list is in its name.
+//! is one of the port's planted mutations' catcher (DESIGN.md, "Tests"); the list is in its name.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -30,8 +30,8 @@ fn findDriver() void {
     driver = driver_buf[0..p.len :0];
 }
 
-// Any file every Linux has, the Nix build sandbox included (ZIG.md,
-// "Measured": P1).
+// Any file every Linux has, the Nix build sandbox included (found in
+// the port's phase 0).
 const test_file = "/etc/passwd";
 
 fn opened(r: anytype) !@FieldType(@typeInfo(@TypeOf(r)).error_union.payload, "ok") {
@@ -680,7 +680,7 @@ test "a fork child drops a signalfd it does not keep, and its waits poll without
 
 /// A child's status within `ms` milliseconds, or error.Hung after it is
 /// killed and reaped: the bound on a wait that a broken awaitFd would never
-/// end (ZIG.md, "Tests": the harness's kill bounds the hang).
+/// end (DESIGN.md, "Tests": the harness's kill bounds the hang).
 fn awaitWithin(child: proc.Child, ms: i32) !u8 {
     var p = [1]sys.pollfd{.{ .fd = child.pidfd.raw(), .events = sys.POLL.IN, .revents = 0 }};
     const n = switch (sys.poll(&p, ms)) {

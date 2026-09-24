@@ -293,7 +293,7 @@ pub fn ok9OutOnce() !void {
 // ---- B27-B28: bwrap's spawn (phase 7 L4, src/launch/bwrap.zig) ----
 // Measured: both are reported with `spawn`'s open model or without it (the
 // close models alone find a double close); the model is there by the rule,
-// one per minting function (ZIG.md, "Lint and analysis").
+// one per minting function (DESIGN.md, "Conventions": lint and analysis).
 
 const bwrap = @import("bwrap");
 

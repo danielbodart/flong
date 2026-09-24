@@ -812,7 +812,7 @@ in
           out = machine.succeed(by_caller("${launcher} 'true' 2>&1"))
           assert out == "", out
 
-      # The record contract (ZIG.md): the bytes the launcher writes, which a
+      # The record contract (DESIGN.md, "Tests"): the bytes the launcher writes, which a
       # sweeper of either language must read. rec_create writes poststop=
       # (when there is a postStop) and cgroup= in one write
       # (flong-record.c:337-341), and rec_set_leader appends leader= once

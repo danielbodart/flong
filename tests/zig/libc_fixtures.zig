@@ -1,5 +1,5 @@
 //! test-libc: the fixtures' number readers against the glibc calls their C
-//! made (ZIG.md, "Phase 6"): ioctl-probe's strtoul0 against strtoul(s,
+//! made (the Zig port's phase 6): ioctl-probe's strtoul0 against strtoul(s,
 //! NULL, 0), which a C built with _GNU_SOURCE calls as glibc's C23
 //! __isoc23_strtoul (it reads 0b); bpfdump's atoi against atoi. Every
 //! string of up to 3 bytes over an alphabet of the characters either reads

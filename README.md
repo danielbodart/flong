@@ -219,6 +219,13 @@ Evaluation checks the host: user namespaces allowed, the `newuidmap` wrappers
 present, bubblewrap 0.12 and systemd 254 or later. The launcher checks the
 rest at launch, and says which is missing.
 
+flong needs Linux 6.13 or later: its mount helper gives overlayfs its layers
+by descriptor (6.13), enters the session's namespaces through the leader's
+pidfd (6.11) and finds a mount's parent with `statmount` (6.8). Nothing
+asserts it; on an older kernel a launch fails loudly at the first call the
+kernel lacks. [The kernel floor](DESIGN.md#the-kernel-floor) lists every call
+and its release.
+
 A launcher has the caller's privilege and no more. The caller holds full
 capability over a session's mounts and namespaces from the host, and owns its
 prepared root and its records, as they own their `~/.bashrc`. So the session
@@ -432,8 +439,10 @@ $ nix flake check
 
 Runs NixOS VM tests of every option, the hook ordering, networking and DNS,
 the launcher's lifecycle and terminal, and each seccomp tier's live filters;
-builds the launcher (`flong-launch`, `flong-init`, `flong-sweeper`), the seccomp compiler
-and the tests' probes and filter dumper in Zig with their unit tests, lint and analysis; evaluates each refusal; and shellchecks the version script.
+builds the launcher (`flong-launch`, `flong-init`, `flong-sweeper`), the
+seccomp compiler and the tests' probes and filter dumper in Zig, with their
+unit and property tests, lint and analysis; evaluates each refusal; and
+shellchecks the version script.
 `nix build .#bench` times launches in a VM.
 
 ```console

@@ -1,6 +1,6 @@
 //! flong-tty: src/tty.zig driven as the launcher drives it, for
-//! checks.native's pty tests (ZIG.md, "Tests", checks.native; phase 7
-//! L3), until L4 builds tty.zig into flong-launch itself.
+//! checks.native's pty tests (DESIGN.md, "Tests": checks.native; the
+//! Zig port's L3). flong-launch itself has built tty.zig in since L4.
 //!
 //!   flong-tty [--report] PROGRAM ARG...
 //!

@@ -4,8 +4,8 @@
 //! its status with `done`; this module starts nothing.
 //!
 //! One module per piece of flong-launch under src/launch/ (hook, pasta,
-//! ...), each a set of functions with explicit parameters, where ZIG.md's
-//! "Per binary" lists one launch.zig: a small deviation, so that each
+//! ...), each a set of functions with explicit parameters, where the port's
+//! plan listed one launch.zig: a small deviation, so that each
 //! piece is written and tested apart and launch.zig composes them.
 //!
 //! The hook runs as the caller in the hooks leaf, so whatever it leaves

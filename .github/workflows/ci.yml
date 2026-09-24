@@ -9,7 +9,11 @@ on:
 # One job per check, so the VM tests, the Zig builds and the assertion
 # shards run on parallel runners and a slow one no longer holds up the
 # rest (the single `nix flake check` step took 9.5-12.8 min in runs
-# 35947311755, 35954009898 and 35958022199). `list` names the checks,
+# 35947311755, 35954009898 and 35958022199; the matrix takes about 5-6 min
+# for a push that changes the native code, 5 min 38 s and 5 min 54 s in runs
+# 35995141108 and 35996579837, its longest leg native-test-release, and
+# 3-4 min for one that does not, 3 min 18 s and 3 min 39 s in runs
+# 35991513067 and 35992523422). `list` names the checks,
 # `check` builds each (fail-fast off, so one red check does not hide
 # another), and `eval` evaluates the flake's other outputs.
 #
@@ -79,8 +83,8 @@ jobs:
         run: nix build -L --no-link ".#checks.x86_64-linux.${{ matrix.check }}"
 
       # The free tier is 5 GB, so only flong's own derivations are pushed,
-      # by name: the Zig sets and the C launcher (flong-launcher,
-      # flong-seccomp, flong-fixtures), the seccomp tiers' filters
+      # by name: the Zig sets (flong-launcher, flong-seccomp,
+      # flong-fixtures), the seccomp tiers' filters
       # (flong-seccomp-*), the dependency fetch (flong-<v>-zig-deps), the
       # integration derivations (flong-drivers, flong-proofs-vm,
       # integration), and the checks that are builds, not VMs: native-*,

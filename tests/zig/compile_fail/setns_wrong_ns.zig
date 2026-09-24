@@ -1,5 +1,5 @@
 // Must not compile: a network namespace's descriptor entered as a mount
-// namespace (ZIG.md, "Lint and analysis": netns to an mntns setns).
+// namespace (DESIGN.md, "Conventions": handles, not numbers).
 const fd = @import("fd");
 
 export fn bug() void {

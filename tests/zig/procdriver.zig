@@ -1,5 +1,5 @@
 //! flong-proc: proc.zig, sig.zig and cgroup.zig's sweep half driven from a
-//! shell (ZIG.md, "Tests": the spawn probe; checks.native's clone3 into a
+//! shell (DESIGN.md, "Tests": the spawn probe; checks.native's clone3 into a
 //! cgroup, a fork after setns(CLONE_NEWUSER), and a session killed, waited
 //! for and removed). P3's driver (tests/proofs/p3, retired in phase 5)
 //! moved onto the real modules. Static, no libc, as a flong program is.

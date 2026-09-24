@@ -1,5 +1,5 @@
 //! tty.zig: the caller's terminal, and the launcher's wait for bwrap
-//! (ZIG.md, "Phase 7", L3): a port of launcher/flong-tty.c, as far as the
+//! (the Zig port's L3): a port of launcher/flong-tty.c, as far as the
 //! launcher uses it (flong-launch.c:386, 394, 686-692, 713, 762, 790).
 //! src/launch.zig makes those calls since L4; flong-tty
 //! (tests/zig/ttydriver.zig), checks.native's pty driver, makes them too.
@@ -391,7 +391,7 @@ fn watchdog(w: Watch) noreturn {
 /// an owned or held pidfd), and only then makes the terminal raw (relay),
 /// so the terminal is never raw without a watchdog.
 ///
-/// Ordering checkpoint 8 (ZIG.md): the watchdog forks before raw mode, only
+/// Ordering checkpoint 8 (DESIGN.md): the watchdog forks before raw mode, only
 /// when stdin is a terminal, keeping 0-2, its pipe's read end and the
 /// leader, nothing else: a copy of the pty master there would keep the
 /// session's terminal from hanging up. One linear function.

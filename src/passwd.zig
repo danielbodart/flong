@@ -1,6 +1,7 @@
 //! passwd.zig: getpwuid's one use in the launcher, a user's name for the
 //! refusal when there is no user manager (flong-cgroup.c:159-168), without
-//! libc (ZIG.md, "Decided": no libc for flong-launch; quirk 19).
+//! libc (DESIGN.md, "Why Zig, and what it cost": no libc for flong-launch;
+//! quirk 19).
 //!
 //! glibc's getpwuid asks NSS, which on NixOS reads /etc/passwd ("files")
 //! and then systemd's and any other module's users. This reads /etc/passwd

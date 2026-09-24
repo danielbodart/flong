@@ -1,5 +1,5 @@
 //! ns.zig: the two user namespaces, U1 and U2 (launcher/flong-ns.c and
-//! flong-ns.h of 5f1f08e; ZIG.md, "Phase 7", L2, and ordering checkpoint 4).
+//! flong-ns.h of 5f1f08e; the Zig port's L2; DESIGN.md's ordering checkpoint 4).
 //!
 //! U1 is keep-id and owned by the caller. It owns every other namespace of
 //! the session: network, mount, ipc, uts, pid, cgroup. U2 is a child of U1

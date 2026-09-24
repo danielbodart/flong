@@ -1,4 +1,4 @@
-//! Property tests over num.zig (minish, the `test` step; ZIG.md, "Tests").
+//! Property tests over num.zig (minish, the `test` step; DESIGN.md, "Tests").
 //! libc_num.zig holds it to glibc; this holds it to a model of the bases.
 
 const std = @import("std");

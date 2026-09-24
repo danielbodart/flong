@@ -1,5 +1,5 @@
 //! flong-walker: the mount helper's walk (src/mount.zig), driven from a
-//! shell in checks.native (ZIG.md, "Tests", checks.native; tests/native.nix
+//! shell in checks.native (DESIGN.md, "Tests": checks.native; tests/native.nix
 //! runs it as root of a user and mount namespace of alice's). Built only by
 //! tests/integration.nix. Every refusal is src/mount.zig's own message,
 //! under this program's name; the status is 0, or 1 after a refusal.

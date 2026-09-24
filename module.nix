@@ -121,8 +121,9 @@ let
       "-T" (spec host) "-U" (spec host) ]
     ++ lib.optional net.hostLoopbackToSession "--host-lo-to-ns-lo";
 
-  # The native launcher: flong-launch, flong-sweeper and flong-init. Built
-  # from this nixpkgs, so its bubblewrap is the host's.
+  # The native launcher: flong-launch, flong-sweeper and flong-init, Zig,
+  # static and without libc (native.nix's launcher set). Built from this
+  # nixpkgs, so its bubblewrap is the host's.
   flongLauncher = import ./launcher { inherit pkgs; };
 
   # A path as the launcher compares it for the checks below: /var/run is
@@ -132,8 +133,9 @@ let
     let q = "/" + lib.concatStringsSep "/" (lib.filter (x: x != "") (lib.splitString "/" p)); in
     if q == "/var/run" || lib.hasPrefix "/var/run/" q then "/run" + lib.removePrefix "/var/run" q else q;
 
-  # What the launcher's spec parser accepts as a path (clean() in
-  # flong-spec.c and src/spec.zig): absolute, not /, and every component
+  # What the launcher's spec parser accepts as a path (spec.clean in
+  # src/spec.zig; tests/golden/paths.txt holds the cases both must agree
+  # on, and those meant to differ): absolute, not /, and every component
   # present, not . or .., and at most 255 bytes. A path it would refuse at launch is refused
   # here, where the declaration can still be read.
   clean = p:
@@ -1004,8 +1006,9 @@ let
   };
 
   # The host facts the launcher depends on, asserted once however many
-  # declarations there are. The kernel's own minimum is documented and
-  # not asserted: the launcher fails loudly on an older one.
+  # declarations there are. The kernel's own minimum, Linux 6.13, is
+  # documented (README.md; DESIGN.md, "The kernel floor") and not
+  # asserted: the launcher fails loudly on an older one.
   hostAssertions = [
     {
       assertion = pathCaseMisses == [ ];

@@ -1,5 +1,6 @@
 //! The launch's halves of record.zig and cgroup.zig in the build sandbox
-//! (phase 7, L2; ZIG.md, "The record contract" and ordering checkpoint 10):
+//! (the Zig port's L2; DESIGN.md, "Tests": the record contract, and
+//! ordering checkpoint 10):
 //!
 //!   - the writer's bytes are tests/golden/records/'s, with and without
 //!     postStop, leader= appended at the offset, while the record is

@@ -1,5 +1,5 @@
-//! sig.zig: signals, and waiting on a descriptor (ZIG.md, "Signals and
-//! processes"): flong-util.c:244-322 and the signal setup of
+//! sig.zig: signals, and waiting on a descriptor (DESIGN.md,
+//! "Conventions": signals): flong-util.c:244-322 and the signal setup of
 //! flong-launch.c:861-881 and flong-sweeper.c:24-29 (c9571be's; the
 //! sweeper's C was deleted in phase 5 (b)).
 //!

@@ -1,4 +1,4 @@
-# flong's native code as Nix builds it (ZIG.md, "The Nix build"): one
+# flong's native code as Nix builds it (DESIGN.md, "The build"): one
 # builder, zigSet, and one derivation per install set, each over only the
 # sources that set imports, so an edit elsewhere moves none of its store
 # paths; the checks of the Zig package; the dependency fetch they share.
@@ -10,7 +10,7 @@
 # tests/integration.nix builds phase 0's proofs with the same zigSet.
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:10-19
-# does, since zig_0_15 is that nixpkgs' (ZIG.md, "Decided").
+# does, since zig_0_15 is that nixpkgs' (DESIGN.md, "Why Zig, and what it cost").
 {
   pkgs ?
     let
@@ -50,7 +50,7 @@ let
   # created first, so a set that installs nothing still has an output. An
   # unstripped artifact names Zig's lib/std, which disallowedReferences
   # catches: every installed artifact is stripped by build.zig, since Nix's
-  # fixup strips only bin/, with -S, and no aarch64 ELF (ZIG.md, "Measured": P1, P6).
+  # fixup strips only bin/, with -S, and no aarch64 ELF (DESIGN.md, "What the port measured").
   zigSet =
     {
       pname,
@@ -121,7 +121,7 @@ let
     hash = "sha256-GicN77r9Oh9xPqlIP5CS0/y2hSenxlM6thAiv1bjBW8=";
   };
 
-  # The modules every program imports (ZIG.md, "Per binary").
+  # The modules every program imports (DESIGN.md, "Files").
   shared = [
     ./src/sys.zig
     ./src/msg.zig
@@ -141,7 +141,7 @@ let
     files = [ ./src/seccomp ] ++ shared;
   };
 
-  # The tests' programs (src/fixtures/; ZIG.md, "Phase 6"): bpfdump, linked
+  # The tests' programs (src/fixtures/; DESIGN.md, "Files"): bpfdump, linked
   # with libc and libseccomp (its syscall names, scmp.zig), and
   # syscall-probe, swapper and ioctl-probe, static and without libc. The
   # fileset is what they import, so a launcher or seccomp edit moves it only
@@ -189,7 +189,7 @@ let
   # flong-init's compiled-in tini, and flong-launch's programs are
   # -Dbwrap, -Dpasta, -Dnewuidmap, -Dnewgidmap and -Dinit, the flong-init
   # installed beside it, in the same $out. The fileset holds src/ but for
-  # the seccomp set's and the fixtures' own sources (ZIG.md, "The Nix
+  # the seccomp set's and the fixtures' own sources (DESIGN.md, "The
   # build"), so neither set's edits move it.
   launcher = zigSet {
     pname = "flong-launcher";
@@ -209,8 +209,8 @@ let
     ];
     extra = ''
       # The three: static, no INTERP, and no stack size in PT_GNU_STACK, so
-      # the start code leaves RLIMIT_STACK alone (quirk 20; ZIG.md,
-      # "Measured": P2).
+      # the start code leaves RLIMIT_STACK alone (quirk 20; DESIGN.md,
+      # "What the port measured": start code).
       for prog in flong-launch flong-init flong-sweeper; do
         file -b $out/bin/$prog | tee /dev/stderr | grep -q 'statically linked'
         readelf -lW $out/bin/$prog > $TMPDIR/$prog.phdrs
@@ -277,7 +277,7 @@ let
     };
   }
   // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
-    # aarch64 from x86_64 (P6's pieces, ZIG.md "Phase 2"): flong-seccomp
+    # aarch64 from x86_64 (DESIGN.md, "The build": cross): flong-seccomp
     # and bpfdump compiled and not linked, since the flake has no aarch64
     # libseccomp here; syscall-probe, swapper and ioctl-probe built; tests/zig/abi.zig's aarch64 half, and its controls, each plant
     # failing the build naming what differs on both arches; flong-launch

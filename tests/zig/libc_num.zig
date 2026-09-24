@@ -1,5 +1,5 @@
 //! test-libc: num.strtoullBase0 against glibc's strtoull, base 0, behind the
-//! leading-digit check of flong-seccomp.c:112-121 (ZIG.md, "Tests"; quirk
+//! leading-digit check of flong-seccomp.c:112-121 (DESIGN.md, "Tests"; quirk
 //! 15). The C is built with _GNU_SOURCE, under which glibc 2.38 and later
 //! redirect strtoull to __isoc23_strtoull, the C23 one that reads 0b; so
 //! that is the one compared (the plain symbol is the older, which does not).

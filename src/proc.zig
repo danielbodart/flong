@@ -1,4 +1,4 @@
-//! proc.zig: children (ZIG.md, "Signals and processes"): flong-util.c's
+//! proc.zig: children (DESIGN.md, "Conventions": children): flong-util.c's
 //! fork, spawn, reap, lock wait and starttime (:236-242, 324-513).
 //!
 //! Every child is made by clone3 with CLONE_PIDFD, and CLONE_INTO_CGROUP
@@ -24,7 +24,7 @@
 //! and exits 125; a spawned child's, 127 (quirk 24: the spike's were
 //! silent). Every root is `pub fn main() noreturn` and ends in `exit`,
 //! exit_group, as every fork body does: a returning single-threaded main
-//! ends in exit, not exit_group (ZIG.md, "Measured").
+//! ends in exit, not exit_group (DESIGN.md, "What the port measured").
 
 const std = @import("std");
 const sys = @import("sys");

@@ -1,8 +1,8 @@
-//! The sweep's readers fuzzed (minish, the `test` step; ZIG.md, "Tests":
+//! The sweep's readers fuzzed (minish, the `test` step; DESIGN.md, "Tests":
 //! fuzzing). flong-sweeper reads records, cgroup paths, cgroup.events,
 //! /proc files and inotify events a caller can shape, and its exit stops
 //! the holder and every session (module.nix:936-941), so none may panic or
-//! reach `unreachable` on any input (ZIG.md, open decision 2). Each target
+//! reach `unreachable` on any input (DESIGN.md, open decision 2). Each target
 //! first replays its checked-in corpus (tests/zig/corpus/<target>/, one
 //! input per file; a crash found is added there), then runs `runs` token
 //! lists (tests/zig/inputs.zig) and `runs` raw byte strings, each under a

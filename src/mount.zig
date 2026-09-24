@@ -1,5 +1,5 @@
 //! mount.zig: the mount helper, launcher/flong-mount.c ported function by
-//! function (ZIG.md, "Phase 4"); its specification is flong-mount.h:1-60,
+//! function (the Zig port's phase 4); its specification is flong-mount.h:1-60,
 //! and its order ordering checkpoint 7, held by `run` alone. The C was
 //! deleted in phase 4 (b), and its line numbers here are those of a7919be.
 //!
@@ -581,8 +581,8 @@ pub fn sortRefusingTwice(srcs: []Src) Error!void {
     }
 }
 
-/// The mount helper's whole life (flong-mount.c:521-615; ZIG.md ordering
-/// checkpoint 7, whose order is this function's and no helper's): returns
+/// The mount helper's whole life (flong-mount.c:521-615; ordering
+/// checkpoint 7 of DESIGN.md, whose order is this function's and no helper's): returns
 /// when every mount, /sys and /run are done, or `error.Reported` after
 /// saying why not. Runs in the forked child: setns into a user namespace is
 /// one-way, so it cannot run in the launcher.
@@ -688,7 +688,7 @@ pub fn run(job: *const Job) Error!void {
 // ---- for the walker's driver (tests/zig/walker.zig) ----
 
 /// The walk and what it needs, for tests/zig/walker.zig, which drives it
-/// in a user and mount namespace of its own (ZIG.md, "checks.native").
+/// in a user and mount namespace of its own (DESIGN.md, "Tests": checks.native).
 pub const testing_only = struct {
     pub const WalkWant = Want;
 

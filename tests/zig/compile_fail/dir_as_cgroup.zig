@@ -1,6 +1,6 @@
 // Must not compile: a directory as Spawn's cgroup. A child is created only
 // in an O_PATH|O_NOFOLLOW cgroup handle (fd.openCgroup), never in whatever
-// directory is at hand (ZIG.md, "Descriptor kinds").
+// directory is at hand (DESIGN.md, "Conventions": handles, not numbers).
 const std = @import("std");
 const fd = @import("fd");
 const proc = @import("proc");

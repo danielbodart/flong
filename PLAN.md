@@ -3,8 +3,9 @@
 What is not built yet, in order. What is built, and why, is in
 [DESIGN.md](DESIGN.md).
 
-Two plans have their own files. [ZIG.md](ZIG.md) moves the native code to
-Zig, and is under way. [STANDALONE.md](STANDALONE.md) follows it: the
+The native code is Zig; the port is done, and what it established is in
+DESIGN.md's [The native launcher](DESIGN.md#the-native-launcher). The next
+plan has its own file, [STANDALONE.md](STANDALONE.md): the
 libc-free programs become one `flong` binary, declarations become ZON
 checked by the same parser at build time and at launch, the bash wrapper
 goes, and later flong ships as a native binary that needs no Nix.

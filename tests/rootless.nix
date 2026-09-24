@@ -652,13 +652,13 @@ in
 
     @test("the caller's RLIMIT_STACK reaches the payload unchanged")
     def _():
-        # ZIG.md quirk 20: nothing between the caller and the payload (the
+        # Quirk 20 (DESIGN.md, "Kept behaviour"): nothing between the caller and the payload (the
         # wrapper, flong-launch, bwrap, flong-init, tini) sets it.
         out = machine.succeed(as_user("ulimit -s 4096; plain 'ulimit -s'"))
         assert out == "4096\n", out
         # The soft limit alone, the hard one left as it was: a program that
         # raised the soft limit toward the hard one (Zig's default start code
-        # sets 16 MiB, ZIG.md "Measured", P2) would show here and not above.
+        # sets 16 MiB, DESIGN.md, "What the port measured") would show here and not above.
         out = machine.succeed(as_user("ulimit -S -s 4096; ulimit -H -s; plain 'ulimit -S -s; ulimit -H -s'")).split()
         assert len(out) == 3 and out[1:] == ["4096", out[0]], out
         # The hard limit is above the soft one, else the soft one had nowhere
@@ -758,7 +758,7 @@ in
         # (launcher/flong-init.c:61-66 at db5fdeb), and the launcher kills
         # the sandbox right after closing the gate (flong-launch.c:792-797),
         # so a kill between them dropped the newline and "rc=125" followed
-        # the message. The Zig's is one writev (ZIG.md quirk 22).
+        # the message. The Zig's is one writev (quirk 22).
         assert "payload-ran" not in out and out.rstrip("\n").endswith("rc=125"), out
 
         machine.succeed("rm -f /tmp/hook-hang-* /tmp/poststop-*")
@@ -1058,7 +1058,7 @@ in
 
     @test("the terminal, relayed: the escape, a resize, the watchdog, SIGCONT, a hang-up, stderr", part="b")
     def _():
-        # ZIG.md's L0 tty characterization of the C (launcher/flong-tty.c),
+        # The Zig port's L0 tty characterization of the C (launcher/flong-tty.c),
         # through ptydrive (tests/ptydrive.py): plain as the foreground job
         # of a pty of its own, the terminal on stdin and stdout, so the
         # launcher relays; the driver is the caller's terminal and shell.
@@ -1093,7 +1093,7 @@ in
         # was before the launch. raw=yes is the control that the relay had
         # changed them. The session is the sweeper's then.
         # The watchdog holds the caller's terminal as 0-2, its pipe's read
-        # end and the leader's pidfd, and nothing else (:299-303; ZIG.md
+        # end and the leader's pidfd, and nothing else (:299-303; DESIGN.md's
         # checkpoint 8).
         pid, lines = drive("watchdog", "echo ready; sleep infinity")
         assert lines == ["guard=0:tty 1:tty 2:tty pidfd pipe", "raw=yes", "status=137", "restored=yes"], lines
@@ -1124,7 +1124,7 @@ in
         assert lines == ["status=129"], lines
 
         # A redirected stderr stays where the caller sent it, in relay too
-        # (:206-207, ZIG.md quirk 43): the payload's goes to the file, not
+        # (:206-207, quirk 43): the payload's goes to the file, not
         # to the terminal, and nothing else does. The control: with stderr
         # on the terminal, it is relayed with stdout.
         OUT = "echo ready; read -r l; echo out; echo err >&2; [ -t 2 ] && echo err-tty || echo err-file"
@@ -1192,13 +1192,13 @@ in
     @test("a launch with a project policy writes nothing to stderr", part="b")
     def _():
         # Cold, compiling the policy, and warm, reusing it: nothing is said on
-        # success, the compiler's stats line included (ZIG.md quirk 34).
+        # success, the compiler's stats line included (quirk 34).
         cache = f"{STATE}/seccomp"
         policy = shlex.quote(learned_policy)
         machine.succeed(f"rm -rf {cache}")
         for run in ("cold", "warm"):
-            # Reported, never gated (ZIG.md, "Phase 2": the cold project
-            # compile time): the launch's wall time, from the test driver.
+            # Reported, never gated (DESIGN.md, "What the port measured": the
+            # project compile): the launch's wall time, from the test driver.
             began = time.monotonic()
             out = machine.succeed(as_user(f"FLONG_TEST_POLICY={policy} project 'echo payload-ran' 2>&1"))
             print(f"project policy, {run} launch: {time.monotonic() - began:.3f} s")

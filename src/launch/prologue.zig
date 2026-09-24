@@ -1,11 +1,11 @@
 //! launch/prologue.zig: the pieces of flong-launch's prologue, ordering
-//! checkpoint 1 (ZIG.md; launcher/flong-launch.c:847-925 of 5f1f08e), but
+//! checkpoint 1 (DESIGN.md; launcher/flong-launch.c:847-925 of 5f1f08e), but
 //! not the prologue itself: the relaunch of a swept launch (quirk 2), the
 //! cache's shared lock, the close of what the wrapper left open, and the
 //! protected paths made canonical (quirk 21). launch.zig's main calls them
 //! in the C's order, one linear function; none of them decides that order.
 //!
-//! A small deviation from ZIG.md's "Per binary" row, which has flong-launch's
+//! A small deviation from the port's plan, which had flong-launch's
 //! own code in one launch.zig: its helpers are split by concern into
 //! src/launch/, one module per piece, each taking what it needs as
 //! parameters (no Launch struct), so each is tested alone. launch.zig stays

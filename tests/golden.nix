@@ -1,5 +1,5 @@
 # golden: black-box cases for flong's programs, each recorded once from the
-# C and never regenerated (ZIG.md, "Tests"). A case is an argv, a stdin and
+# C and never regenerated (DESIGN.md, "Tests"). A case is an argv, a stdin and
 # redirections; what it pins is stdout, stderr and the exit status, byte for
 # byte. The check runs in the build sandbox against the programs being tested,
 # so a port meets the same cases its C met.
@@ -50,7 +50,7 @@
 # (at one version, a changed byte is a bug in flong, not an update). It
 # refuses, writing nothing, when a case's stderr or status changed, or when
 # `bpfdump eval` of the old and new bytes differ, which would mean libseccomp
-# changed what a policy means (ZIG.md, stop condition 9). Its commit is its
+# changed what a policy means (DESIGN.md, "The build": golden's filters and libseccomp). Its commit is its
 # own and shows both eval texts equal.
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:10-19
@@ -105,7 +105,7 @@ let
     # Recorded from the awk and bash of 2026-09-23 (seccomp/expand.awk,
     # seccomp/policy.nix:81-209, deleted in phase 2 b) over golden/dump.txt,
     # through a `tooling SUB DUMP ARG...` that ran them in the argv of the
-    # subcommands that replaced them (ZIG.md quirks 16 and 38): expand-* the
+    # subcommands that replaced them (quirks 16 and 38): expand-* the
     # names of every tier variant and the expander's refusals, render-* the
     # rendered policies, project-* a project corpus. parity.groups and
     # strict.groups are copies of seccomp/'s. A project case that compiles
@@ -131,7 +131,7 @@ let
     # it checks them, each field's edge (0-2, INT_MAX, (gid_t)-1, ULONG_MAX
     # and past it, signs, blanks, empty fields), GROUPS counted against
     # NGROUPS_MAX before any gid is parsed, and a refused word over 1 KiB,
-    # printed whole (ZIG.md quirk 22). accepted-* pass every argv check and
+    # printed whole (quirk 22). accepted-* pass every argv check and
     # stop at the first call, setgroups, with EPERM: a Nix builder never
     # holds CAP_SETGID. What follows it needs CAP_SETGID and CAP_SETPCAP in
     # a user namespace, which CI's build sandbox refuses, or pid 1: the
@@ -148,7 +148,7 @@ let
     # line, then every refusal of the state directory and its sessions/
     # (the open, the owner and the mode, sessions/ made under the umask or
     # found as it is), in the order it makes them, and a message over 1 KiB
-    # cut to 1023 bytes (ZIG.md quirk 22). holder-* pass the state
+    # cut to 1023 bytes (quirk 22). holder-* pass the state
     # directory and stop at the next refusal, cg_holder_self's
     # (flong-cgroup.c:279-296), since a builder is never in a holder unit's
     # supervisor leaf; OWN is the cgroup that message names, as
@@ -181,12 +181,13 @@ let
     # given, each at an edge that passes. A keep-fd is the case's own
     # descriptor (NAME.redirect), open or not by F_GETFD (:656-667). An
     # unknown keyword's message at 1023 bytes whole, one byte over and cut,
-    # and over 1 KiB (ZIG.md quirk 22). state-missing is the valid spec
+    # and over 1 KiB (quirk 22). state-missing is the valid spec
     # itself, which passes every check and stops at the next step, the
     # state directory (flong-launch.c:891-893, flong-record.c:58-63),
-    # recorded from the C launcher of phase 7's L4. The valid spec: machine m, container c, state
-    # /state, cache /cache, closure CLOSURE, uidmap and gidmap 0 100000
-    # 65536, user 1000 100 /home/u, holder flong.slice/s, -- /bin/true.
+    # recorded from the C launcher before L4 switched to the Zig one. The
+    # valid spec: machine m, container c, state /state, cache /cache,
+    # closure CLOSURE, uidmap and gidmap 0 100000 65536, user 1000 100
+    # /home/u, holder flong.slice/s, -- /bin/true.
     # CLOSURE is a store directory, LEADSOUT a store path that is a symlink
     # to /, which realpath resolves out of the store (:245-256), and TOSTORE
     # one to /nix/store, which it resolves to the store's directory, not a

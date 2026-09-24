@@ -1,5 +1,5 @@
 //! inputs.zig: hostile inputs for the sweep's readers, built from a list of
-//! tokens (ZIG.md, "Tests": fuzzing). A token picks a piece that means
+//! tokens (DESIGN.md, "Tests": fuzzing). A token picks a piece that means
 //! something to the reader (a key, a separator, a NUL, a number at a
 //! limit, a run past a buffer) or a plain byte, so random lists reach the
 //! readers' edges far more often than random bytes do, and minish's

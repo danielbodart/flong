@@ -1,4 +1,4 @@
-//! flong-init's root (ZIG.md, "Per binary"): launcher/flong-init.c, line by
+//! flong-init's root (DESIGN.md, "Files"): launcher/flong-init.c, line by
 //! line; the C was deleted in phase 3 (b), and its line numbers here are
 //! those of db5fdeb.
 //!
@@ -12,7 +12,7 @@
 //! "-", TTY is "ctty" or "-", TRACE is "trace" or "-", DIR is absolute. The
 //! protocol is argv, not the environment, so the wrapper's --clearenv cannot
 //! drop it and nothing has to be unset before the payload sees its
-//! environment. In order (ZIG.md, ordering checkpoint 9) it:
+//! environment. In order (ordering checkpoint 9, DESIGN.md) it:
 //!
 //! 1. calls setgroups. bwrap never does, so without this the caller's host
 //!    groups (wheel, docker, kvm) would stay effective. bwrap gives it
@@ -38,10 +38,10 @@
 //! Every failure before the exec exits 125, the code the launcher reports as
 //! "the session did not start", its message printed whole in one writev
 //! (quirk 22). No libc, no allocator, no descriptor table: the groups go in
-//! a static array and tini's argv is the kernel's own (ZIG.md,
-//! "Allocation"). Static, single-threaded and with no stack size, the start
+//! a static array and tini's argv is the kernel's own (DESIGN.md,
+//! "Conventions"). Static, single-threaded and with no stack size, the start
 //! code makes no syscall before main and leaves RLIMIT_STACK as it came
-//! (quirk 20; ZIG.md, "Measured": P2).
+//! (quirk 20; DESIGN.md, "What the port measured": start code).
 
 const std = @import("std");
 const sys = @import("sys");
@@ -185,7 +185,7 @@ fn resetSignals() void {
     must(sys.emptyMask(), "emptying the signal mask");
 }
 
-/// flong-init.c:179-238. Ordering checkpoint 9 (ZIG.md): one linear
+/// flong-init.c:179-238. Ordering checkpoint 9 (DESIGN.md): one linear
 /// function, each step numbered as the header's list.
 pub fn main() noreturn {
     msg.prog = "flong-init";

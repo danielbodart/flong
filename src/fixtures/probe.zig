@@ -1,7 +1,7 @@
 //! syscall-probe: the calls a filter or the session's privileges decide,
 //! one line each, the call's name and OK or the errno's name. Run as the
 //! payload of each session, so that their outputs compare line for line
-//! (ZIG.md, "Phase 6"). tests/parity/probe.c, line by line: each call is
+//! (the Zig port's phase 6). tests/parity/probe.c, line by line: each call is
 //! made as glibc makes it there, number and arguments, and each line is
 //! written as it is printed, stdout flushed after each (probe.c:52-57).
 //! The C was deleted in phase 6 (b), and its line numbers here are those

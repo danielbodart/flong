@@ -1,5 +1,5 @@
 // Must not compile: a Held descriptor closed. What the C never closes is
-// held until the process exits (ZIG.md, "The descriptor layer").
+// held until the process exits (DESIGN.md, "Conventions": handles, not numbers).
 const fd = @import("fd");
 
 export fn bug() void {

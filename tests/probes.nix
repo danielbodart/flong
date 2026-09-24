@@ -1,6 +1,6 @@
 # The probes a payload runs to make calls no shell tool makes, shared by
 # rootless.nix (the tty filter, the swap race) and tests/native.nix (the
-# walker, ZIG.md phase 4). A function of the node's pkgs. Since phase 6
+# walker, the Zig port's phase 4). A function of the node's pkgs. Since phase 6
 # they are Zig (src/fixtures/ioctl_probe.zig, swapper.zig), from
 # native.nix's fixtures set; this output holds those two alone.
 #

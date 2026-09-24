@@ -6,13 +6,13 @@
 //! programs, gate and ready) or kept by Spawn.keepInherited (the wrapper's
 //! keep-fds, which the spec's --ro-bind-data words already name).
 //!
-//! A deviation from ZIG.md's "Per binary", whose flong-launch row is one
+//! One module per piece, where the port's plan had flong-launch as one
 //! root module: launch.zig's helpers are split by concern into src/launch/,
 //! one module each, so that each is written and tested on its own before
 //! the root composes them. Each takes its handles, the spec and the arena
 //! as parameters and returns values or error.Reported/error.Aborted; none
 //! holds a Launch struct. The order the launch keeps stays the root's
-//! (ZIG.md, "Ordering checkpoints": each one linear function there).
+//! (DESIGN.md, "The ordering checkpoints": each one linear function there).
 //!
 //! Ordering checkpoint 2 is the root's: right after `spawn` returns,
 //! whether or not it succeeded, the root closes every descriptor in
@@ -40,7 +40,7 @@ const Allocator = std.mem.Allocator;
 
 /// The two programs bwrap's argv names, compiled in (-Dbwrap and -Dinit,
 /// FLONG_BWRAP and FLONG_INIT in the C): the root reads its build options
-/// and passes them (ZIG.md, "build.zig").
+/// and passes them (DESIGN.md, "The native launcher").
 pub const Paths = struct {
     bwrap: [*:0]const u8,
     init: [*:0]const u8,

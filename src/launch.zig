@@ -1,5 +1,5 @@
 //! flong-launch: one session, from the wrapper's spec to the payload's exit
-//! (ZIG.md, "Per binary" and "Phase 7", L4; launcher/flong-launch.c of
+//! (DESIGN.md, "Files"; the Zig port's L4; launcher/flong-launch.c of
 //! a7919be, whose line numbers these are). The wrapper execs this with the
 //! whole spec as arguments (DESIGN.md, "The input contract"). `main` is the
 //! prologue, steps 1-5 of DESIGN.md's "The launch, in order" (ordering
@@ -10,8 +10,8 @@
 //! Every resource a launch holds is in `Launch`: a handle that may not
 //! exist yet is optional, one kept until the process exits is `Held` (the
 //! state and sessions directories, the cache, U1, the info pipe's read end,
-//! the leader's pidfd, the network namespace, pasta's pid file; ZIG.md,
-//! "The descriptor layer"), and each child is a `?proc.Child`, null once it
+//! the leader's pidfd, the network namespace, pasta's pid file; DESIGN.md,
+//! "Conventions"), and each child is a `?proc.Child`, null once it
 //! is reaped (flong-launch.c:47-80). The payload runs only once the gate
 //! byte is written, and the gate is written only after every earlier step
 //! succeeded: flong-init reads EOF otherwise and exits 125.
@@ -79,9 +79,9 @@ pub const std_options: std.Options = .{
 
 /// "flong-launch: internal error: <msg>", 125. The main process then skips
 /// the teardown: the sweeper releases the session, the watchdog restores
-/// the terminal and --die-with-parent ends the payload (ZIG.md, "Per
-/// binary"). In the mount helper, a fork of this process, 125 reads as a
-/// failed mount (flong-launch.c:570-575).
+/// the terminal and --die-with-parent ends the payload (DESIGN.md,
+/// "Conventions": panics). In the mount helper, a fork of this process,
+/// 125 reads as a failed mount (flong-launch.c:570-575).
 pub const panic = std.debug.FullPanic(msg.onPanic(not_run));
 
 /// The session's cgroup leaves, in cgroup.leaf_names' order

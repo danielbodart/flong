@@ -45,8 +45,8 @@
             imports = [ ./tests/parity.nix ];
           };
 
-          # The Zig port's proofs that need a kernel: a delegated user
-          # manager, subordinate ids, a real pid 1 (ZIG.md, "Tests").
+          # What the native code needs a kernel for: a delegated user
+          # manager, subordinate ids, a real pid 1 (DESIGN.md, "The build").
           native = pkgs.testers.runNixOSTest {
             imports = [ ./tests/native.nix ];
           };
@@ -56,7 +56,8 @@
           integration = pkgs.linkFarm "integration"
             (import ./tests/integration.nix { inherit pkgs; });
 
-          # The native launcher, built with -Werror.
+          # The native launcher set: flong-launch, flong-init and
+          # flong-sweeper, Zig, static, without libc (native.nix).
           launcher = import ./launcher { inherit pkgs; };
 
           # The seccomp compiler, in Zig (native.nix's seccomp set).

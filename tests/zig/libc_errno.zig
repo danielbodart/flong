@@ -1,4 +1,4 @@
-//! test-libc: errno.zig against the glibc flong-seccomp links (ZIG.md,
+//! test-libc: errno.zig against the glibc flong-seccomp links (DESIGN.md,
 //! "Tests"): strerror(3) and strerrorname_np(3) for every number from 0 to
 //! 4096, and a few beyond.
 

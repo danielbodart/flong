@@ -1,4 +1,4 @@
-//! fd.zig from outside (minish, the `test` step; ZIG.md, "Tests"): the
+//! fd.zig from outside (minish, the `test` step; DESIGN.md, "Tests"): the
 //! spike's model property, that after any sequence of opens and closes the
 //! table, a model of it and the kernel's /proc/self/fd agree, every closed
 //! handle stale and every open one live; a stale or wrong-kind handle
@@ -14,7 +14,7 @@ const fd = @import("fd");
 const testing = std.testing;
 
 // Any file every Linux has, the Nix build sandbox included, which has no
-// /etc/hostname (ZIG.md, "Measured": P1).
+// /etc/hostname (found in the port's phase 0).
 const test_file = "/etc/passwd";
 
 // ---- the kernel's view ----

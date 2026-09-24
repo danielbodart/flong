@@ -4,8 +4,9 @@
 //! record (:169-308), postStop (:425-484), the sweep (:486-734) and the
 //! sweeper's watch (:736-825). Phase 7's L2 ports the launch's half: the
 //! cache lock (:91-149) and the launcher's own record (:151-167, 310-423),
-//! whose bytes tests/golden/records/ pins, so either sweeper reads either
-//! launcher's records (ZIG.md, "The record contract").
+//! whose bytes tests/golden/records/ pins, the C launcher's before L4, so
+//! a sweeper reads a record whichever launcher wrote it (DESIGN.md,
+//! "Tests": the record contract).
 //!
 //! A record's lock is the launcher's life, and a record is only ever seen
 //! locked: it is made unnamed with O_TMPFILE, locked and filled, and only
@@ -28,8 +29,8 @@
 //! Records are the caller's files, so anything running as the caller can
 //! write one: the parser takes any bytes without a panic, and the sweep
 //! checks what a record names before it acts on it (flong-record.h:10-14).
-//! No allocator: fixed buffers, REC_MAX and 256 waits (ZIG.md,
-//! "Allocation").
+//! No allocator: fixed buffers, REC_MAX and 256 waits (DESIGN.md,
+//! "Conventions").
 
 const std = @import("std");
 const sys = @import("sys");
@@ -475,7 +476,7 @@ pub fn poststop(path: [:0]const u8, machine: []const u8) error{Aborted}!void {
     const dev_null = msg.check(fdt.openFile(fdt.cwd, "/dev/null", .{}, 0), "postStop failed for {s}: open /dev/null", .{machine}) catch return;
     const envp = [_:null]?[*:0]const u8{env.ptr};
     // Spawn's argv, kept list and number texts, in a buffer of its own: no
-    // allocator (ZIG.md, "Allocation").
+    // allocator (DESIGN.md, "Conventions").
     var spawn_mem: [256]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&spawn_mem);
     const child = blk: {

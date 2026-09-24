@@ -3,7 +3,7 @@
 //! launcher's root starts it with `Pasta.start`, awaits the Child and
 //! judges its status with `done`; this module waits for nothing. One
 //! module per piece of flong-launch under src/launch/, a small deviation
-//! from ZIG.md's one launch.zig (hook.zig says why).
+//! from the port's plan of one launch.zig (hook.zig says why).
 //!
 //! pasta runs in the pasta leaf, as the caller. --userns names U1, the
 //! network namespace's owner (U2 is EPERM). The spawned pasta exits 0 once
@@ -46,7 +46,7 @@ pub const Pasta = struct {
     /// /dev/null, O_RDONLY, pasta's stdin until it has started (:650-652)
     dev_null: fd.File,
     /// the memfd pasta writes its pid into, held until the launcher exits
-    /// (:635-637; ZIG.md, "The descriptor layer": `Held`)
+    /// (:635-637; DESIGN.md, "Conventions": `Held`)
     pid_file: fd.Held(.file),
 
     /// fl_spawn, then /dev/null closed whether or not it started

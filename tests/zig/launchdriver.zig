@@ -1,5 +1,5 @@
 //! flong-launch-driver: the launch's halves of phase 7's L2 driven from a
-//! shell in checks.native (ZIG.md, "Tests": checkpoint 4's U1 and U2
+//! shell in checks.native (DESIGN.md, "Tests": checkpoint 4's U1 and U2
 //! through /run/wrappers/bin/newuidmap, the U2 abort; cgroup's launch
 //! half; a record the Zig sweeper sweeps; passwd). It prepares signals as
 //! the launcher does (blocked, read from a signalfd, SIGPIPE ignored,
