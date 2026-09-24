@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-missing-required-field.zon:1:2: missing required field command

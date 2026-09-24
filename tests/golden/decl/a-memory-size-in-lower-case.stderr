@@ -1,0 +1,2 @@
+flong check: @GOLDEN@/decl/a-memory-size-in-lower-case.zon: flong.box.limits.MemoryMax is "8g", which is not a string matching the pattern [0-9]+[KMGT].
+flong check: @GOLDEN@/decl/a-memory-size-in-lower-case.zon: flong.box.limits.MemorySwapMax is "", which is not a string matching the pattern [0-9]+[KMGT].

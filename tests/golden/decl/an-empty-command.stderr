@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/an-empty-command.zon: flong.box.command is an empty command, which names no program to run.

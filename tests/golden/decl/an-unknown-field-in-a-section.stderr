@@ -1,0 +1,2 @@
+flong check: @GOLDEN@/decl/an-unknown-field-in-a-section.zon:11:19: unexpected field 'IOWeight'
+flong check: @GOLDEN@/decl/an-unknown-field-in-a-section.zon:11:19: note: supported: 'MemoryMax', 'MemoryHigh', 'MemorySwapMax', 'TasksMax', 'CPUQuota', 'CPUWeight', 'oomGroup'

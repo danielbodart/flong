@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/not-there.zon: No such file or directory

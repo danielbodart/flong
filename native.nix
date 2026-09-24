@@ -183,7 +183,7 @@ let
   newuidmap = "/run/wrappers/bin/newuidmap";
   newgidmap = "/run/wrappers/bin/newgidmap";
 
-  # flong, one binary whose subcommands are launch, init and sweeper
+  # flong, one binary whose subcommands are launch, init, sweeper, check and schema
   # (src/main.zig), static and without libc: -Dtini is
   # flong init's compiled-in tini, and flong launch's programs are -Dbwrap,
   # -Dpasta, -Dnewuidmap, -Dnewgidmap and -Dself, the flong in this $out,
@@ -202,6 +202,9 @@ let
           (lib.fileset.maybeMissing ./src/fixtures)
         ]
       ))
+      # flong schema's doc comments, harvested from src/decl.zig at build
+      # time (build.zig's declFieldDocs).
+      ./build/gen_decl_docs.zig
     ];
     nativeBuildInputs = [
       pkgs.file
@@ -226,25 +229,6 @@ let
       # flong launch runs its own binary as bwrap's payload, flong init.
       grep -qF "$out/bin/flong" $out/bin/flong
       echo "flong: $(stat -c %s $out/bin/flong) bytes" >&2
-    '';
-  };
-
-  # decl-options.json as `zig build schema` writes it from src/decl.zig and
-  # its doc comments (build/schema.zig, for the host), in $out: what the
-  # flake's decl-options-fresh check compares the checked-in file with, and
-  # what `nix run .#update-options` copies over it. The checked-in file is
-  # not in the fileset, so the step writes a fresh one rather than
-  # overwriting it. Until `flong schema` prints the same bytes from the
-  # launcher set, when this can run that instead.
-  declOptions = zigSet {
-    pname = "decl-options";
-    files = [
-      ./build
-      ./src
-    ];
-    steps = "schema";
-    extra = ''
-      cp decl-options.json $out/decl-options.json
     '';
   };
 
@@ -325,6 +309,10 @@ let
           ./src/ns.zig
           ./src/tty.zig
           ./src/passwd.zig
+          ./src/decl.zig
+          ./src/decl_docs.zig
+          ./src/check.zig
+          ./build/gen_decl_docs.zig
           ./src/fixtures
           ./tests/zig/abi.zig
           ./tests/zig/abi.h
@@ -365,7 +353,6 @@ in
     seccomp
     launcher
     fixtures
-    declOptions
     checks
     ;
 }

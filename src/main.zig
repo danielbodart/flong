@@ -5,6 +5,8 @@
 //!   flong launch SPEC... -- COMMAND...
 //!   flong init GATE READY GROUPS TTY TRACE DIR -- COMMAND...
 //!   flong sweeper STATE-DIR
+//!   flong check DECL.zon
+//!   flong schema
 //!   flong version
 //!   flong help
 //!
@@ -26,6 +28,8 @@ const msg = @import("msg");
 const launch = @import("launch");
 const init = @import("init");
 const sweeper = @import("sweeper");
+const check = @import("check");
+const decl_docs = @import("decl_docs");
 const config = @import("config");
 
 /// Every subcommand's failure status, and the panic's: 125 is "the
@@ -56,8 +60,11 @@ pub const std_options: std.Options = .{
 // fork of flong launch, 125 reads as a failed mount.
 pub const panic = std.debug.FullPanic(msg.onPanic(failed));
 
-/// The subcommands. `check` joins them with the declaration (S2).
-pub const Sub = enum { launch, init, sweeper, version, help };
+/// The subcommands. `check` and `schema` came with the declaration (S2):
+/// the one judges a declaration file, the other prints decl-options.json,
+/// the declaration's fields as module.nix builds its options from them.
+/// No declaration may be named as one (check.reserved).
+pub const Sub = enum { launch, init, sweeper, check, schema, version, help };
 
 pub const Dispatch = union(enum) {
     /// A subcommand, and the index of its word in argv: its main is handed
@@ -94,6 +101,8 @@ const usage =
     \\usage: flong launch SPEC... -- COMMAND...
     \\       flong init GATE READY GROUPS TTY TRACE DIR -- COMMAND...
     \\       flong sweeper STATE-DIR
+    \\       flong check DECL.zon
+    \\       flong schema
     \\       flong version
     \\       flong help
 ;
@@ -106,6 +115,8 @@ pub fn main() noreturn {
             .launch => launch.main(argv[d.at..], envp),
             .init => init.main(argv[d.at..], envp),
             .sweeper => sweeper.main(argv[d.at..]),
+            .check => check.main(argv[d.at..]),
+            .schema => schema(argv[d.at..]),
             .version => put("flong " ++ config.version ++ "\n"),
             .help => put(usage ++ "\n"),
         },
@@ -124,6 +135,24 @@ pub fn main() noreturn {
             sys.exitGroup(usage_status);
         },
     }
+}
+
+/// flong schema: decl-options.json on stdout, the bytes `zig build
+/// schema` checks in (build/schema.zig), whole, then exit 0.
+fn schema(argv: []const [*:0]const u8) noreturn {
+    msg.prog = "flong schema";
+    msg.mode = .whole;
+    if (argv.len != 1) {
+        msg.bare("usage: flong schema", .{});
+        sys.exitGroup(usage_status);
+    }
+    var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    var out: std.Io.Writer.Allocating = .init(arena_state.allocator());
+    decl_docs.writeSchema(&out.writer) catch {
+        msg.say("out of memory", .{});
+        sys.exitGroup(1);
+    };
+    put(out.written());
 }
 
 /// Writes `text` on stdout and exits 0, or says why it could not and
@@ -161,6 +190,18 @@ test "dispatch: argv[0]'s basename first, then argv[1]" {
     try expectSub(.help, 1, &.{ "flong", "help" });
 }
 
+test "dispatch: check and schema are subcommands, and no declaration's name" {
+    try expectSub(.check, 1, &.{ "flong", "check", "/etc/flong/agent.zon" });
+    try expectSub(.schema, 1, &.{ "flong", "schema" });
+    // A declaration named as a subcommand would dispatch to it, so flong
+    // check refuses every name dispatch reads as one.
+    inline for (@typeInfo(Sub).@"enum".fields) |f| {
+        for (check.reserved) |r| {
+            if (std.mem.eql(u8, r, f.name)) break;
+        } else return error.SubcommandNotReserved;
+    }
+}
+
 test "dispatch: a basename that is no subcommand is a declaration" {
     try testing.expectEqualStrings("agent", dispatch(&.{ "/run/current-system/sw/bin/agent", "--", "true" }).declaration);
     // The old names are declarations too, and fail loudly.
@@ -171,7 +212,7 @@ test "dispatch: flong alone, or with a word that is no subcommand" {
     try testing.expectEqual(Dispatch.usage, dispatch(&.{}));
     try testing.expectEqual(Dispatch.usage, dispatch(&.{"flong"}));
     try testing.expectEqual(Dispatch.usage, dispatch(&.{"/bin/flong"}));
-    try testing.expectEqualStrings("check", dispatch(&.{ "flong", "check" }).unknown);
+    try testing.expectEqualStrings("list", dispatch(&.{ "flong", "list" }).unknown);
     try testing.expectEqualStrings("", dispatch(&.{ "", "" }).unknown);
     // A path ending in a slash has an empty basename, as "" does.
     try expectSub(.launch, 1, &.{ "dir/", "launch" });

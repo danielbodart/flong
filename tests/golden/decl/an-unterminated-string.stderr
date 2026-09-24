@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/an-unterminated-string.zon:2:13: expected expression, found 'invalid token'

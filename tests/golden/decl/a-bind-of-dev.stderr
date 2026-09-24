@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-bind-of-dev.zon: flong.box drives containers.box, which binds /dev. A plain bind is nodev, so the device would mount and then refuse every open. List it in allowedDevices instead, and drop the bind.

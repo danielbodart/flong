@@ -56,8 +56,8 @@
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:10-19
 # does; seccomp is the program the seccomp sets run against, launcher the
-# output whose flong the init, sweeper and spec sets run as `flong init`,
-# `flong sweeper` and `flong launch`.
+# output whose flong the init, sweeper, spec and decl sets run as `flong
+# init`, `flong sweeper`, `flong launch` and `flong check`.
 {
   pkgs ?
     let
@@ -198,6 +198,30 @@ let
     # flong launch is the Zig is native.nix's launcher build's control (it
     # is static, with no libc).
     spec = specSet "${launcher}/bin/flong";
+
+    # Recorded from flong check of 2026-09-24 (src/check.zig, S2 chunk B),
+    # the characterization of what moves out of module.nix: one case per
+    # assertion of assertionsFor that flong check now makes, named after
+    # tests/assertions.nix's description of it (a-bind-of-flongs-state,
+    # a-mask-two-levels-below-a-writable-bind...), with its message, the
+    # assertion's in one line naming flong.box, as assertions.nix's
+    # declaration is named; its accepted counterparts where assertions.nix
+    # pairs one; what Nix's types refused and a ZON file must be told (a
+    # pattern or range decl.zig declares, an empty command); a name flong's
+    # dispatch reads as its own; parse errors at their line and column (an
+    # unknown field, a wrong type, a missing field, and what decl.notZon
+    # refuses before the parser could recurse on it); and every row of
+    # golden/paths.txt through a declaration (paths-*, each citing its
+    # row), so paths.txt and module.nix's mirrors can go. minimal and full
+    # pass. Each case NAME's declaration is NAME.zon, GOLDEN the store
+    # directory holding them.
+    decl = {
+      program = "${launcher}/bin/flong";
+      sub = "check";
+      vars = {
+        GOLDEN = "${cases}";
+      };
+    };
 
     # The subcommands' usage errors, the one text phase 2 (a) changed
     # (quirk 38): rewritten from the bash's then, and expand's added.

@@ -652,11 +652,12 @@ let
   declFileOf = name: c: pkgs.writeTextFile {
     name = "flong-${name}.zon";
     text = toZon.toZON toZon.enumPaths (declValueOf name c);
-    # S2 chunk B: `flong check "$target"` goes here, so that a declaration
-    # flong refuses fails the build with its line and column. Until then the
-    # decl-render check (tests/decl-render.nix) parses the test
-    # declarations' files with src/decl.zig's own parser.
-    checkPhase = "";
+    # flong check judges the file as the launch will read it, so a
+    # declaration flong refuses fails the build, with its line and column
+    # or the refusal's own words (src/check.zig).
+    checkPhase = ''
+      ${flongLauncher}/bin/flong check "$target"
+    '';
   };
 
   # THE LAUNCHER: a header of assignments, generated here, then

@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/nested-past-the-depth-bound.zon:2:66: nested more than 32 deep

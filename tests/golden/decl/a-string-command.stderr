@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-string-command.zon:3:16: expected array

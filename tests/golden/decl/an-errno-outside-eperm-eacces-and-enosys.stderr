@@ -1,0 +1,2 @@
+flong check: @GOLDEN@/decl/an-errno-outside-eperm-eacces-and-enosys.zon:11:29: unexpected enum literal 'EINVAL'
+flong check: @GOLDEN@/decl/an-errno-outside-eperm-eacces-and-enosys.zon:11:29: note: supported: 'EPERM', 'EACCES', 'ENOSYS'

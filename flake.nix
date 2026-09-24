@@ -70,7 +70,8 @@
           };
 
           # The native launcher set: flong, one binary whose subcommands are
-          # launch, init and sweeper, Zig, static, without libc (native.nix).
+          # launch, init, sweeper, check and schema, Zig, static, without libc
+          # (native.nix).
           launcher = import ./launcher { inherit pkgs; };
 
           # The seccomp compiler, in Zig (native.nix's seccomp set).
@@ -81,9 +82,11 @@
           golden = import ./tests/golden.nix { inherit pkgs; };
 
           # decl-options.json, which module.nix builds its options from,
-          # against a fresh walk of src/decl.zig (native.nix's declOptions).
+          # against a fresh walk of src/decl.zig: `flong schema`, from the
+          # launcher set.
           decl-options-fresh = pkgs.runCommand "decl-options-fresh" { } ''
-            if ! diff -u ${./decl-options.json} ${native.declOptions}/decl-options.json; then
+            ${native.launcher}/bin/flong schema >fresh.json
+            if ! diff -u ${./decl-options.json} fresh.json; then
               echo "decl-options.json is stale: run nix run .#update-options" >&2
               exit 1
             fi
@@ -142,7 +145,10 @@
                 echo "update-options: run it from flong's repository root" >&2
                 exit 1
               fi
-              install -m 0644 ${(import ./native.nix { inherit pkgs; }).declOptions}/decl-options.json decl-options.json
+              fresh=$(mktemp)
+              trap 'rm -f "$fresh"' EXIT
+              ${(import ./native.nix { inherit pkgs; }).launcher}/bin/flong schema >"$fresh"
+              install -m 0644 "$fresh" decl-options.json
             '';
           });
           meta.description = "Rewrite decl-options.json from src/decl.zig";

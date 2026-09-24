@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/an-overlay-on-a-tmpfs.zon: flong.box drives containers.box, and mounts something at /srv/t twice: as two of a bind, a mask, a tmpfs, an overlay or a device. The launcher mounts one thing at each path.

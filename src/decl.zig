@@ -612,15 +612,75 @@ pub const max_bytes = 1 << 20;
 /// returned value lives in: it mixes allocated strings with its type's
 /// static defaults, so it is freed with the arena, never field by field.
 /// `error.ParseZon` leaves the reason, with its line and column, in
-/// `diag` (initialized to `.{}`), for `report`.
+/// `diag` (initialized to `.{}`), for `report`; `error.NotZon` is a
+/// source `notZon` refuses, and says where and why.
 ///
 /// An unknown field is an error, as a missing required one is: a typo
 /// that silently did nothing is what a typed declaration exists to stop.
-pub fn parse(arena: Allocator, source: [:0]const u8, diag: ?*std.zon.parse.Diagnostics) error{ OutOfMemory, ParseZon }!Declaration {
+pub fn parse(arena: Allocator, source: [:0]const u8, diag: ?*std.zon.parse.Diagnostics) error{ OutOfMemory, ParseZon, NotZon }!Declaration {
+    if (notZon(source) != null) return error.NotZon;
     // The parser's per-field `inline` switches, over twenty-one fields, pass
     // the default quota of a thousand branches.
     @setEvalBranchQuota(10_000);
     return std.zon.parse.fromSlice(Declaration, arena, source, diag, .{ .free_on_error = false });
+}
+
+/// The deepest `.{` a declaration may nest: its own shape needs five
+/// (`network.forwardPorts.ports`' elements).
+pub const max_depth = 32;
+
+/// What `notZon` refuses, at byte `at` of the source.
+pub const NotZon = struct {
+    at: usize,
+    why: union(enum) {
+        /// A token no declaration holds.
+        token: std.zig.Token.Tag,
+        /// A `{` past `max_depth`.
+        deep,
+    },
+};
+
+/// The first reason `source` cannot be a declaration, found before it is
+/// parsed, or null. std.zon.parse parses by Zig's own recursive descent,
+/// on the process's stack, as deep as the source nests: a megabyte of
+/// `.{`, `(` or `-` would overflow it and end the process with SIGSEGV,
+/// where every other bad file gets a line and a column. So what the
+/// parser recurses on is bounded first, one token at a time: `{` at most
+/// `max_depth` deep, and no token a declaration cannot hold, which is
+/// every one but `.{}=,`, a name (`true`, `false` and `null` among them),
+/// a string, a number and one `-` before one. A token the tokenizer finds
+/// invalid is left to the parser, to say as it does.
+pub fn notZon(source: [:0]const u8) ?NotZon {
+    var tokens = std.zig.Tokenizer.init(source);
+    var depth: usize = 0;
+    var prev: std.zig.Token.Tag = .eof;
+    while (true) {
+        const t = tokens.next();
+        switch (t.tag) {
+            .eof => return null,
+            .l_brace => {
+                depth += 1;
+                if (depth > max_depth) return .{ .at = t.loc.start, .why = .deep };
+            },
+            .r_brace => depth -|= 1,
+            .minus => if (prev == .minus) return .{ .at = t.loc.start, .why = .{ .token = t.tag } },
+            .period,
+            .equal,
+            .comma,
+            .identifier,
+            .string_literal,
+            .multiline_string_literal_line,
+            .char_literal,
+            .number_literal,
+            .doc_comment,
+            .container_doc_comment,
+            .invalid,
+            .invalid_periodasterisks,
+            => {},
+            else => return .{ .at = t.loc.start, .why = .{ .token = t.tag } },
+        }
+        prev = t.tag;
+    }
 }
 
 /// Reads and parses the declaration at `path`, at most `max_bytes` of
@@ -628,6 +688,10 @@ pub fn parse(arena: Allocator, source: [:0]const u8, diag: ?*std.zon.parse.Diagn
 /// message each, and returned as `error.Reported`.
 pub fn load(arena: Allocator, path: [:0]const u8) (msg.Error || error{OutOfMemory})!Declaration {
     const source = try readBounded(arena, path);
+    if (notZon(source)) |n| {
+        try reportNotZon(arena, path, source, n);
+        return error.Reported;
+    }
     var diag: std.zon.parse.Diagnostics = .{};
     return parse(arena, source, &diag) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -635,7 +699,34 @@ pub fn load(arena: Allocator, path: [:0]const u8) (msg.Error || error{OutOfMemor
             try report(arena, path, &diag);
             return error.Reported;
         },
+        // notZon has passed this source above.
+        error.NotZon => msg.refuse("{s}: not a declaration", .{path}),
     };
+}
+
+/// Says why `notZon` refused `source`, as `path:line:col: why`.
+pub fn reportNotZon(arena: Allocator, path: []const u8, source: []const u8, n: NotZon) error{OutOfMemory}!void {
+    const before = source[0..n.at];
+    const line_start = if (std.mem.lastIndexOfScalar(u8, before, '\n')) |i| i + 1 else 0;
+    const loc: std.zig.Ast.Location = .{
+        .line = std.mem.count(u8, before, "\n"),
+        .column = n.at - line_start,
+        .line_start = line_start,
+        .line_end = std.mem.indexOfScalarPos(u8, source, n.at, '\n') orelse source.len,
+    };
+    const Why = struct {
+        n: NotZon,
+        pub fn format(w: @This(), out: *std.Io.Writer) std.Io.Writer.Error!void {
+            switch (w.n.why) {
+                .deep => try out.print("nested more than {d} deep", .{max_depth}),
+                .token => |tag| {
+                    if (tag.lexeme()) |l| try out.print("'{s}'", .{l}) else try out.writeAll(tag.symbol());
+                    try out.writeAll(" cannot be in a declaration, which holds only structs and lists of strings, numbers, enum literals, true, false and null");
+                },
+            }
+        }
+    };
+    try sayAt(arena, path, loc, "", Why{ .n = n });
 }
 
 /// `path`'s bytes, NUL-terminated for the parser, refused past
@@ -905,6 +996,36 @@ test "a missing required field is refused" {
     );
     try testing.expectEqual(1, r.line);
     try testing.expectEqualStrings("missing required field command", r.text);
+}
+
+test "notZon bounds what the parser would recurse on, before it does" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try testing.expectEqual(null, notZon(full));
+    try testing.expectEqual(null, notZon(minimal));
+    // One `-` before a number is ZON, and the parser says what is wrong
+    // with it; two is not.
+    try testing.expectEqual(null, notZon(".{ .cuid = -1 }"));
+    try testing.expectEqual(NotZon{ .at = 12, .why = .{ .token = .minus } }, notZon(".{ .cuid = --1 }").?);
+    try testing.expectEqual(NotZon{ .at = 0, .why = .{ .token = .l_paren } }, notZon("(((1)))").?);
+    try testing.expectEqual(NotZon{ .at = 11, .why = .{ .token = .keyword_if } }, notZon(".{ .user = if (true) \"a\" else \"b\" }").?);
+    try testing.expectEqual(NotZon{ .at = 2, .why = .{ .token = .l_bracket } }, notZon(".{[]u8}").?);
+    // `max_depth` of `.{` is enough; one more is refused where it opens.
+    const ok = try std.mem.concatWithSentinel(a, u8, &.{ ".{" ** max_depth, "}" ** max_depth }, 0);
+    try testing.expectEqual(null, notZon(ok));
+    // What would overflow the parser's stack: 100,000 of `.{`, and of
+    // `-`, which it recurses on once each.
+    const deep = try a.allocSentinel(u8, 200_000, 0);
+    for (0..100_000) |i| @memcpy(deep[2 * i ..][0..2], ".{");
+    try testing.expectEqual(NotZon{ .at = 2 * max_depth + 1, .why = .deep }, notZon(deep).?);
+    try testing.expectError(error.NotZon, parse(a, deep, null));
+    const minuses = try a.allocSentinel(u8, 100_001, 0);
+    @memset(minuses[0..100_000], '-');
+    minuses[100_000] = '1';
+    try testing.expectError(error.NotZon, parse(a, minuses, null));
+    // Comments and strings are not tokens to it.
+    try testing.expectEqual(null, notZon(".{ // (((\n.user = \"(((\" }"));
 }
 
 test "load refuses a file that never ends, and one that is not there" {

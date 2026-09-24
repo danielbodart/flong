@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-snippet-guard.zon:12:14: expected array

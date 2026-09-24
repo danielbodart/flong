@@ -1,9 +1,10 @@
 # Every declaration the VM tests make, as module.nix renders it to
 # /etc/flong/<name>.zon, parsed by src/decl.zig's own parser
 # (tests/zig/declparse.zig): what a launch will read is what the type says.
-# `flong check` in each declaration's derivation will make the same parse,
-# and judge what it read, at every build (STANDALONE.md, S2); until then this
-# is where a rendering that drifted from the type fails.
+# `flong check` in each declaration's derivation makes the same parse, and
+# judges what it read, at every build (STANDALONE.md, S2), so building the
+# rendered files here runs it on every test declaration too; this adds the
+# escapes and the control.
 #
 # `nodes` is each VM test's node, by test name; flake.nix passes them from
 # the checks, whose nodes are the evaluated NixOS configurations. Only

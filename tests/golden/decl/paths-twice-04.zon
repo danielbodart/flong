@@ -1,0 +1,14 @@
+// tests/golden/paths.txt: twice  no  same  /a  /b
+// Both as masks: the same destination twice is refused.
+.{
+    .user = "u",
+    .command = .{"true"},
+    .container = "box",
+    .closure = "/nix/store/x-nixos-system-box",
+    .cuid = 1000,
+    .cgid = 100,
+    .steps8 = "0123abcd",
+    .name = "box",
+    .payload = "/nix/store/x-payload/bin/flong-payload-box",
+    .masks = .{ "/a", "/b" },
+}

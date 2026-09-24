@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-parenthesis.zon:2:13: '(' cannot be in a declaration, which holds only structs and lists of strings, numbers, enum literals, true, false and null

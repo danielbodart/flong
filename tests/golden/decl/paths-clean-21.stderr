@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/paths-clean-21.zon: flong.box drives containers.box, and /a/../b is not a clean absolute path: it is /, or has a trailing slash, an empty, . or .. component, or a component over 255 bytes. The launcher would refuse it at launch.

@@ -88,12 +88,12 @@ pub fn docFor(comptime T: type, comptime name: []const u8, comptime path: []cons
 
 /// What a field's container says of it beyond its type: a pattern
 /// (`patterns`) and bounds (`ranges`), by field name.
-const Meta = struct {
+pub const Meta = struct {
     pattern: ?[]const u8 = null,
     range: ?struct { comptime_int, comptime_int } = null,
 };
 
-fn metaOf(comptime T: type, comptime name: []const u8) Meta {
+pub fn metaOf(comptime T: type, comptime name: []const u8) Meta {
     var m: Meta = .{};
     if (@hasDecl(T, "patterns") and @hasField(@TypeOf(T.patterns), name)) m.pattern = @field(T.patterns, name);
     if (@hasDecl(T, "ranges") and @hasField(@TypeOf(T.ranges), name)) m.range = @field(T.ranges, name);

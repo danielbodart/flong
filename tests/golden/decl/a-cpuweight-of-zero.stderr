@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-cpuweight-of-zero.zon: flong.box.limits.CPUWeight is 0, outside 1-10000.

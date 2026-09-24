@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-device-outside-dev.zon: flong.box drives containers.box, whose allowedDevices has /srv/null rw. A device is bound read-write, so the node must be under /dev/ and the modifier "rw" or "rwm" (m means nothing for a bound node).

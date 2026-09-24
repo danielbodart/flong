@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-negative-id.zon:6:13: type 'u32' cannot represent value

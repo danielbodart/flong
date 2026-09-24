@@ -1,0 +1,2 @@
+flong check: @GOLDEN@/decl/a-device-that-is-also-bound.zon: flong.box drives containers.box, which binds /dev/snd. A plain bind is nodev, so the device would mount and then refuse every open. List it in allowedDevices instead, and drop the bind.
+flong check: @GOLDEN@/decl/a-device-that-is-also-bound.zon: flong.box drives containers.box, and mounts something at /dev/snd twice: as two of a bind, a mask, a tmpfs, an overlay or a device. The launcher mounts one thing at each path.

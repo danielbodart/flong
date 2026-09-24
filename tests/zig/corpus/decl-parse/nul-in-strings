@@ -1,0 +1,1 @@
+.{ .user = "\x00", .command = .{"a\x00b"}, .container = "\x00", .closure = "", .cuid = 0, .cgid = 0, .steps8 = "", .name = "\x00", .payload = "", .masks = .{ "/a\x00b", "/a\nb" } }

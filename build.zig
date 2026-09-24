@@ -4,7 +4,7 @@
 //!
 //!   install       -Dset=seccomp (flong-seccomp and its subcommands; needs
 //!                 -Dself, the project key's compiler path), launcher
-//!                 (flong, whose subcommands are launch, init and sweeper;
+//!                 (flong, whose subcommands are launch, init, sweeper, check and schema;
 //!                 needs -Dself, its own installed path, -Dtini, the tini
 //!                 flong init execs, and flong launch's -Dbwrap, -Dpasta,
 //!                 -Dnewuidmap and -Dnewgidmap) or
@@ -173,8 +173,11 @@ pub fn build(b: *std.Build) void {
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
         {
-            // The sweep's readers fuzzed, the corpus replayed first.
+            // The sweep's readers and the declaration's parser fuzzed, the
+            // corpus replayed first.
             const m = modules(b, target, optimize);
+            const spec = Launcher.specModule(b, m, target, optimize);
+            const d = declModules(b, m, target, optimize, b.path("src/decl.zig"));
             const opts = b.addOptions();
             opts.addOptionPath("corpus", b.path("tests/zig/corpus"));
             const t = b.addTest(.{
@@ -190,6 +193,9 @@ pub fn build(b: *std.Build) void {
                         .{ .name = "proc", .module = m.proc },
                         .{ .name = "cgroup", .module = m.cgroup },
                         .{ .name = "record", .module = m.record },
+                        .{ .name = "decl", .module = d.decl },
+                        .{ .name = "spec", .module = spec },
+                        .{ .name = "check", .module = checkModule(b, m, spec, d, target, optimize) },
                         .{ .name = "inputs", .module = inputsModule(b, target, optimize) },
                         .{ .name = "options", .module = opts.createModule() },
                     },
@@ -210,9 +216,13 @@ pub fn build(b: *std.Build) void {
         {
             // The declaration: decl.zig's parse and load, and the schema
             // decl_docs.zig walks out of it.
-            const d = declModules(b, modules(b, target, optimize), target, optimize, b.path("src/decl.zig"));
+            const dm = modules(b, target, optimize);
+            const d = declModules(b, dm, target, optimize, b.path("src/decl.zig"));
             test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "decl", .root_module = d.decl })).step);
             test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "decl_docs", .root_module = d.docs })).step);
+            // And flong check's judgement of it.
+            const cm = checkModule(b, dm, Launcher.specModule(b, dm, target, optimize), d, target, optimize);
+            test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "check", .root_module = cm })).step);
         }
         const m = modules(b, target, optimize);
         const props = b.addTest(.{
@@ -1107,6 +1117,9 @@ const Launcher = struct {
     /// (DESIGN.md, "Conventions": start code).
     fn flongModule(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, strip: bool, lp: LaunchPaths) *std.Build.Module {
         const sc = subcommands(bb, t, o, strip, lp);
+        // flong check and flong schema: the declaration over the same
+        // graph, so decl.zig's messages take flong check's prefix.
+        const d = declModules(bb, sc.l.m, t, o, bb.path("src/decl.zig"));
         return bb.createModule(.{
             .root_source_file = bb.path("src/main.zig"),
             .target = t,
@@ -1119,6 +1132,8 @@ const Launcher = struct {
                 .{ .name = "launch", .module = sc.launch },
                 .{ .name = "init", .module = sc.init },
                 .{ .name = "sweeper", .module = sc.sweeper },
+                .{ .name = "check", .module = checkModule(bb, sc.l.m, sc.l.spec, d, t, o) },
+                .{ .name = "decl_docs", .module = d.docs },
                 .{ .name = "config", .module = sc.config },
             },
         });
@@ -1521,6 +1536,23 @@ fn declModules(b: *std.Build, m: Modules, target: std.Build.ResolvedTarget, opti
     });
     docs.addAnonymousImport("decl_field_docs", .{ .root_source_file = declFieldDocs(b, src) });
     return .{ .decl = decl, .docs = docs };
+}
+
+/// flong check's module (src/check.zig): the declaration `d` judged, with
+/// spec.zig's `unclean` from `spec`, over `m`'s graph.
+fn checkModule(b: *std.Build, m: Modules, spec: *std.Build.Module, d: Decl, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("src/check.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sys", .module = m.sys },
+            .{ .name = "msg", .module = m.msg },
+            .{ .name = "spec", .module = spec },
+            .{ .name = "decl", .module = d.decl },
+            .{ .name = "decl_docs", .module = d.docs },
+        },
+    });
 }
 
 /// build/gen_decl_docs.zig, for the host, over `src`: each field's doc

@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-seccomppolicy-with-no-tier.zon: flong.box sets seccomp.tier = null and seccompPolicy, which change a tier's allow-list. With no tier there is no filter for them to act on. Set a tier, or drop them.

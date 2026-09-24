@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-group-beyond-the-containers-ids.zon: flong.box drives containers.box as u (1000:65536), outside the container's ids 0-65535.

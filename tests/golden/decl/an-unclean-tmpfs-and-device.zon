@@ -1,0 +1,15 @@
+.{
+    .user = "u",
+    .command = .{"true"},
+    .container = "box",
+    .closure = "/nix/store/x-nixos-system-box",
+    .cuid = 1000,
+    .cgid = 100,
+    .steps8 = "0123abcd",
+    .name = "box",
+    .payload = "/nix/store/x-payload/bin/flong-payload-box",
+    .containerMounts = .{
+        .{ .kind = .tmpfs, .dest = "/scratch/..", .mode = "0755", .ownerUser = true },
+        .{ .kind = .dev, .dest = "/dev/./null", .src = "/dev/./null", .mode = "rw" },
+    },
+}

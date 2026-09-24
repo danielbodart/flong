@@ -1,0 +1,2 @@
+flong check: @GOLDEN@/decl/paths-clean-12.zon: flong.box.protect has "a", which is not a string matching the pattern /.*.
+flong check: @GOLDEN@/decl/paths-clean-12.zon: flong.box drives containers.box, and a is not a clean absolute path: it is /, or has a trailing slash, an empty, . or .. component, or a component over 255 bytes. The launcher would refuse it at launch.

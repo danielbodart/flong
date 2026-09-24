@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/an-upper-case-seccomp-name.zon: flong.box.seccomp.allow has "Ptrace", which is not a string matching the pattern @?[a-z0-9_-]+.

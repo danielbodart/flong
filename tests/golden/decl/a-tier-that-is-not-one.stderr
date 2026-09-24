@@ -1,0 +1,2 @@
+flong check: @GOLDEN@/decl/a-tier-that-is-not-one.zon:11:28: unexpected enum literal 'lax'
+flong check: @GOLDEN@/decl/a-tier-that-is-not-one.zon:11:28: note: supported: 'parity', 'strict'

@@ -298,32 +298,47 @@ fn absolute(what: []const u8, v: []const u8) Error!void {
 /// Absolute or relative, for `clean`.
 pub const Rooted = enum { relative, absolute };
 
-/// A path taken one component at a time, by the walker or in cgroupfs:
-/// every component is non-empty, neither "." nor "..", and at most NAME_MAX
-/// bytes. `.absolute`, it is absolute and is not "/" alone; `.relative`, it
-/// is relative. A canonical path from realpath passes, and so does nothing
-/// that would name a different place than it spells (flong-spec.c:203-229).
-/// module.nix's `clean` mirrors it, tests/golden/paths.txt holding both to
-/// the same cases.
-pub fn clean(what: []const u8, v: []const u8, rooted: Rooted) Error!void {
+/// What `clean` finds wrong with a path, the first fault found.
+pub const Unclean = enum { not_absolute, too_long, not_relative, component, long_component };
+
+/// `clean`'s judgement without its message: null for a clean path. flong
+/// check (check.zig) judges a declaration's paths by it, and says a
+/// refusal in the declaration's words.
+pub fn unclean(v: []const u8, rooted: Rooted) ?Unclean {
     var p: usize = 0;
     switch (rooted) {
         .absolute => {
-            try absolute(what, v);
+            if (v.len == 0 or v[0] != '/') return .not_absolute;
+            if (v.len >= sys.path_max) return .too_long;
             p = 1;
         },
-        .relative => if (v.len > 0 and v[0] == '/')
-            return msg.refuse("spec: {s} is not a relative path: '{s}'", .{ what, v }),
+        .relative => if (v.len > 0 and v[0] == '/') return .not_relative,
     }
     while (true) {
         const n = (std.mem.indexOfScalarPos(u8, v, p, '/') orelse v.len) - p;
         const c = v[p..][0..n];
-        if (n == 0 or eql(c, ".") or eql(c, ".."))
-            return msg.refuse("spec: {s} has an empty, '.' or '..' component: '{s}'", .{ what, v });
-        if (n > name_max) return msg.refuse("spec: {s} has a component longer than NAME_MAX", .{what});
-        if (p + n == v.len) return;
+        if (n == 0 or eql(c, ".") or eql(c, "..")) return .component;
+        if (n > name_max) return .long_component;
+        if (p + n == v.len) return null;
         p += n + 1;
     }
+}
+
+/// A path taken one component at a time, by the walker or in cgroupfs:
+/// every component is non-empty, neither "." nor "..", and at most NAME_MAX
+/// bytes. `.absolute`, it is absolute, shorter than PATH_MAX and is not "/"
+/// alone; `.relative`, it is relative. A canonical path from realpath
+/// passes, and so does nothing that would name a different place than it
+/// spells (flong-spec.c:203-229). module.nix's `clean` mirrors it,
+/// tests/golden/paths.txt holding both to the same cases; flong check
+/// asks `unclean`, this without the message.
+pub fn clean(what: []const u8, v: []const u8, rooted: Rooted) Error!void {
+    return switch (unclean(v, rooted) orelse return) {
+        .not_absolute, .too_long => absolute(what, v),
+        .not_relative => msg.refuse("spec: {s} is not a relative path: '{s}'", .{ what, v }),
+        .component => msg.refuse("spec: {s} has an empty, '.' or '..' component: '{s}'", .{ what, v }),
+        .long_component => msg.refuse("spec: {s} has a component longer than NAME_MAX", .{what}),
+    };
 }
 
 const store = "/nix/store/";

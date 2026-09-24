@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-cpuquota-of-zero.zon: flong.box.limits.CPUQuota is "0%", which is not a string matching the pattern [1-9][0-9]*%.

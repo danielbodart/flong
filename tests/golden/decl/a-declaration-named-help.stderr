@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-declaration-named-help.zon: flong.help cannot be declared under that name: its command is a link to flong named after it, and running it would run flong's own subcommand rather than the declaration. Name it something else.

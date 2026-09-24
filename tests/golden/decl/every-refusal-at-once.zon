@@ -1,0 +1,21 @@
+.{
+    .user = "u",
+    .command = .{"true"},
+    .container = "box",
+    .closure = "/nix/store/x-nixos-system-box",
+    .cuid = 70000,
+    .cgid = 100,
+    .steps8 = "0123abcd",
+    .name = "box",
+    .payload = "/nix/store/x-payload/bin/flong-payload-box",
+    .guard = .{.{}},
+    .masks = .{ "/srv/b", "/srv/b/x/y", "rel" },
+    .limits = .{ .CPUQuota = "0%" },
+    .seccomp = .{ .tier = null, .allow = .{"Ptrace"} },
+    .containerMounts = .{
+        .{ .kind = .bind_rw, .dest = "/srv/b", .src = "/srv/b" },
+        .{ .kind = .bind_ro, .dest = "/proc2", .src = "/proc/1" },
+        .{ .kind = .bind_ro, .dest = "/snd", .src = "/dev/snd" },
+        .{ .kind = .dev, .dest = "/srv/null", .src = "/srv/null", .mode = "r" },
+    },
+}

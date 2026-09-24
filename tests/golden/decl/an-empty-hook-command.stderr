@@ -1,0 +1,6 @@
+flong check: @GOLDEN@/decl/an-empty-hook-command.zon: flong.box.workspace is an empty command, which names no program to run.
+flong check: @GOLDEN@/decl/an-empty-hook-command.zon: flong.box.binds has an empty command, which names no program to run.
+flong check: @GOLDEN@/decl/an-empty-hook-command.zon: flong.box.guard has an empty command, which names no program to run.
+flong check: @GOLDEN@/decl/an-empty-hook-command.zon: flong.box.postStart has an empty command, which names no program to run.
+flong check: @GOLDEN@/decl/an-empty-hook-command.zon: flong.box.postStop has an empty command, which names no program to run.
+flong check: @GOLDEN@/decl/an-empty-hook-command.zon: flong.box.seccompPolicy has an empty command, which names no program to run.

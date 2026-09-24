@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-seccomp-name-with-a-blank.zon: flong.box.seccomp.deny has "@ keyring", which is not a string matching the pattern @?[a-z0-9_-]+.

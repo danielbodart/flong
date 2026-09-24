@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/not-zon.zon:1:9: ':' cannot be in a declaration, which holds only structs and lists of strings, numbers, enum literals, true, false and null

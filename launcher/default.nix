@@ -1,5 +1,5 @@
 # flong's native launcher: one binary, bin/flong, whose subcommands are
-# launch, init and sweeper (src/main.zig), built by native.nix's `launcher`
+# launch, init, sweeper, check and schema (src/main.zig), built by native.nix's `launcher`
 # set, static and without libc, with the compiled-in store paths there.
 # This file stays so that module.nix, flake.nix and the tests import it as
 # before.

@@ -1,0 +1,23 @@
+// tests/golden/paths.txt: overlaps  no  differs  /var/run  /run/user
+// The first path as a bind's source, the second as a protect entry: they
+// overlap when the source is refused as one that reaches it. flong check
+// is lexical, as module.nix was: it compares module.nix's norm of each
+// by module.nix's overlaps, so it says what the MIRROR column says the
+// module did. A source that is /, /run, /run/user or flong's or the user
+// manager's own under /run/user/UID is refused whatever the protect
+// entry, and a path that is not clean is refused as that.
+.{
+    .user = "u",
+    .command = .{"true"},
+    .container = "box",
+    .closure = "/nix/store/x-nixos-system-box",
+    .cuid = 1000,
+    .cgid = 100,
+    .steps8 = "0123abcd",
+    .name = "box",
+    .payload = "/nix/store/x-payload/bin/flong-payload-box",
+    .containerMounts = .{
+        .{ .kind = .bind_ro, .dest = "/mnt/in", .src = "/var/run" },
+    },
+    .protect = .{ "/run/user" },
+}

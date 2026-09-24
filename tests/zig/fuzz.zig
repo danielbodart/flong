@@ -13,7 +13,9 @@
 //! The mountinfo reader (cgroup.mountinfo, cg_check_nsdelegate) is the
 //! launch's, not the sweeper's (phase 7, L2): /proc/self/mountinfo is the
 //! kernel's text, but a panic in the launcher on any of it is a launch
-//! refused with 125 and no reason, so it is held to the same.
+//! refused with 125 and no reason, so it is held to the same. So is the
+//! declaration's parser, with flong check's judgement of what it parses
+//! (S2): any caller can hand flong any file (decl.zig).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -24,6 +26,9 @@ const fd = @import("fd");
 const proc = @import("proc");
 const cgroup = @import("cgroup");
 const record = @import("record");
+const decl = @import("decl");
+const checker = @import("check");
+const spec = @import("spec");
 const inputs = @import("inputs");
 const options = @import("options");
 const testing = std.testing;
@@ -133,6 +138,56 @@ fn inotify(b: []const u8) !void {
     try testing.expect(n <= b.len / @sizeOf(fd.InotifyEvent));
 }
 
+/// A declaration file: decl.parse, the trust boundary `flong check` and
+/// `flong launch` read every file through, then check.validate over what
+/// parses. Neither may panic, whatever the bytes; a parse error's report
+/// is formatted as decl.report would say it; and a declaration validate
+/// refuses nothing has clean paths, non-empty commands and names only its
+/// own.
+fn declParse(b: []const u8) !void {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const source = try a.dupeZ(u8, b);
+    var diag: std.zon.parse.Diagnostics = .{};
+    const d = decl.parse(a, source, &diag) catch |err| {
+        count(false);
+        switch (err) {
+            error.OutOfMemory => return err,
+            error.NotZon => {
+                const n = decl.notZon(source).?;
+                try testing.expect(n.at < source.len);
+            },
+            error.ParseZon => {
+                var errors = diag.iterateErrors();
+                var said: usize = 0;
+                while (errors.next()) |e| {
+                    const loc = e.getLocation(&diag);
+                    try testing.expect(loc.line <= std.mem.count(u8, source, "\n"));
+                    _ = try std.fmt.allocPrint(a, "{f}", .{e.fmtMessage(&diag)});
+                    var notes = e.iterateNotes(&diag);
+                    while (notes.next()) |note| _ = try std.fmt.allocPrint(a, "{f}", .{note.fmtMessage(&diag)});
+                    said += 1;
+                }
+                // Every refusal says why.
+                try testing.expect(said > 0);
+            },
+        }
+        return;
+    };
+    count(true);
+    const refusals = try checker.validate(a, &d);
+    const prefix = try std.fmt.allocPrint(a, "flong.{s}", .{d.name});
+    for (refusals) |r| try testing.expect(std.mem.startsWith(u8, r, prefix));
+    if (refusals.len == 0) {
+        try testing.expect(d.command.len > 0);
+        for (d.masks) |m| try testing.expect(spec.unclean(m, .absolute) == null);
+        for (d.protect) |p| try testing.expect(spec.unclean(p, .absolute) == null);
+        try testing.expect(d.cuid <= 65535 and d.cgid <= 65535);
+        if (d.seccomp.tier == null) try testing.expect(d.seccomp.allow.len == 0 and !d.seccomp.log);
+    }
+}
+
 // ---- the runs ----
 
 /// The largest input a builder makes: a record past REC_MAX.
@@ -225,6 +280,10 @@ fn inodeTokens(t: []const u16) []const u8 {
     return inputs.inodeName(t, &scratch);
 }
 
+fn declTokens(t: []const u16) []const u8 {
+    return inputs.declaration(t, &scratch);
+}
+
 fn inotifyTokens(t: []const u16) []const u8 {
     return inputs.inotify(t, scratch[0..record.events_len]);
 }
@@ -259,4 +318,8 @@ test "fuzz record.closedInode" {
 
 test "fuzz record.batch (inotify events)" {
     try Target("record-inotify", inotify, inotifyTokens).run();
+}
+
+test "fuzz decl.parse and check.validate (a declaration file)" {
+    try Target("decl-parse", declParse, declTokens).run();
 }
