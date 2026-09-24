@@ -4,16 +4,17 @@
 //! the holder and every session (module.nix:936-941), so none may panic or
 //! reach `unreachable` on any input (ZIG.md, open decision 2). Each target
 //! first replays its checked-in corpus (tests/zig/corpus/<target>/, one
-//! input per file; a crash found is added there), then runs 10,000 token
-//! lists (tests/zig/inputs.zig) and 10,000 raw byte strings, each under a
+//! input per file; a crash found is added there), then runs `runs` token
+//! lists (tests/zig/inputs.zig) and `runs` raw byte strings, each under a
 //! fixed seed and again under a random one, which minish prints on a
-//! failure. In ReleaseSafe (native-test's release half) a panic is the
-//! build's failure; each target also checks what its answer must hold.
+//! failure. In ReleaseSafe (native-test-release) a panic is the build's
+//! failure; each target also checks what its answer must hold.
 //!
 //! The mountinfo reader is L2's (cg_check_nsdelegate, the launch half), so
 //! it is not here yet.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const linux = std.os.linux;
 const minish = @import("minish");
 const sys = @import("sys");
@@ -25,7 +26,11 @@ const inputs = @import("inputs");
 const options = @import("options");
 const testing = std.testing;
 
-const runs = 10_000;
+/// 10,000 in ReleaseSafe (native-test-release), where the volume is; 1,000
+/// in Debug (native-test-debug), which is there for Debug's own safety
+/// checks: its 10,000 took about 2 min against ReleaseSafe's 43 s, and its
+/// 1,000 take 14 s (this host, 2026-09-24). The corpus replays in both.
+const runs = if (builtin.mode == .Debug) 1_000 else 10_000;
 const fixed_seed = 0xf1_0e6;
 
 fn randomSeed() u64 {

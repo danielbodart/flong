@@ -470,9 +470,9 @@ the child (`flong-mount.c:524`). flong-seccomp: an arena over `c_allocator`.
 - **`deps = pkgs.zig_0_15.fetchDeps { pname; version; src = <build.zig*>;
   fetchAll = true; hash; }`** (`fetchAll` defaults to false, fetching no lazy
   dependency, `fetcher.nix:7-12, 37`), linked into `$ZIG_GLOBAL_CACHE_DIR/p`
-  by `native-test` and `native-analyze` only, with `-Ddev=true`. On a
+  by `native-test-*` and `native-analyze` only, with `-Ddev=true`. On a
   `build.zig.zon` change, the hash bootstrap: `lib.fakeHash`, build
-  `.#checks.x86_64-linux.native-test`, copy `got:`, rebuild.
+  `.#checks.x86_64-linux.native-test-debug`, copy `got:`, rebuild.
 - **Checks**, beside the existing five: `launcher`, `seccomp` (a clean build
   with every guard on replaces `-Werror`); `native-test` (`test test-libc
   -Ddev=true`, Debug and `-Drelease=true`; glibc, `libseccomp.dev`, uapi and

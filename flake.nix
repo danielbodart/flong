@@ -17,8 +17,8 @@
           pkgs = nixpkgs.legacyPackages.${system};
           native = import ./native.nix { inherit pkgs; };
         in
-        # The Zig package's own checks (native.nix): native-test (unit,
-        # property and test-libc, Debug and ReleaseSafe), native-lint (fdlint,
+        # The Zig package's own checks (native.nix): native-test-debug and
+        # native-test-release (unit, property and test-libc), native-lint (fdlint,
         # compile-fail, zig fmt), native-analyze (zwanzig), and on x86_64
         # cross-aarch64.
         native.checks //

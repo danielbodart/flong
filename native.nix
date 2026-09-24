@@ -96,7 +96,7 @@ let
   # Every dependency in build.zig.zon, lazy ones included (fetchAll; its
   # default false fetches none, fetcher.nix:7-12, 37), as a fixed-output
   # derivation over build.zig and build.zig.zon alone. On a build.zig.zon
-  # change: hash = lib.fakeHash, build .#checks.x86_64-linux.native-test,
+  # change: hash = lib.fakeHash, build .#checks.x86_64-linux.native-test-debug,
   # copy `got:`, rebuild.
   zigDeps =
     {
@@ -114,8 +114,8 @@ let
       };
     };
 
-  # minish and zwanzig, and zwanzig's own chilli: for native-test and
-  # native-analyze only, which pass -Ddev=true.
+  # minish and zwanzig, and zwanzig's own chilli: for native-test-debug,
+  # native-test-release and native-analyze only, which pass -Ddev=true.
   deps = zigDeps {
     pname = "flong";
     hash = "sha256-GicN77r9Oh9xPqlIP5CS0/y2hSenxlM6thAiv1bjBW8=";
@@ -336,10 +336,10 @@ let
     };
 
   checks = {
-    native-test = pkgs.linkFarm "native-test" {
-      debug = test "debug" "";
-      release = test "release" "-Drelease=true";
-    };
+    # Two checks, not one, so each is a leg of CI's matrix
+    # (.github/workflows/ci.yml) and a job of the local gate.
+    native-test-debug = test "debug" "";
+    native-test-release = test "release" "-Drelease=true";
 
     # fdlint over src/ and tests/zig/ and on its planted files, what must
     # not compile, and zig fmt: no dependency, no -Ddev.
