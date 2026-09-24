@@ -12,9 +12,9 @@
 #
 # Kept small for CI's software emulation: one VM, every declaration runs the
 # same container closure, and the one thing in it built for this test is a
-# pair of one-file probes. No assertion is about time: the one hook that
-# sleeps does so to outlast any timeout the engine might have, and the
-# subtests after it run while it does.
+# pair of one-file probes. No assertion depends on speed: the one hook that
+# sleeps does so to outlast the start timeout alice's manager gives a unit,
+# lowered to 10 s on this node, and the subtests after it run while it does.
 { lib, ... }:
 
 let
@@ -91,12 +91,14 @@ let
   #
   # The caller's environment reaches the hook, so FLONG_TEST_HOOK picks a
   # failure, a hook that never ends (for killing the launcher while it
-  # runs), or a sleep longer than any timeout the engine might hold.
+  # runs), or a sleep longer than the user manager's start timeout, the one
+  # clock a hook run under alice's manager could meet (the node's
+  # DefaultTimeoutStartSec below).
   postStart = ''
     case ''${FLONG_TEST_HOOK:-} in
       fail) echo "the hook fails" >&2; exit 3 ;;
       hang) sleep infinity >/dev/null 2>&1 & echo $! > "/tmp/hook-hang-$machine"; wait ;;
-      sleep) touch "/tmp/hook-sleeping-$machine"; sleep 90; touch "/tmp/hook-slept-$machine" ;;
+      sleep) touch "/tmp/hook-sleeping-$machine"; sleep 15; touch "/tmp/hook-slept-$machine" ;;
     esac
     {
       id -u
@@ -139,6 +141,14 @@ in
 
     # No sudo rule can exist when there is no sudo.
     security.sudo.enable = false;
+
+    # The start timeout of every unit in a user's manager. systemd's default
+    # is 90 s, the length the hook that sleeps had (6b5e42b), but a test
+    # node's is 300 s (nixpkgs' test-instrumentation.nix:245), which 90 s
+    # never reached. Lowered, the hook outlasts it in 15 s. The engine has no
+    # clock of its own (DESIGN.md, "No timeouts"; the gate's 10 s went in
+    # ffbb78f).
+    systemd.user.settings.Manager.DefaultTimeoutStartSec = lib.mkForce "10s";
 
     # The tty filter is tested where TIOCSTI would inject, so it is the
     # filter that stops it and not the kernel's default.
@@ -566,9 +576,15 @@ in
         assert again == out, again
         assert machine.succeed(f"stat -c %Y {prepared}") == mtime
 
-    with subtest("no timeouts: a postStart that sleeps 90 s holds the gate"):
+    with subtest("no timeouts: a postStart that sleeps 15 s holds the gate"):
         # It sleeps while the subtests below run, and is checked at the end.
         start("FLONG_TEST_HOOK=sleep patient", "echo payload-ran", "patient")
+        # The control, beside it: a unit of alice's whose start takes as
+        # long as the hook does is ended by the manager's 10 s timeout. A
+        # notify unit, whose start ends at a READY=1 this one never sends;
+        # a oneshot's start has no timeout unless its unit sets one.
+        machine.succeed("systemd-run -M alice@ --user --no-block --unit=start-timeout "
+                        "-p Type=notify -- /run/current-system/sw/bin/sleep 15")
         machine.wait_until_succeeds("ls /tmp/hook-sleeping-slow-*")
         machine.fail("grep -qx payload-ran /tmp/out-patient")
         machine.fail("test -e /tmp/rc-patient")
@@ -1131,11 +1147,18 @@ in
             "FLONG_TEST_POLICY='allow no_such_call' project true 2>&1; echo rc=$?"))
         assert "unknown syscall no_such_call" in out and out.split()[-1] == "rc=1", out
 
-    with subtest("no timeouts: after its 90 s, the hook opens the gate and the payload runs"):
+    with subtest("no timeouts: after its 15 s, the hook opens the gate and the payload runs"):
         machine.wait_until_succeeds("test -s /tmp/rc-patient")
         assert machine.succeed("cat /tmp/rc-patient").strip() == "0"
         machine.succeed("grep -qx payload-ran /tmp/out-patient")
-        machine.succeed("ls /tmp/hook-slept-slow-*")
+        # The hook slept past the start timeout of alice's manager ...
+        slept = machine.succeed("stat -c %.3Y /tmp/hook-sleeping-slow-* /tmp/hook-slept-slow-*").split()
+        assert len(slept) == 2 and float(slept[1]) - float(slept[0]) > 10, slept
+        # ... which is in force: 10 s, and the control's start was ended by it.
+        out = machine.succeed("systemctl -M alice@ --user show -p DefaultTimeoutStartUSec")
+        assert out.strip() == "DefaultTimeoutStartUSec=10s", out
+        machine.wait_until_succeeds(
+            "systemctl -M alice@ --user show -p Result start-timeout | grep -qx Result=timeout")
 
     with subtest("switch-to-configuration leaves running sessions alone"):
         start("plain", "sleep infinity", "switch")
