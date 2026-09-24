@@ -6,11 +6,14 @@
 //!                 -Dself, the project key's compiler path), launcher
 //!                 (flong-init and flong-sweeper; needs -Dtini, the tini
 //!                 flong-init execs; the C beside them is native.nix's) or
-//!                 fixtures (phase 6)
+//!                 fixtures (the tests' programs, src/fixtures/: bpfdump,
+//!                 linked with libc and libseccomp; syscall-probe, swapper
+//!                 and ioctl-probe, static and without libc)
 //!   test          unit and property tests, Debug, or ReleaseSafe with
 //!                 -Drelease=true (as every step); needs -Ddev=true
 //!   test-libc     errno.zig and num.zig against glibc, scmp.zig against
-//!                 seccomp.h, the sweep's readers against the C they port
+//!                 seccomp.h, the sweep's readers against the C they port,
+//!                 the fixtures' number readers against glibc's
 //!                 (tests/zig/libc_*.zig), and the host's half of `abi`
 //!   abi           tests/zig/abi.zig: the kernel structs and constants
 //!                 against Zig's bundled headers, x86_64 and aarch64 (run on
@@ -22,9 +25,10 @@
 //!   fmt           zig fmt --check over the package's Zig
 //!   analyze       zwanzig over src/, and over its planted bugs
 //!                 (tests/zig/analyze/); needs -Ddev=true
-//!   cross         flong-seccomp compiled for aarch64-linux, not linked,
-//!                 flong-init (with a dummy tini) and flong-sweeper built
-//!                 for it (in cross/),
+//!   cross         flong-seccomp and bpfdump compiled for aarch64-linux,
+//!                 not linked, flong-init (with a dummy tini),
+//!                 flong-sweeper, syscall-probe, swapper and ioctl-probe
+//!                 built for it (in cross/),
 //!                 the mount library for it (cross/libflong-mount.a), and
 //!                 abi's aarch64 half
 //!   mountlib      lib/libflong-mount.a, the Zig mount helper the C launcher
@@ -73,7 +77,7 @@ pub fn build(b: *std.Build) void {
         } else {
             install.dependOn(&b.addFail("-Dset=launcher needs -Dtini=PATH, tini's store path").step);
         },
-        .fixtures => install.dependOn(&b.addFail("-Dset=fixtures arrives in phase 6").step),
+        .fixtures => for (fixtures(b, target, optimize, .linked)) |exe| b.installArtifact(exe),
     } else {
         install.dependOn(&b.addFail("install needs -Dset=seccomp|launcher|fixtures").step);
     }
@@ -170,6 +174,11 @@ pub fn build(b: *std.Build) void {
                     },
                 }),
             });
+            test_step.dependOn(&b.addRunArtifact(t).step);
+        }
+        for ([_][]const u8{ "probe", "swapper", "ioctl_probe" }) |name| {
+            // The fixtures' own tests, each in its root module.
+            const t = b.addTest(.{ .name = name, .root_module = fixtureModule(b, modules(b, target, optimize), target, optimize, name) });
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
         {
@@ -306,6 +315,27 @@ pub fn build(b: *std.Build) void {
         root.addCSourceFile(.{ .file = b.path("tests/zig/record_c.c"), .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE" } });
         root.addCSourceFile(.{ .file = b.path("launcher/flong-util.c"), .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE" } });
         const t = b.addTest(.{ .name = "libc_record", .root_module = root });
+        libc_step.dependOn(&b.addRunArtifact(t).step);
+    }
+
+    {
+        // The fixtures' number readers against glibc's: ioctl-probe's
+        // strtoul0 against the C23 strtoul its C called, bpfdump's atoi
+        // against atoi.
+        const m = modules(b, target, optimize);
+        const t = b.addTest(.{
+            .name = "libc_fixtures",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/zig/libc_fixtures.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "ioctl_probe", .module = fixtureModule(b, m, target, optimize, "ioctl_probe") },
+                    .{ .name = "bpfdump", .module = fixtureModule(b, m, target, optimize, "bpfdump") },
+                },
+            }),
+        });
         libc_step.dependOn(&b.addRunArtifact(t).step);
     }
 
@@ -514,6 +544,15 @@ pub fn build(b: *std.Build) void {
             .dest_dir = .{ .override = .{ .custom = "cross" } },
         });
         cross_step.dependOn(&arm_lib.step);
+        // The fixtures: the three without libc built whole; bpfdump, which
+        // needs libseccomp, compiled and not linked, as flong-seccomp.
+        for (fixtures(b, arm, optimize, .unlinked)) |exe| {
+            if (exe.root_module.link_libc == true) {
+                cross_step.dependOn(&exe.step);
+            } else {
+                cross_step.dependOn(&b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "cross" } } }).step);
+            }
+        }
     }
 
     // ---- abi: the kernel ABI against Zig's bundled headers ----
@@ -878,4 +917,59 @@ fn sweeper(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     // As flong-init's: RLIMIT_STACK reaches postStop unchanged (quirk 20).
     exe.stack_size = 0;
     return exe;
+}
+
+/// A fixture's root module (src/fixtures/<name>.zig; ZIG.md, "Phase 6"),
+/// over `m`'s modules: single-threaded, and libc for bpfdump alone, which
+/// links libseccomp for its syscall names (scmp.zig). `fixtures` strips it;
+/// a test's is not (a stripped module in an unstripped Debug test crashes
+/// the compiler: "missing dwarf relocation target").
+fn fixtureModule(b: *std.Build, m: Modules, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, name: []const u8) *std.Build.Module {
+    const bpfdump = std.mem.eql(u8, name, "bpfdump");
+    const root = b.createModule(.{
+        .root_source_file = b.path(b.fmt("src/fixtures/{s}.zig", .{name})),
+        .target = target,
+        .optimize = optimize,
+        .single_threaded = true,
+        .link_libc = if (bpfdump) true else null,
+        .imports = &.{
+            .{ .name = "sys", .module = m.sys },
+            .{ .name = "errno", .module = m.errno },
+            .{ .name = "msg", .module = m.msg },
+        },
+    });
+    if (bpfdump) {
+        root.addImport("scmp", b.createModule(.{
+            .root_source_file = b.path("src/seccomp/scmp.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "sys", .module = m.sys }, .{ .name = "fd", .module = m.fd } },
+        }));
+    }
+    return root;
+}
+
+const Linking = enum { linked, unlinked };
+
+/// The fixtures set (tests/parity/default.nix, tests/probes.nix): bpfdump,
+/// syscall-probe, swapper and ioctl-probe. Unlinked, bpfdump names no
+/// libseccomp, for a target that has none to link (the cross build).
+fn fixtures(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, linking: Linking) [4]*std.Build.Step.Compile {
+    var out: [4]*std.Build.Step.Compile = undefined;
+    for ([_][2][]const u8{
+        .{ "bpfdump", "bpfdump" },
+        .{ "syscall-probe", "probe" },
+        .{ "swapper", "swapper" },
+        .{ "ioctl-probe", "ioctl_probe" },
+    }, 0..) |f, i| {
+        const root = fixtureModule(b, modules(b, target, optimize), target, optimize, f[1]);
+        // Stripped, as every installed artifact (ZIG.md, "build.zig").
+        root.strip = true;
+        if (i == 0 and linking == .linked) root.linkSystemLibrary("seccomp", .{});
+        const exe = b.addExecutable(.{ .name = f[0], .root_module = root });
+        // No stack size in PT_GNU_STACK, as every installed artifact.
+        exe.stack_size = 0;
+        out[i] = exe;
+    }
+    return out;
 }

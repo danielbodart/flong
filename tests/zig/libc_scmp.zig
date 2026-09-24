@@ -1,7 +1,7 @@
 //! test-libc: src/seccomp/scmp.zig against seccomp.h, through translate-c
 //! of the libseccomp flong-seccomp links (ZIG.md, "Tests"): every constant,
 //! the struct's layout, the enum values, each extern's arity, and the calls
-//! themselves, once, as flong-seccomp makes them.
+//! themselves, once, as flong-seccomp and bpfdump make them.
 
 const std = @import("std");
 const scmp = @import("scmp");
@@ -61,10 +61,47 @@ test "each extern takes what seccomp.h says" {
         .{ "seccomp_syscall_resolve_name", 1 },
         .{ "seccomp_rule_add_array", 5 },
         .{ "seccomp_export_bpf", 2 },
+        .{ "seccomp_syscall_resolve_num_arch", 2 },
+        .{ "free", 1 },
     }) |f| {
         const info = @typeInfo(@TypeOf(@field(h, f[0]))).@"fn";
         try testing.expectEqual(@as(usize, f[1]), info.params.len);
     }
+}
+
+test "each extern's parameters and return" {
+    // bpfdump's two, whose pointer types are what could go wrong: a
+    // uint32_t and an int in, a char * out; a void * in.
+    const r = @typeInfo(@TypeOf(h.seccomp_syscall_resolve_num_arch)).@"fn";
+    try testing.expectEqual(u32, r.params[0].type.?);
+    try testing.expectEqual(c_int, r.params[1].type.?);
+    try testing.expectEqual(@sizeOf(usize), @sizeOf(r.return_type.?));
+    const f = @typeInfo(@TypeOf(h.free)).@"fn";
+    try testing.expectEqual(@sizeOf(usize), @sizeOf(f.params[0].type.?));
+}
+
+test "the names, as bpfdump asks for them" {
+    // bpfdump.c:293: a number on each of its three arches, x32's biased.
+    for ([_]struct { arch: u32, nr: c_int, want: ?[]const u8 }{
+        .{ .arch = scmp.arch_x86_64, .nr = 0, .want = "read" },
+        .{ .arch = scmp.arch_x86_64, .nr = 59, .want = "execve" },
+        .{ .arch = scmp.arch_x32, .nr = 0x40000000 + 1, .want = "write" },
+        .{ .arch = scmp.arch_x86, .nr = 11, .want = "execve" },
+        .{ .arch = scmp.arch_x86_64, .nr = 1023, .want = null },
+    }) |c| {
+        const got = scmp.resolveNumArch(c.arch, c.nr);
+        defer scmp.freeName(got);
+        const want_c = h.seccomp_syscall_resolve_num_arch(c.arch, c.nr);
+        defer h.free(want_c);
+        if (c.want) |w| {
+            try testing.expectEqualStrings(w, std.mem.span(got.?));
+            try testing.expectEqualStrings(w, std.mem.span(want_c.?));
+        } else {
+            try testing.expect(got == null);
+            try testing.expect(want_c == null);
+        }
+    }
+    scmp.freeName(null);
 }
 
 test "the calls, as flong-seccomp makes them" {

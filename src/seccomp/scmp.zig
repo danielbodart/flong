@@ -1,6 +1,8 @@
 //! scmp.zig: the part of libseccomp 2.6.1 flong-seccomp calls, its eight
-//! functions and the constants and struct they take (seccomp.h). The only
-//! file of flong-seccomp that names a C symbol; test-libc
+//! functions and the constants and struct they take (seccomp.h), and the
+//! one bpfdump adds, seccomp_syscall_resolve_num_arch, with libc's free for
+//! the string it returns (tests/parity/bpfdump.c:293, 316). The only file
+//! of flong-seccomp and bpfdump that names a C symbol; test-libc
 //! (tests/zig/libc_scmp.zig) holds every value and layout here equal to
 //! seccomp.h's, through translate-c.
 //!
@@ -68,6 +70,8 @@ extern fn seccomp_attr_set(ctx: *Filter, attr: Attr, value: u32) c_int;
 extern fn seccomp_syscall_resolve_name(name: [*:0]const u8) c_int;
 extern fn seccomp_rule_add_array(ctx: *Filter, action: u32, syscall: c_int, arg_cnt: c_uint, arg_array: [*]const ArgCmp) c_int;
 extern fn seccomp_export_bpf(ctx: *const Filter, fd: c_int) c_int;
+extern fn seccomp_syscall_resolve_num_arch(arch_token: u32, num: c_int) ?[*:0]u8;
+extern fn free(ptr: ?*anyopaque) void;
 
 /// A libseccomp return code: null for 0, else the errno it negates. Every
 /// failure libseccomp 2.6.1 returns is a negated errno; anything else is a
@@ -102,6 +106,18 @@ pub fn attrSet(ctx: *Filter, attr: Attr, value: u32) ?sys.E {
 /// The native number of `name`, a negative pseudo number, or nr_error.
 pub fn resolveName(name: [*:0]const u8) c_int {
     return seccomp_syscall_resolve_name(name);
+}
+
+/// The name of syscall `nr` on the arch `arch` (an audit arch token), in
+/// a string malloc made, which the caller gives to `free`; null for a
+/// number libseccomp does not know, or when malloc failed.
+pub fn resolveNumArch(arch: u32, nr: c_int) ?[*:0]u8 {
+    return seccomp_syscall_resolve_num_arch(arch, nr);
+}
+
+/// libc's free(3), for what resolveNumArch returned; null is nothing.
+pub fn freeName(name: ?[*:0]u8) void {
+    free(name);
 }
 
 pub fn ruleAddArray(ctx: *Filter, action: u32, nr: c_int, cmps: []const ArgCmp) ?sys.E {

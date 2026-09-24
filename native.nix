@@ -5,7 +5,8 @@
 #
 # Phase 1 has the seccomp set, which seccomp/default.nix imports; phase 3
 # adds launcher, which launcher/default.nix imports (phase 5 adds
-# flong-sweeper to it); phase 6 fixtures.
+# flong-sweeper to it); phase 6 fixtures, which tests/parity/default.nix and
+# tests/probes.nix import.
 # tests/integration.nix builds phase 0's proofs with the same zigSet.
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:11-20
@@ -138,6 +139,42 @@ let
     flags = "-Dself=$out";
     buildInputs = [ pkgs.libseccomp ];
     files = [ ./src/seccomp ] ++ shared;
+  };
+
+  # The tests' programs (src/fixtures/; ZIG.md, "Phase 6"): bpfdump, linked
+  # with libc and libseccomp (its syscall names, scmp.zig), and
+  # syscall-probe, swapper and ioctl-probe, static and without libc. The
+  # fileset is what they import, so a launcher or seccomp edit moves it only
+  # through a module they share. None has a stack size in PT_GNU_STACK, as
+  # every installed artifact; the three static ones have no INTERP, and
+  # bpfdump needs libseccomp.so.
+  fixtures = zigSet {
+    pname = "flong-fixtures";
+    set = "fixtures";
+    buildInputs = [ pkgs.libseccomp ];
+    files = [
+      ./src/fixtures
+      ./src/seccomp/scmp.zig
+      ./src/sys.zig
+      ./src/msg.zig
+      ./src/errno.zig
+      ./src/fd.zig
+    ];
+    nativeBuildInputs = [
+      pkgs.file
+      pkgs.binutils
+    ];
+    extra = ''
+      for prog in bpfdump syscall-probe swapper ioctl-probe; do
+        readelf -lW $out/bin/$prog > $TMPDIR/$prog.phdrs
+        [[ $(awk '$1 == "GNU_STACK" { print $6 }' $TMPDIR/$prog.phdrs) == 0x000000 ]]
+      done
+      for prog in syscall-probe swapper ioctl-probe; do
+        file -b $out/bin/$prog | tee /dev/stderr | grep -q 'statically linked'
+        if grep -q INTERP $TMPDIR/$prog.phdrs; then echo "$prog has an INTERP"; exit 1; fi
+      done
+      readelf -dW $out/bin/bpfdump | grep -q 'NEEDED.*libseccomp\.so'
+    '';
   };
 
   # The C launcher's compiler flags (launcher/default.nix before phase 3),
@@ -331,8 +368,8 @@ let
   }
   // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
     # aarch64 from x86_64 (P6's pieces, ZIG.md "Phase 2"): flong-seccomp
-    # compiled and not linked, since the flake has no aarch64 libseccomp
-    # here; tests/zig/abi.zig's aarch64 half, and its controls, each plant
+    # and bpfdump compiled and not linked, since the flake has no aarch64
+    # libseccomp here; syscall-probe, swapper and ioctl-probe built; tests/zig/abi.zig's aarch64 half, and its controls, each plant
     # failing the build naming what differs on both arches; flong-init
     # (with a dummy tini) and flong-sweeper for aarch64, the launcher set's
     # Zig; and the mount library for aarch64, its symbols checked as the
@@ -352,6 +389,7 @@ let
           ./src/names.zig
           ./src/proc.zig
           ./src/sig.zig
+          ./src/fixtures
           ./tests/zig/abi.zig
           ./tests/zig/abi.h
         ]
@@ -364,7 +402,8 @@ let
         extra = ''
           # flong-init (with a dummy tini) and flong-sweeper for aarch64:
           # static, no INTERP.
-          for prog in flong-init flong-sweeper; do
+          # And the fixtures but bpfdump, which needs libseccomp.
+          for prog in flong-init flong-sweeper syscall-probe swapper ioctl-probe; do
             file -b $out/cross/$prog | tee /dev/stderr | grep -q 'ARM aarch64.*statically linked'
             if file -b $out/cross/$prog | grep -q interpreter; then exit 1; fi
           done
@@ -403,6 +442,7 @@ in
     deps
     seccomp
     launcher
+    fixtures
     checks
     ;
 }

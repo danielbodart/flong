@@ -17,7 +17,7 @@ let
   # The launcher's output, for its flong-init (src/init.zig).
   launcher = import ../launcher { pkgs = hostPkgs; };
   # rootless.nix's ioctl-probe and swapper; the swapper races the walker
-  # (ZIG.md phase 4).
+  # (ZIG.md phase 4), and since phase 6 (a) the C one (swapper-c) too.
   probes = import ./probes.nix;
 
   # The walker's fixture and runs (ZIG.md, "Tests", checks.native; phase
@@ -82,15 +82,31 @@ let
     run source $R/protx following $R/prot
     # The swap race: sub and a symlink to the view exchanged as fast as
     # the swapper can. The control first: opened by path, it escapes.
-    swapper $R/ws &
-    swapping=$!
-    until [ -L $R/ws/sub ]; do :; done
-    echo "naive $(flong-walker naive $R /ws/sub/deep/x 200 $R/view)"
-    echo "exists $(flong-walker race $R /ws/sub/deep/x 200 $R/view exists 2>$R/race.err)"
-    echo "missing $(flong-walker race $R /ws/sub/deep/y 200 $R/view missing 2>>$R/race.err)"
-    kill $swapping
-    echo "said $(sed 's/y[0-9]*$/yN/' $R/race.err | sort -u | tr '\n' '|')"
-    echo "view $(ls $R/view/deep | tr '\n' ' ')"
+    # race SWAPPER NAME: the race against SWAPPER, the missing walks making
+    # NAME<i>; each run's lines follow "race SWAPPER PATH". Twice, the Zig
+    # swapper's then the C's (swapper-c, ZIG.md phase 6 (a)).
+    race() {
+      echo "race $1 $(readlink -f "$(command -v "$1")")"
+      state() { if [ -L $R/ws/sub ]; then echo link; else echo dir; fi; }
+      was=$(state)
+      "$1" $R/ws &
+      swapping=$!
+      # Swapping once sub has changed from what the last run left.
+      until [ "$(state)" != "$was" ]; do :; done
+      echo "naive $(flong-walker naive $R /ws/sub/deep/x 200 $R/view)"
+      echo "exists $(flong-walker race $R /ws/sub/deep/x 200 $R/view exists 2>$R/race.err)"
+      echo "missing $(flong-walker race $R /ws/sub/deep/$2 200 $R/view missing 2>>$R/race.err)"
+      kill $swapping
+      # Killed while still swapping: SIGTERM's 143, not a swapper that
+      # stopped after the first exchange.
+      rc=0
+      wait $swapping || rc=$?
+      echo "killed $rc"
+      echo "said $(sed "s/$2[0-9]*\$/yN/" $R/race.err | sort -u | tr '\n' '|')"
+      echo "view $(ls $R/view/deep | tr '\n' ' ')"
+    }
+    race swapper y
+    race swapper-c z
   '';
 
   # The sweeper's differential fixture (ZIG.md phase 5, "the record
@@ -357,6 +373,7 @@ in
       pkgs.util-linux
       integration.vm
       (probes pkgs)
+      (probes pkgs).c
     ];
   };
 
@@ -494,20 +511,42 @@ in
     rc=0
     """
         assert out.startswith(want), out
-        race = dict(l.split(" ", 1) for l in out[len(want):].splitlines())
-        counts = {k: dict(kv.split("=") for kv in race[k].split()) for k in ("naive", "exists", "missing")}
-        # The control: the race is live, and a walk by path escapes it.
-        assert int(counts["naive"]["escaped"]) > 0, race
-        for k in ("exists", "missing"):
-            c = counts[k]
-            assert c["escaped"] == "0" and c["odd"] == "0", race
-            assert int(c["refused"]) + int(c["contained"]) == 200, race
-        # Every refusal was the symlink's, and nothing was made in the view.
-        said = set(l for l in race["said"].split("|") if l)
-        assert said <= {"flong-walker: a symlink is on the way to /ws/sub/deep/x",
-                        "flong-walker: a symlink is on the way to /ws/sub/deep/yN"}, race
-        assert (len(said) > 0) == (int(counts["exists"]["refused"]) + int(counts["missing"]["refused"]) > 0), race
-        assert race["view"] == "x ", race
+        # The race's runs, one per swapper: the Zig's, then the C's
+        # (swapper-c; ZIG.md phase 6 (a)), each the same outcome.
+        runs = {}
+        for l in out[len(want):].splitlines():
+            k, v = l.split(" ", 1)
+            if k == "race":
+                sw, path = v.split(" ", 1)
+                race = runs[sw] = {"path": path}
+            else:
+                race[k] = v
+        assert list(runs) == ["swapper", "swapper-c"], runs
+        for sw, race in runs.items():
+            counts = {k: dict(kv.split("=") for kv in race[k].split()) for k in ("naive", "exists", "missing")}
+            print(f"{sw}: " + ", ".join(f"{k} {race[k]}" for k in ("naive", "exists", "missing")))
+            # The control: the race is live, and a walk by path escapes it.
+            assert int(counts["naive"]["escaped"]) > 0, (sw, race)
+            # And both states were seen: a swapper stalled on the symlink
+            # lets every naive walk escape.
+            assert int(counts["naive"]["contained"]) > 0, (sw, race)
+            for k in ("exists", "missing"):
+                c = counts[k]
+                assert c["escaped"] == "0" and c["odd"] == "0", (sw, race)
+                assert int(c["refused"]) + int(c["contained"]) == 200, (sw, race)
+            # Every refusal was the symlink's, and nothing was made in the view.
+            said = set(l for l in race["said"].split("|") if l)
+            assert said <= {"flong-walker: a symlink is on the way to /ws/sub/deep/x",
+                            "flong-walker: a symlink is on the way to /ws/sub/deep/yN"}, (sw, race)
+            assert (len(said) > 0) == (int(counts["exists"]["refused"]) + int(counts["missing"]["refused"]) > 0), (sw, race)
+            assert race["view"] == "x ", (sw, race)
+            assert race["killed"] == "143", (sw, race)
+        # The two runs' swappers: different files, the C's dynamic against
+        # glibc, the Zig's static without it.
+        zig, c = runs["swapper"]["path"], runs["swapper-c"]["path"]
+        assert zig.endswith("/bin/swapper") and c.endswith("/bin/swapper-c"), (zig, c)
+        machine.succeed(f"grep -q GLIBC_2 {c}")
+        machine.fail(f"grep -q GLIBC_2 {zig}")
 
     # proc.zig, sig.zig and cgroup.zig's sweep half (phase 5), through
     # flong-proc (tests/zig/procdriver.zig): P3's questions (tests/proofs/p3,
