@@ -18,7 +18,7 @@ reported, never used as a pass mark.
 ## Launch sequence
 
 The launcher is a bash wrapper, run as the caller, that execs `flong-launch`,
-a C program. Nothing in either runs as host root, and nothing asks for it.
+a static Zig program. Nothing in either runs as host root, and nothing asks for it.
 
 The wrapper works out what only the launch can know:
 
@@ -52,7 +52,7 @@ The wrapper works out what only the launch can know:
 On the warm path the wrapper forks nothing but the snippets the declaration
 chose: every test is a builtin, and there is no command substitution outside
 a snippet. A bash launcher measured 61 ms and a python one 106 ms, against
-C's 19 ms, which is why everything after the spec is C.
+C's 19 ms, which is why everything after the spec is native code.
 
 ## Data is data; shell is for what only launch knows
 
@@ -1353,13 +1353,8 @@ Component costs are quoted in their sections, with their harness.
 ## The native launcher
 
 Three programs, installed side by side by `native.nix`'s `launcher` set:
-`flong-launch`, C in `launcher/`, built by `$CC` with `-std=gnu11 -O2
--D_GNU_SOURCE -Wall -Wextra -Werror` and fortify (an unchecked `write`,
-`read` or `fscanf` is an error), linking the mount helper, Zig
-(`src/mount.zig`, through `src/hybrid/mount_c.zig`), as a static library
-with no libc and no compiler-rt; and `flong-init` and `flong-sweeper`, Zig
-(`src/init.zig`, `src/sweeper.zig`, static, no libc), which `ZIG.md` is
-porting the rest to. The
+`flong-launch`, `flong-init` and `flong-sweeper`, Zig (`src/launch.zig`,
+`src/init.zig`, `src/sweeper.zig`), static, stripped, with no libc. The
 store paths they run (bwrap, pasta, tini, flong-init) and
 `/run/wrappers/bin/newuidmap` and `newgidmap` are compiled in, so the wrapper
 cannot point the launcher at another bwrap.
@@ -1368,36 +1363,28 @@ The launcher began as C, not Zig: the BPF and the runtime were identical, but
 a clean Zig build took 78–93 s against C's 1.6 s and needs a 1.8 GiB
 compiler, and a typed config format would repeat checks the Nix module's types
 already make. `ZIG.md` is the decision to port it anyway, and what the port
-has measured since.
+has measured since; the C was deleted when the Zig launched as it did.
 
 ### Files
 
-Each header's comments are the specification of what it declares: what it
-does, when it is called and how it fails.
-
 | file | owns |
 |---|---|
-| `flong-util` | messages, trace, descriptors, `fl_await`, `fl_spawn` (clone3), `fl_fork`, pidfds, starttime, small file I/O |
-| `flong-spec` | the input contract: argv into `struct fl_spec`, and every check that needs nothing but the spec |
-| `flong-ns` | U1 (newuidmap and newgidmap in parallel) and U2 (the split maps, `max_user_namespaces`) |
-| `flong-cgroup` | the nsdelegate check, finding or starting the holder, the session cgroup and its leaves, limits, kill, wait, remove |
-| `flong-record` | the state directory, the cache lock, records, liveness, the sweep, `postStop`; the sweeper's loop, `rec_watch`, which nothing calls since `src/sweeper.zig` replaced the C sweeper |
-| `flong-mount.h` | the mount helper's job and its one call, `flong_mount_main`, which `flong-launch` makes in the forked child |
-| `flong-tty` | the foreground wait, the pty relay or passthrough, raw mode, the watchdog, `^]^]^]`, the wait for bwrap |
-| `flong-launch.c` | `main`: the order of a launch, bwrap's argv, the hook, pasta, the gate, the one teardown path, exit codes |
-| `src/sweeper.zig` | `flong-sweeper`, the holder unit's process: the state directory, its holder, then `record.watch`; static, no libc, no allocator |
-| `src/record.zig`, `src/cgroup.zig`, `src/names.zig` | the sweep's half of `flong-record` and `flong-cgroup`, and names: the state directory, reading and releasing records, `postStop`, the watch; a record's session opened, killed, waited for and removed |
+| `src/sys.zig`, `src/fd.zig` | the syscall layer, and every descriptor in one table: kinds, owned and held handles, the keep list |
+| `src/msg.zig`, `src/errno.zig`, `src/num.zig` | messages, trace, panics; an errno's text as glibc gives it; numbers read as the C read them |
 | `src/proc.zig`, `src/sig.zig` | the process layer: `fork` (a `noreturn` body, the keep list), `Spawn`, `Child`, `lockWait`, starttime; the signal mask, the signalfd, `awaitFd` |
-| `src/mount.zig` | the mount helper, linked into `flong-launch` through `src/hybrid/mount_c.zig`: sources, the walker, masks, overlays, `/sys`, `/run` read-only; no libc |
-| `src/init.zig` | `flong-init`, pid 1 in the session: groups, capabilities, controlling tty, ready byte, the gate, chdir, exec tini; static, no libc, no allocator |
+| `src/spec.zig` | the input contract: argv into `Spec`, and every check that needs nothing but the spec; bwrap's argv |
+| `src/ns.zig`, `src/passwd.zig` | U1 (newuidmap and newgidmap in parallel) and U2 (the split maps, `max_user_namespaces`); a user's name without libc |
+| `src/cgroup.zig` | the nsdelegate check, finding or starting the holder, the session cgroup and its leaves, limits, kill, wait, remove |
+| `src/record.zig`, `src/names.zig` | the state directory, the cache lock, records, liveness, the sweep, `postStop`, the watch; machine and container names |
+| `src/tty.zig` | the foreground wait, the pty relay or passthrough, raw mode, the watchdog, `^]^]^]`, the wait for bwrap |
+| `src/mount.zig` | the mount helper, a fork body of `flong-launch`'s: sources, the walker, masks, overlays, `/sys`, `/run` read-only |
+| `src/launch.zig`, `src/launch/` | `flong-launch`: the order of a launch, bwrap's spawn, the child pid, the hook, pasta, the gate, the one teardown path, exit codes |
+| `src/sweeper.zig` | `flong-sweeper`, the holder unit's process: the state directory, its holder, then `record.watch`; no allocator |
+| `src/init.zig` | `flong-init`, pid 1 in the session: groups, capabilities, controlling tty, ready byte, the gate, chdir, exec tini; no allocator |
 
-Dependencies point one way: util, then spec, then ns, cgroup (then record)
-and tty; `flong-launch` uses all of them and the mount helper. The Zig uses
-none of them: the mount helper reads `flong-mount.h`'s job through mirrors
-checked against the header, and imports the Zig package's `sys`, `fd` and
-`msg`, as `flong-init` imports `sys` and `msg`, and `flong-sweeper` `record`,
-`cgroup`, `names`, `proc`, `sig`, `fd`, `sys` and `msg`. The C launcher still
-writes the records the Zig sweeper sweeps, byte for byte as before
+Dependencies point one way: `sys`; then `msg`, `errno`, `num`, `fd`; then
+`sig`, `proc`; `record` uses `cgroup`; `mount` uses no `proc`. The records
+the launcher writes are the ones the C wrote, byte for byte
 (`tests/golden/records/`).
 
 ### Conventions

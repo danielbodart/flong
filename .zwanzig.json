@@ -11,7 +11,6 @@
     { "kind": "open", "method_name": "fsopen" },
     { "kind": "open", "method_name": "fsmount" },
     { "kind": "open", "method_name": "openNs" },
-    { "kind": "open", "method_name": "adoptForeign" },
     { "kind": "open", "method_name": "start" },
     { "kind": "open", "method_name": "openDirNoFollow" },
     { "kind": "open", "method_name": "openCgroup" },

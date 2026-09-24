@@ -814,6 +814,53 @@ test "sessionForm: a session's cgroup, and what is not one" {
     try testing.expectEqual(@as(?usize, null), sessionForm("/sys/fs/cgroup/h/c/.x", ".x"));
 }
 
+test "mountinfo: the fixed cases, as cg_check_nsdelegate read them" {
+    // Each verdict is the C's (flong-cgroup.c:44-88), from test-libc's
+    // differential against it until phase 7's L5 deleted the C.
+    const D = Mountinfo.delegated;
+    const N = Mountinfo.not_delegated;
+    const C = Mountinfo.not_cgroup2;
+    for ([_]struct { []const u8, Mountinfo }{
+        .{ "", C },
+        .{ "\n", C },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw shared:4 - cgroup2 cgroup2 rw,nsdelegate,memory_recursiveprot\n", D },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw shared:4 - cgroup2 cgroup2 rw\n", N },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw,nsdelegate\n40 29 0:30 / /sys/fs/cgroup rw - tmpfs tmpfs rw\n", C },
+        .{ "40 29 0:30 / /sys/fs/cgroup rw - tmpfs tmpfs rw\n29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 nsdelegate\n", D },
+        // A later line without its separator changes nothing.
+        .{ "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 nsdelegate\n41 29 0:31 / /sys/fs/cgroup rw\n", D },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw - cgroup2", N },
+        .{ "29 23 0:26 / /sys/fs/cgroup - cgroup2 cgroup2 nsdelegate", C },
+        .{ "29 23 0:26 / /sys/fs/cgroup", C },
+        .{ "29 23 0:26 / /sys/fs/cgroup ", C },
+        .{ "29 23 0:26 / /sys/fs/cgroup  - cgroup2 x nsdelegate\n", D },
+        .{ "29  23   0:26 / /sys/fs/cgroup rw  -  cgroup2  cgroup2  ,,nsdelegate,\n", D },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw,nsdel\x00egate\n", N },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw,nsdelegate\x00\n", D },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw,nsdelegatex,xnsdelegate\n", N },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 nsdelegate,\n", D },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 ,nsdelegate\n", D },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw,,\n", N },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw - - cgroup2 cgroup2 nsdelegate\n", C },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw -- cgroup2 cgroup2 nsdelegate\n", C },
+        .{ "29 23 0:26 / /sys/fs/cgroup\\040x rw - cgroup2 cgroup2 nsdelegate\n", C },
+        .{ "\x00 29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 nsdelegate\n", C },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 nsdelegate\r\n", N },
+        .{ "29 23 0:26 / /sys/fs/cgroup rw\t- cgroup2 cgroup2 nsdelegate\n", C },
+        .{ "a b c d /sys/fs/cgroup - cgroup2 s nsdelegate", C },
+        .{ "a b c d /sys/fs/cgroup x - cgroup2", N },
+        .{ "a b c d /sys/fs/cgroup x -  cgroup2   s   nsdelegate", D },
+    }) |c| try testing.expectEqual(c[1], mountinfo(c[0]));
+    // A line longer than any buffer: getline's, and the whole read.
+    var long: [20000]u8 = undefined;
+    const head = "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw,";
+    @memcpy(long[0..head.len], head);
+    @memset(long[head.len..], 'x');
+    const tail = ",nsdelegate\n";
+    @memcpy(long[long.len - tail.len ..], tail);
+    try testing.expectEqual(D, mountinfo(&long));
+}
+
 test "populated reads the first populated line" {
     try testing.expectEqual(Populated.empty, populated("populated 0\nfrozen 0\n"));
     try testing.expectEqual(Populated.busy, populated("populated 1\nfrozen 0\n"));

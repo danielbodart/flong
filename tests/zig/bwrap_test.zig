@@ -17,8 +17,8 @@
 //!   dropped one; the child-exit wait bounded by a forked tester, so a wait
 //!   that never ends fails as Hung.
 //!
-//! U1 and U2 stand in as this process's own /proc/self/ns/user, opened by a
-//! raw call and adopted; the keep-fd is /dev/null, opened by a raw call, as
+//! U1 and U2 stand in as this process's own user namespace, opened by
+//! fd.openUserns; the keep-fd is /dev/null, opened by a raw call, as
 //! the wrapper's are.
 
 const std = @import("std");
@@ -62,8 +62,10 @@ fn rawOpen(path: [*:0]const u8) !i32 {
     return @intCast(rc);
 }
 
+/// This process's own user namespace, opened as the launcher opens U1's:
+/// fd.openUserns of a pid.
 fn userns() !fd.Fd(.userns) {
-    return fd.adoptForeign(.userns, try rawOpen("/proc/self/ns/user"));
+    return opened(fd.openUserns(linux.getpid()));
 }
 
 /// What a call wrote on stderr: fd 2 is a memfd for its length.

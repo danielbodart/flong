@@ -6,8 +6,8 @@
 //! table stands for what only the run knows: this process's pid, U1's,
 //! the network namespace's and the pid file's numbers.
 //!
-//! The namespaces are this process's own, opened by raw calls and adopted
-//! as the kinds the launcher holds; a cgroup handle is "/" opened as one
+//! The namespaces are this process's own, opened by /proc/<pid>/ns as the
+//! launcher opens its own; a cgroup handle is "/" opened as one
 //! (O_PATH|O_DIRECTORY), which nothing here starts a child in but the
 //! failing start below.
 
@@ -23,12 +23,22 @@ const pasta = @import("pasta");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
-// ---- handles and stderr, by raw calls ----
+// ---- handles, and stderr by raw calls ----
 
-fn rawOpen(path: [*:0]const u8) !i32 {
-    const rc = linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
-    if (linux.E.init(rc) != .SUCCESS) return error.Open;
-    return @intCast(rc);
+/// This process's own user and network namespaces, opened as the launcher
+/// opens U1's and pid 1's: fd.openUserns and fd.openNetns of a pid.
+fn ownUserns() !fd.Fd(.userns) {
+    return switch (try fd.openUserns(linux.getpid())) {
+        .ok => |h| h,
+        .err => error.Open,
+    };
+}
+
+fn ownNetns() !fd.Fd(.netns) {
+    return switch (try fd.openNetns(linux.getpid())) {
+        .ok => |h| h,
+        .err => error.Open,
+    };
 }
 
 const Handles = struct {
@@ -37,8 +47,8 @@ const Handles = struct {
     leaf: fd.Fd(.cgroup),
 
     fn open() !Handles {
-        const userns = try fd.adoptForeign(.userns, try rawOpen("/proc/self/ns/user"));
-        const netns = try fd.adoptForeign(.netns, try rawOpen("/proc/self/ns/net"));
+        const userns = try ownUserns();
+        const netns = try ownNetns();
         const leaf = switch (try fd.openCgroup(fd.cwd, "/")) {
             .ok => |h| h,
             .err => return error.Open,

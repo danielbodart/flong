@@ -22,8 +22,8 @@
 //!                  (ZIG.md, "The syscall layer"). Not in tests
 //!   extern         extern fn, var or const, extern "lib", @extern, export,
 //!                  @cImport; extern struct, union and enum pass. Not in
-//!                  src/seccomp/scmp.zig, src/hybrid/mount_c.zig,
-//!                  tests/zig/abi.zig, tests/zig/libc_*.zig
+//!                  src/seccomp/scmp.zig, tests/zig/abi.zig,
+//!                  tests/zig/libc_*.zig
 //!   raw-number     .raw, a descriptor's number. Not in the syscall layer,
 //!                  src/seccomp/scmp.zig, tests
 //!   argv           sys.argv, sys.argvSlots, sys.environ. Not in the roots
@@ -31,7 +31,8 @@
 //!                  launch.zig, and the fixtures' four in src/fixtures/),
 //!                  src/proc.zig (Spawn's default envp), tests
 //!   handle-guts    .slot, .gen: a handle's fields. Not in src/fd.zig, tests
-//!   adopt-foreign  .adoptForeign. Not in src/hybrid/mount_c.zig, tests
+//!   adopt-foreign  .adoptForeign, which went with the C launcher's
+//!                  mount-helper shim (ZIG.md, phase 7's L5). Not in tests
 //!   debug-output   debug.print, std.log: messages go through msg.zig. Not
 //!                  in tests
 //!   catch-unreachable
@@ -64,11 +65,11 @@ const Rule = enum {
         return switch (r) {
             .@"raw-namespace" => "raw calls belong in the syscall layer (sys.zig)",
             .posix => "std.posix makes real errnos unreachable; use sys.zig",
-            .@"extern" => "a C symbol belongs in scmp.zig or mount_c.zig",
+            .@"extern" => "a C symbol belongs in scmp.zig",
             .@"raw-number" => "a descriptor's number leaves the table only through passFd, selfPath, pidPath or setFd",
             .argv => "argv and environ are read by the roots and proc.zig only",
             .@"handle-guts" => "a handle's fields are fd.zig's",
-            .@"adopt-foreign" => "adoptForeign is for the mount-helper shim only",
+            .@"adopt-foreign" => "adoptForeign went with the mount-helper shim: a descriptor is minted by fd.zig",
             .@"debug-output" => "messages go through msg.zig, one write each",
             .@"catch-unreachable" => "say why it cannot happen: `// proven: <why>` on the line",
             .alloc => "no general-purpose allocator in flong's programs",
@@ -95,12 +96,11 @@ fn applies(rule: Rule, name: []const u8) bool {
     return switch (rule) {
         .@"raw-namespace" => !in(name, &syscall_layer) and !std.mem.startsWith(u8, name, "src/fixtures/"),
         .posix => true,
-        .@"extern" => !in(name, &.{ "src/seccomp/scmp.zig", "src/hybrid/mount_c.zig" }),
+        .@"extern" => !std.mem.eql(u8, name, "src/seccomp/scmp.zig"),
         .@"raw-number" => !in(name, &syscall_layer) and !std.mem.eql(u8, name, "src/seccomp/scmp.zig"),
         .argv => !in(name, &roots) and !std.mem.eql(u8, name, "src/proc.zig"),
         .@"handle-guts" => !std.mem.eql(u8, name, "src/fd.zig"),
-        .@"adopt-foreign" => !std.mem.eql(u8, name, "src/hybrid/mount_c.zig"),
-        .@"debug-output", .@"catch-unreachable", .alloc => true,
+        .@"adopt-foreign", .@"debug-output", .@"catch-unreachable", .alloc => true,
     };
 }
 

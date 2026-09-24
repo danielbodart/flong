@@ -53,7 +53,7 @@
 # changed what a policy means (ZIG.md, stop condition 9). Its commit is its
 # own and shows both eval texts equal.
 #
-# pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:11-20
+# pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:10-19
 # does; seccomp is the program the seccomp sets run against, launcher the
 # output whose flong-init, flong-sweeper and flong-launch the init, sweeper
 # and spec sets do.
@@ -184,8 +184,7 @@ let
     # and over 1 KiB (ZIG.md quirk 22). state-missing is the valid spec
     # itself, which passes every check and stops at the next step, the
     # state directory (flong-launch.c:891-893, flong-record.c:58-63),
-    # recorded from the C launcher of phase 7's L4 (tests/integration.nix's
-    # flong-launch-c). The valid spec: machine m, container c, state
+    # recorded from the C launcher of phase 7's L4. The valid spec: machine m, container c, state
     # /state, cache /cache, closure CLOSURE, uidmap and gidmap 0 100000
     # 65536, user 1000 100 /home/u, holder flong.slice/s, -- /bin/true.
     # CLOSURE is a store directory, LEADSOUT a store path that is a symlink

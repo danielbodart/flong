@@ -18,10 +18,20 @@ extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_
 const names = [_][]const u8{ "leader", "userns", "netns", "machine", "lead", "leaderx", "netns2", "Machine", "userns_", "PATH", "", "=" };
 const values = [_][]const u8{ "", "x", "=y", "/proc/1/fd/3", "a b" };
 
-fn rawOpen(path: [*:0]const u8) !i32 {
-    const rc = linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
-    if (linux.E.init(rc) != .SUCCESS) return error.Open;
-    return @intCast(rc);
+/// This process's own user and network namespaces, opened as the launcher
+/// opens U1's and pid 1's: fd.openUserns and fd.openNetns of a pid.
+fn ownUserns() !fd.Fd(.userns) {
+    return switch (try fd.openUserns(linux.getpid())) {
+        .ok => |h| h,
+        .err => error.Open,
+    };
+}
+
+fn ownNetns() !fd.Fd(.netns) {
+    return switch (try fd.openNetns(linux.getpid())) {
+        .ok => |h| h,
+        .err => error.Open,
+    };
 }
 
 fn one(arena: std.mem.Allocator, rand: std.Random, userns: fd.Fd(.userns), netns: fd.Fd(.netns)) !void {
@@ -84,9 +94,9 @@ fn dump(entries: []const [*:0]const u8, want: []const []const u8, got: []const [
 }
 
 test "hook.env equals glibc's setenv, leader, userns, netns, machine, over 5,000 environments per seed" {
-    const userns = try fd.adoptForeign(.userns, try rawOpen("/proc/self/ns/user"));
+    const userns = try ownUserns();
     defer userns.close();
-    const netns = try fd.adoptForeign(.netns, try rawOpen("/proc/self/ns/net"));
+    const netns = try ownNetns();
     defer netns.close();
     var random_seed: u64 = undefined;
     std.crypto.random.bytes(std.mem.asBytes(&random_seed));

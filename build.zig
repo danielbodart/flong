@@ -13,8 +13,7 @@
 //!   test          unit and property tests, Debug, or ReleaseSafe with
 //!                 -Drelease=true (as every step); needs -Ddev=true
 //!   test-libc     errno.zig and num.zig against glibc, scmp.zig against
-//!                 seccomp.h, the sweep's readers against the C they port,
-//!                 the fixtures' number readers against glibc's
+//!                 seccomp.h, the fixtures' number readers against glibc's
 //!                 (tests/zig/libc_*.zig), and the host's half of `abi`
 //!   abi           tests/zig/abi.zig: the kernel structs and constants
 //!                 against Zig's bundled headers, x86_64 and aarch64 (run on
@@ -30,12 +29,7 @@
 //!                 not linked, flong-init (with a dummy tini),
 //!                 flong-sweeper, syscall-probe, swapper and ioctl-probe
 //!                 built for it (in cross/), flong-launch (with dummy
-//!                 paths) too,
-//!                 the mount library for it (cross/libflong-mount.a), and
-//!                 abi's aarch64 half
-//!   mountlib      lib/libflong-mount.a, the Zig mount helper the C launcher
-//!                 links (src/hybrid/mount_c.zig; phases 4-7): no libc, no
-//!                 compiler-rt, one exported symbol
+//!                 paths) too, and abi's aarch64 half
 //!   integration   the drivers checks.native runs (bin/flong-walker,
 //!                 bin/flong-proc), built only by tests/integration.nix
 //!
@@ -266,64 +260,6 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        // The shim's extern structs against flong-mount.h as the C launcher
-        // compiles it (ZIG.md, "The mount-helper shim"), and the shim run
-        // in a fork child, as the launcher runs it.
-        const m = modules(b, target, optimize);
-        const header = b.addTranslateC(.{
-            .root_source_file = b.path("tests/zig/mount.h"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        header.addIncludePath(b.path("launcher"));
-        if (target.query.isNativeOs() and target.query.isNativeAbi()) {
-            const paths = std.zig.system.NativePaths.detect(b.allocator, &target.result) catch @panic("OOM");
-            for (paths.include_dirs.items) |dir| header.addSystemIncludePath(.{ .cwd_relative = dir });
-        }
-        const t = b.addTest(.{
-            .name = "libc_mount",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/zig/libc_mount.zig"),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-                .imports = &.{
-                    .{ .name = "sys", .module = m.sys },
-                    .{ .name = "mount_c", .module = mountShim(b, m, target, optimize) },
-                    .{ .name = "mount_h", .module = header.createModule() },
-                },
-            }),
-        });
-        libc_step.dependOn(&b.addRunArtifact(t).step);
-    }
-
-    {
-        // The sweep's readers against the C they port (tests/zig/
-        // record_c.c includes flong-record.c and flong-cgroup.c; flong-util.c
-        // links beside), compiled with the launcher's standard and
-        // _GNU_SOURCE.
-        const m = modules(b, target, optimize);
-        const root = b.createModule(.{
-            .root_source_file = b.path("tests/zig/libc_record.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "sys", .module = m.sys },
-                .{ .name = "cgroup", .module = m.cgroup },
-                .{ .name = "record", .module = m.record },
-                .{ .name = "inputs", .module = inputsModule(b, target, optimize) },
-            },
-        });
-        root.addIncludePath(b.path("launcher"));
-        root.addCSourceFile(.{ .file = b.path("tests/zig/record_c.c"), .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE" } });
-        root.addCSourceFile(.{ .file = b.path("launcher/flong-util.c"), .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE" } });
-        const t = b.addTest(.{ .name = "libc_record", .root_module = root });
-        libc_step.dependOn(&b.addRunArtifact(t).step);
-    }
-
-    {
         // The fixtures' number readers against glibc's: ioctl-probe's
         // strtoul0 against the C23 strtoul its C called, bpfdump's atoi
         // against atoi.
@@ -447,7 +383,7 @@ pub fn build(b: *std.Build) void {
     {
         // And nothing in good.zig, linted as the file that may export.
         const run = b.addRunArtifact(fdlint);
-        run.addArgs(&.{ "--as", "src/hybrid/mount_c.zig" });
+        run.addArgs(&.{ "--as", "src/seccomp/scmp.zig" });
         run.addFileArg(b.path("tests/zig/lint/good.zig"));
         run.addCheck(.{ .expect_stdout_exact = "" });
         run.addCheck(.{ .expect_term = .{ .Exited = 0 } });
@@ -519,10 +455,6 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    // ---- mountlib: the Zig mount helper for the C launcher ----
-    const mountlib_step = b.step("mountlib", "Build lib/libflong-mount.a, the mount helper the C launcher links");
-    mountlib_step.dependOn(&b.addInstallArtifact(mountLib(b, target, optimize), .{}).step);
-
     // ---- integration: the drivers checks.native runs ----
     const integration_step = b.step("integration", "Build the drivers checks.native runs: bin/flong-walker, bin/flong-proc");
     integration_step.dependOn(&b.addInstallArtifact(walker(b, target, optimize), .{}).step);
@@ -552,13 +484,6 @@ pub fn build(b: *std.Build) void {
             .dest_dir = .{ .override = .{ .custom = "cross" } },
         });
         cross_step.dependOn(&arm_launch.step);
-        // The mount library for aarch64: native.nix's cross-aarch64 reads
-        // its symbols; the aarch64 C link is unchecked (ZIG.md, "The
-        // mount-helper shim").
-        const arm_lib = b.addInstallArtifact(mountLib(b, arm, optimize), .{
-            .dest_dir = .{ .override = .{ .custom = "cross" } },
-        });
-        cross_step.dependOn(&arm_lib.step);
         // The fixtures: the three without libc built whole; bpfdump, which
         // needs libseccomp, compiled and not linked, as flong-seccomp.
         for (fixtures(b, arm, optimize, .unlinked)) |exe| {
@@ -616,9 +541,8 @@ pub fn build(b: *std.Build) void {
     // Phase 7's milestones, on trunk (ZIG.md, "How it runs"). L4 builds the
     // Zig flong-launch into the launcher set (src/launch.zig composing
     // src/launch/'s pieces, spec, ns, cgroup, record, tty and mount; the
-    // modules are file-scope `Launcher` and `Terminal`, below); the C
-    // launcher is built only by tests/integration.nix, as flong-launch-c,
-    // until L5 deletes it. The steps of this block:
+    // modules are file-scope `Launcher` and `Terminal`, below); L5 deleted
+    // the C launcher. The steps of this block:
     //
     //   install        (-Dset=launcher) bin/flong-launch
     //   test           (-Ddev=true) spec.zig's and launch.zig's own tests,
@@ -649,9 +573,7 @@ pub fn build(b: *std.Build) void {
     //                  lock, the session made and undone; run only by
     //                  tests/integration.nix, whose fileset holds the
     //                  golden records
-    //   test-libc      tests/zig/libc_launch.zig: cgroup.mountinfo against
-    //                  cg_check_nsdelegate over the same text
-    //                  (tests/zig/mountinfo_c.c), sys.O_TMPFILE against
+    //   test-libc      tests/zig/libc_launch.zig: sys.O_TMPFILE against
     //                  glibc's fcntl.h; tests/zig/libc_hookenv.zig:
     //                  hook.env against glibc's setenv
     //   launch-driver  bin/flong-launch-driver (tests/zig/launchdriver.zig),
@@ -835,11 +757,19 @@ pub fn build(b: *std.Build) void {
         }
 
         {
-            // L2's test-libc: the mountinfo reader against the C it ports,
-            // flong-cgroup.c compiled as the launcher compiles it, reading
-            // the same text (tests/zig/mountinfo_c.c), and sys.O_TMPFILE
-            // against glibc's fcntl.h.
+            // L2's test-libc: sys.O_TMPFILE against glibc's fcntl.h, through
+            // translate-c, the header found as tests/zig/scmp.h's is.
             const l = Launcher.launchModules(b, target, optimize);
+            const header = b.addTranslateC(.{
+                .root_source_file = b.path("tests/zig/fcntl.h"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            if (target.query.isNativeOs() and target.query.isNativeAbi()) {
+                const paths = std.zig.system.NativePaths.detect(b.allocator, &target.result) catch @panic("OOM");
+                for (paths.include_dirs.items) |dir| header.addSystemIncludePath(.{ .cwd_relative = dir });
+            }
             const root = b.createModule(.{
                 .root_source_file = b.path("tests/zig/libc_launch.zig"),
                 .target = target,
@@ -847,13 +777,9 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{
                     .{ .name = "sys", .module = l.m.sys },
-                    .{ .name = "cgroup", .module = l.cgroup },
-                    .{ .name = "inputs", .module = inputsModule(b, target, optimize) },
+                    .{ .name = "fcntl_h", .module = header.createModule() },
                 },
             });
-            root.addIncludePath(b.path("launcher"));
-            root.addCSourceFile(.{ .file = b.path("tests/zig/mountinfo_c.c"), .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE" } });
-            root.addCSourceFile(.{ .file = b.path("launcher/flong-util.c"), .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE" } });
             libc_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = "libc_launch", .root_module = root })).step);
         }
 
@@ -1434,51 +1360,6 @@ fn modules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     };
 }
 
-/// src/hybrid/mount_c.zig as a module over `m`'s modules.
-fn mountShim(b: *std.Build, m: Modules, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
-    return b.createModule(.{
-        .root_source_file = b.path("src/hybrid/mount_c.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "sys", .module = m.sys },
-            .{ .name = "fd", .module = m.fd },
-            .{ .name = "msg", .module = m.msg },
-            .{ .name = "mount", .module = m.mount },
-        },
-    });
-}
-
-/// libflong-mount.a (ZIG.md, "The mount-helper shim"; P5's settings,
-/// tests/proofs/p5/build.zig): for Linux with no libc (`target`'s arch and
-/// CPU), position-independent, as the launcher is linked -pie by the
-/// cc-wrapper's hardening; single-threaded; stripped; no stack probing,
-/// which is what referenced compiler-rt's __zig_probe_stack; no stack
-/// protector; and no compiler-rt, whose memcpy, memset, memmove, memcmp,
-/// bcmp, __stack_chk_fail and __stack_chk_guard would take the C's calls
-/// from glibc. Every module of it gets the same settings.
-fn mountLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
-    var query = target.query;
-    query.os_tag = .linux;
-    query.abi = .none;
-    const t = b.resolveTargetQuery(query);
-    const m = modules(b, t, optimize);
-    const root = mountShim(b, m, t, optimize);
-    inline for (@typeInfo(Modules).@"struct".fields) |f| setLibrary(@field(m, f.name));
-    setLibrary(root);
-    const lib = b.addLibrary(.{ .name = "flong-mount", .linkage = .static, .root_module = root });
-    lib.bundle_compiler_rt = false;
-    return lib;
-}
-
-fn setLibrary(module: *std.Build.Module) void {
-    module.pic = true;
-    module.single_threaded = true;
-    module.strip = true;
-    module.stack_check = false;
-    module.stack_protector = false;
-}
-
 /// flong-walker (tests/zig/walker.zig): the mount helper's walk, masks and
 /// protected-path check, driven from a shell in checks.native. Static, no
 /// libc, stripped, as an installed artifact.
@@ -1531,8 +1412,7 @@ fn procDriver(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     return exe;
 }
 
-/// tests/zig/inputs.zig, the fuzz inputs fuzz.zig and libc_record.zig
-/// share.
+/// tests/zig/inputs.zig, the fuzz inputs of fuzz.zig.
 fn inputsModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("tests/zig/inputs.zig"), .target = target, .optimize = optimize });
 }

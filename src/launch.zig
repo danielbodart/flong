@@ -228,7 +228,7 @@ const Info = struct {
 };
 
 /// The mount helper's life, in the fork child (flong-launch.c:533-557 and
-/// the shim it replaces, src/hybrid/mount_c.zig): mount.run, then 0, or 1
+/// phase 4's shim, deleted in L5): mount.run, then 0, or 1
 /// having said why; a panic says one line and exits 125, which the launcher
 /// reads as a failed mount too. Nothing is freed: exit owns everything
 /// (flong-mount.c:3-5).

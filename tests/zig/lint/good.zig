@@ -1,4 +1,4 @@
-//! Planted for fdlint, linted as src/hybrid/mount_c.zig, where `export` is
+//! Planted for fdlint, linted as src/seccomp/scmp.zig, where `export` is
 //! allowed: nothing here may be reported. Never compiled.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -8,7 +8,7 @@ const Job = extern struct { a: u32, b: u32 };
 const Tag = extern union { n: u32, f: f32 };
 const Kind = enum(u8) { a, b };
 
-export fn flong_mount_main(job: *const Job, tracing: c_int) callconv(.c) noreturn {
+export fn planted_export(job: *const Job, tracing: c_int) callconv(.c) noreturn {
     _ = job;
     _ = tracing;
     if (builtin.os.tag != .linux) @compileError("Linux only");

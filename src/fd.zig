@@ -22,10 +22,10 @@
 //! adds the mount helper's (flong-mount.c): `path` (O_PATH), `tree` (a
 //! detached mount), `fsctx` (a filesystem being configured), the four
 //! namespaces it enters, `pipe_r` (the ready pipe) and `pidfd` (the
-//! leader's, adopted); and `adoptForeign`, for the shim alone. Phase 5
-//! adds flong-sweeper's and the process layer's (flong-util.c,
-//! flong-cgroup.c, flong-record.c): `cgroup` (an O_PATH cgroup directory,
-//! the only kind fork and Spawn create a child in), `inotify`, `pipe_w`,
+//! leader's, adopted). Phase 5 adds flong-sweeper's and the process
+//! layer's (flong-util.c, flong-cgroup.c, flong-record.c): `cgroup` (an
+//! O_PATH cgroup directory, the only kind fork and Spawn create a child
+//! in), `inotify`, `pipe_w`,
 //! `signalfd`, `inherited` (a descriptor the caller handed over, which
 //! Spawn keeps), pidfds of its own children (`proc.zig`, whose slot is
 //! reserved before clone3) and `retainOnly`, a fork child's close of all
@@ -727,14 +727,6 @@ pub fn openSlave(path: [*:0]const u8) Error!sys.Result(Fd(.pty_slave)) {
 /// the caller may not open (after su) refuses it (quirk 42).
 pub fn reopenOut() Error!sys.Result(Fd(.tty_out)) {
     return adopted(.tty_out, sys.openat(sys.AT.FDCWD, "/proc/self/fd/1", .{ .ACCMODE = .WRONLY, .NOCTTY = true, .NONBLOCK = true, .CLOEXEC = true }, 0));
-}
-
-/// A descriptor a C caller opened and handed over, as kind `k`: the
-/// mount-helper shim's (src/hybrid/mount_c.zig) U1, ready read end and
-/// leader's pidfd (ZIG.md, "The mount-helper shim"). The lint allows it
-/// there alone. It is not checked: the C knows what it passed.
-pub fn adoptForeign(comptime k: Kind, raw: sys.fd_t) Error!Fd(k) {
-    return adopt(k, raw);
 }
 
 // ---- fork and spawn: the pidfd's slot, and the child's descriptors ----

@@ -12,10 +12,9 @@
 //! Everything here runs in one forked, single-threaded child that exits when
 //! `run` returns, so a descriptor left open on a failure path goes with the
 //! process: the launcher owns every cleanup that outlives it
-//! (flong-mount.c:3-5). The child is a fork body of the Zig launcher's
-//! (src/launch.zig, since phase 7's L4), and the check-only C launcher's
-//! through src/hybrid/mount_c.zig until L5; this file reads no argv or
-//! environ and knows nothing of C. Every failure is said once, where it happens, in the
+//! (flong-mount.c:3-5). The child is a fork body of the launcher's
+//! (src/launch.zig, since phase 7's L4); this file reads no argv or
+//! environ. Every failure is said once, where it happens, in the
 //! launcher's words and cut mode (msg.zig), and passed up as
 //! `error.Reported`.
 

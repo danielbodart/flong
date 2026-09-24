@@ -3,8 +3,7 @@
 //! something to the reader (a key, a separator, a NUL, a number at a
 //! limit, a run past a buffer) or a plain byte, so random lists reach the
 //! readers' edges far more often than random bytes do, and minish's
-//! shrinking of the list shrinks the input. fuzz.zig and libc_record.zig
-//! share them.
+//! shrinking of the list shrinks the input. fuzz.zig uses them.
 
 const std = @import("std");
 
