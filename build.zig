@@ -634,6 +634,15 @@ pub fn build(b: *std.Build) void {
     //                  glibc's fcntl.h
     //   launch-driver  bin/flong-launch-driver (tests/zig/launchdriver.zig),
     //                  built only by tests/integration.nix, for checks.native
+    //
+    // L4's pieces, each a module under src/launch/ with explicit
+    // parameters, built ahead of the launch and not yet imported by it:
+    //
+    //   test        (-Ddev=true) src/launch/childpid.zig's own tests, and
+    //               tests/zig/childpid_test.zig: the info loop over any
+    //               chunking, the 4095-byte bound, each refusal's message,
+    //               and the fuzz with its corpus
+    //               (tests/zig/corpus/launch-childpid/)
     {
         const Branch = struct {
             /// src/spec.zig over `m`'s modules.
@@ -773,6 +782,21 @@ pub fn build(b: *std.Build) void {
                 return exe;
             }
 
+            /// src/launch/childpid.zig (step 13, bwrap's child-pid) over
+            /// `m`'s modules.
+            fn childpidModule(bb: *std.Build, m: Modules, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
+                return bb.createModule(.{
+                    .root_source_file = bb.path("src/launch/childpid.zig"),
+                    .target = t,
+                    .optimize = o,
+                    .imports = &.{
+                        .{ .name = "sys", .module = m.sys },
+                        .{ .name = "msg", .module = m.msg },
+                        .{ .name = "sig", .module = m.sig },
+                    },
+                });
+            }
+
             /// A directory in the store that exists wherever this builds:
             /// the one holding the zig that runs it. Null outside a store.
             fn storeDir(bb: *std.Build) ?[]const u8 {
@@ -793,6 +817,35 @@ pub fn build(b: *std.Build) void {
                 }
                 {
                     const t = b.addTest(.{ .name = "launch", .root_module = Branch.launchModule(b, target, optimize, false) });
+                    test_step.dependOn(&b.addRunArtifact(t).step);
+                }
+                {
+                    const m = modules(b, target, optimize);
+                    const t = b.addTest(.{ .name = "childpid", .root_module = Branch.childpidModule(b, m, target, optimize) });
+                    test_step.dependOn(&b.addRunArtifact(t).step);
+                }
+                {
+                    // The info loop driven from outside, and fuzzed, its
+                    // corpus replayed first.
+                    const m = modules(b, target, optimize);
+                    const opts = b.addOptions();
+                    opts.addOptionPath("corpus", b.path("tests/zig/corpus"));
+                    const t = b.addTest(.{
+                        .name = "childpid_test",
+                        .root_module = b.createModule(.{
+                            .root_source_file = b.path("tests/zig/childpid_test.zig"),
+                            .target = target,
+                            .optimize = optimize,
+                            .imports = &.{
+                                .{ .name = "minish", .module = minish.module("minish") },
+                                .{ .name = "sys", .module = m.sys },
+                                .{ .name = "msg", .module = m.msg },
+                                .{ .name = "sig", .module = m.sig },
+                                .{ .name = "childpid", .module = Branch.childpidModule(b, m, target, optimize) },
+                                .{ .name = "options", .module = opts.createModule() },
+                            },
+                        }),
+                    });
                     test_step.dependOn(&b.addRunArtifact(t).step);
                 }
                 if (Branch.storeDir(b)) |dir| {

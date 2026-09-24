@@ -1,0 +1,9 @@
+{
+    "child-pid": 31337,
+    "cgroup-namespace": 4026531835,
+    "ipc-namespace": 4026532461,
+    "mnt-namespace": 4026532459,
+    "net-namespace": 4026532464,
+    "pid-namespace": 4026532462,
+    "uts-namespace": 4026532460
+}
