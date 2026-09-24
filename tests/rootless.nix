@@ -46,6 +46,14 @@ let
     systemd.tmpfiles.rules = [ "L /home/alice/escape - - - - /escview" ];
   };
 
+  # The declaration every other extends: plain, and the one the
+  # specialisation keeps.
+  base = {
+    container = "box";
+    user = "alice";
+    command = [ "bash" "-c" ];
+  };
+
   # ioctl-probe and swapper (tests/probes.nix), Zig since phase 6.
   probes = import ./probes.nix;
 
@@ -232,10 +240,14 @@ in
 
     # One switch, to a system whose holder unit differs, with sessions
     # running. Only in the part that switches: evaluating it evaluates the
-    # node again.
+    # node again, and each container's system with it. So it keeps what the
+    # switch's session runs, box and plain, and drops the other containers
+    # and declarations, which the switch removes under the running session.
     specialisation = lib.mkIf (lib.elem part [ switchPart "all" ]) {
       changed.configuration = {
         systemd.user.services.flong-sessions.environment.FLONG_TEST_GENERATION = "changed";
+        containers = lib.mkForce { box = { privateNetwork = true; config = boxConfig; }; };
+        flong = lib.mkForce { plain = base; };
       };
     };
 
@@ -294,11 +306,6 @@ in
 
     flong =
       let
-        base = {
-          container = "box";
-          user = "alice";
-          command = [ "bash" "-c" ];
-        };
         hooked = base // {
           inherit postStart postStop;
         };
@@ -364,11 +371,7 @@ in
       };
 
     environment.systemPackages =
-      map (n: config.flong.${n}.launcher) [
-        "plain" "hooked" "nethook" "limited" "mounts"
-        "parity" "debugged" "nested" "learner" "project"
-        "fenced" "fencednested" "patient" "race" "esc"
-      ]
+      lib.mapAttrsToList (_: d: d.launcher) config.flong
       ++ [
         # The driver reads a session's ruleset and links from outside.
         pkgs.nftables

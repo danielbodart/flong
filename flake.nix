@@ -112,7 +112,7 @@
         # evaluates them one after another before it builds any. Checks
         # already in a binary cache are skipped (--skip-cached); a check
         # that fails to evaluate or build makes the exit status non-zero.
-        # A worker takes up to about 4.6 GB (rootless; each assertion shard
+        # A worker takes up to about 3 GB (rootless-b; each assertion shard
         # about 2 GB, tests/assertions.nix), so 6 workers, each
         # restarted past 6 GiB, stay within a 62 GB host with room to
         # build. GATE_EVAL_WORKERS overrides the count; the arguments are
