@@ -29,6 +29,10 @@
 #                L2 record writer against tests/golden/records/ (outside
 #                native-test's fileset), the name taken, the cache lock,
 #                the session made and undone
+#   flong-launch-c
+#                the C flong-launch as native.nix's launcher set builds it,
+#                with the Zig mount library, for rootless.nix's L4
+#                transition subtest (ZIG.md, phase 7's L4), never an output
 #   vm           every proof's bins, the drivers and launch-driver joined,
 #                for the VM node's PATH, with passthru.vmScripts, the
 #                proofs' testScript fragments in order, then L2's
@@ -56,7 +60,8 @@ let
 
   # The one builder and the dependency fetch, native.nix's: see there for
   # their arguments. A proof passes its own root.
-  inherit (import ../native.nix { inherit pkgs; }) zigSet zigDeps;
+  native = import ../native.nix { inherit pkgs; };
+  inherit (native) zigSet zigDeps;
 
   # Each tests/proofs/<pN>/default.nix, in name order.
   proofsDir = ./proofs;
@@ -195,6 +200,33 @@ let
     ];
   };
 
+  # The C launcher beside the one native.nix ships (ZIG.md, phase 7's L4):
+  # the same sources, flags, link, clash check and shim run (native.nix's
+  # cLaunch), but for the one compiled-in path flong-launch-c owns, FLONG_INIT,
+  # which names the shipped set's flong-init rather than one of its own. So
+  # a session under either launcher runs the same flong-init, and bwrap's
+  # argv names it by the same store path. Only $out/bin/flong-launch: the
+  # mountlib step's install is the archive, which the link has already used.
+  # rootless.nix points copies of the wrappers at it; until L4 it is the C
+  # against the C.
+  flong-launch-c = zigSet {
+    pname = "flong-launch-c";
+    steps = "mountlib";
+    files = native.launcherFiles;
+    nativeBuildInputs = [ pkgs.binutils ];
+    extra = ''
+      rm -r $out/lib
+      mkdir $out/bin
+    ''
+    + native.cLaunch (native.launcherCflagsFor ''"\"${native.launcher}/bin/flong-init\""'')
+    + ''
+      # The control: the one path it runs that it does not own is the shipped
+      # flong-init, and it runs no flong-init of its own.
+      grep -qF '${native.launcher}/bin/flong-init' $out/bin/flong-launch
+      [[ "$(ls $out/bin)" == flong-launch ]]
+    '';
+  };
+
   vm = pkgs.symlinkJoin {
     name = "flong-proofs-vm";
     paths = lib.attrValues bins ++ [
@@ -225,6 +257,7 @@ in
     spec-paths
     launch-driver
     launch-test
+    flong-launch-c
     ;
 }
 // builds

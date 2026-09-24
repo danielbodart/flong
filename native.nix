@@ -184,15 +184,18 @@ let
   # newgidmap are NixOS's setuid wrappers, which have no store path. -Werror
   # with the cc-wrapper's hardening.
   # FLONG_INIT names the Zig flong-init installed beside it, in the same
-  # $out, so it is given as a shell word expanding $out.
-  launcherCflags = ''
+  # $out, so it is given as a shell word expanding $out. launcherCflagsFor
+  # takes that word: tests/integration.nix's flong-launch-c (ZIG.md, phase
+  # 7's L4) names the shipped set's flong-init instead.
+  launcherCflagsFor = init: ''
     -std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror
     -DFLONG_BWRAP='"${pkgs.bubblewrap}/bin/bwrap"'
     -DFLONG_PASTA='"${pkgs.passt}/bin/pasta"'
     -DFLONG_NEWUIDMAP='"/run/wrappers/bin/newuidmap"'
     -DFLONG_NEWGIDMAP='"/run/wrappers/bin/newgidmap"'
-    -DFLONG_INIT="\"$out/bin/flong-init\""
+    -DFLONG_INIT=${init}
   '';
+  launcherCflags = launcherCflagsFor ''"\"$out/bin/flong-init\""'';
 
   # flong-launch, flong-sweeper and flong-init side by side in one $out
   # (tests/rootless.nix:636-641 finds the sweeper beside the launcher):
@@ -208,15 +211,7 @@ let
     pname = "flong-launcher";
     set = "launcher";
     flags = "-Dtini=${pkgs.tini}/bin/tini";
-    files = [
-      (lib.fileset.difference ./src (
-        lib.fileset.unions [
-          ./src/seccomp
-          (lib.fileset.maybeMissing ./src/fixtures)
-        ]
-      ))
-      (lib.fileset.fileFilter (f: f.hasExt "c" || f.hasExt "h") ./launcher)
-    ];
+    files = launcherFiles;
     nativeBuildInputs = [
       pkgs.file
       pkgs.binutils
@@ -232,19 +227,40 @@ let
         [[ $(awk '$1 == "GNU_STACK" { print $6 }' $TMPDIR/$prog.phdrs) == 0x000000 ]]
       done
 
-      # The mount helper: the archive (src/hybrid/mount_c.zig), then the C
-      # launcher linked with it.
-      TERM=dumb zig build mountlib -j$NIX_BUILD_CORES $zigDefaultCpuFlag $zigDefaultOptimizeFlag --prefix $TMPDIR/mountlib
-      mountlib=$TMPDIR/mountlib/lib/libflong-mount.a
-      cd launcher
-      cflags=(${launcherCflags})
-      $CC "''${cflags[@]}" -o $out/bin/flong-launch flong-launch.c flong-spec.c flong-ns.c \
-        flong-cgroup.c flong-record.c flong-tty.c flong-util.c $mountlib
-      cd ..
-      ${clashCheck}
-      ${shimRun}
-    '';
+    ''
+    + cLaunch launcherCflags;
   };
+
+  # The launcher set's fileset: src/ but for the seccomp set's and the
+  # fixtures' own sources, and launcher/'s C.
+  launcherFiles = [
+    (lib.fileset.difference ./src (
+      lib.fileset.unions [
+        ./src/seccomp
+        (lib.fileset.maybeMissing ./src/fixtures)
+      ]
+    ))
+    (lib.fileset.fileFilter (f: f.hasExt "c" || f.hasExt "h") ./launcher)
+  ];
+
+  # The C flong-launch, linked with the Zig mount helper, into
+  # $out/bin/flong-launch, then the clash check and the shim run: shell for
+  # a zigSet's `extra`, over the launcher set's files, with CFLAGS a
+  # launcherCflagsFor result. The launcher set's own, and
+  # tests/integration.nix's flong-launch-c (ZIG.md, phase 7's L4).
+  cLaunch = cflags: ''
+    # The mount helper: the archive (src/hybrid/mount_c.zig), then the C
+    # launcher linked with it.
+    TERM=dumb zig build mountlib -j$NIX_BUILD_CORES $zigDefaultCpuFlag $zigDefaultOptimizeFlag --prefix $TMPDIR/mountlib
+    mountlib=$TMPDIR/mountlib/lib/libflong-mount.a
+    cd launcher
+    cflags=(${cflags})
+    $CC "''${cflags[@]}" -o $out/bin/flong-launch flong-launch.c flong-spec.c flong-ns.c \
+      flong-cgroup.c flong-record.c flong-tty.c flong-util.c $mountlib
+    cd ..
+    ${clashCheck}
+    ${shimRun}
+  '';
 
   # The clash check (ZIG.md, "The mount-helper shim"; phase 0's P5 made it
   # on a proof's archive, this on the real link), in the launcher's build,
@@ -442,6 +458,9 @@ in
     deps
     seccomp
     launcher
+    launcherFiles
+    launcherCflagsFor
+    cLaunch
     fixtures
     checks
     ;
