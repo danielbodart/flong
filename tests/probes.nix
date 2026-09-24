@@ -13,72 +13,11 @@
 #
 # swapper DIR exchanges DIR/sub and DIR/sublink until it is killed, as a
 # payload racing another session's mounts would.
-#
-# `c` is the C they port, built as this file built it before phase 6 and
-# installed as ioctl-probe-c and swapper-c, for phase 6 (a)'s transition
-# (tests/fixtures-transition.nix, rootless.nix, tests/native.nix); never an
-# output.
 pkgs:
 let
   fixtures = (import ../native.nix { inherit pkgs; }).fixtures;
-
-  c = pkgs.runCommandCC "flong-probes-c"
-    {
-      swapper = pkgs.writeText "swapper.c" ''
-        #include <fcntl.h>
-        #include <stdio.h>
-        #include <unistd.h>
-
-        int main(int argc, char **argv)
-        {
-        	if (argc != 2) {
-        		fputs("usage: swapper DIR\n", stderr);
-        		return 2;
-        	}
-        	if (chdir(argv[1]) != 0) {
-        		perror(argv[1]);
-        		return 1;
-        	}
-        	for (;;) {
-        		if (renameat2(AT_FDCWD, "sub", AT_FDCWD, "sublink", RENAME_EXCHANGE) != 0) {
-        			perror("renameat2");
-        			return 1;
-        		}
-        	}
-        }
-      '';
-      src = pkgs.writeText "ioctl-probe.c" ''
-        #include <errno.h>
-        #include <stdio.h>
-        #include <stdlib.h>
-        #include <string.h>
-        #include <sys/syscall.h>
-        #include <unistd.h>
-
-        int main(int argc, char **argv)
-        {
-        	char buf[256] = { 0 };
-        	if (argc != 2) {
-        		fputs("usage: ioctl-probe REQUEST\n", stderr);
-        		return 2;
-        	}
-        	unsigned long request = strtoul(argv[1], NULL, 0);
-        	if (syscall(SYS_ioctl, 0, request, buf) == 0) {
-        		puts("ok");
-        	} else {
-        		puts(strerrorname_np(errno));
-        	}
-        	return 0;
-        }
-      '';
-    }
-    ''
-      mkdir -p $out/bin
-      $CC -std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror -o $out/bin/ioctl-probe-c $src
-      $CC -std=gnu11 -O2 -D_GNU_SOURCE -Wall -Wextra -Werror -o $out/bin/swapper-c $swapper
-    '';
 in
-pkgs.runCommand "flong-probes" { passthru = { inherit c; }; } ''
+pkgs.runCommand "flong-probes" { } ''
   mkdir -p $out/bin
   ln -s ${fixtures}/bin/ioctl-probe ${fixtures}/bin/swapper $out/bin/
 ''

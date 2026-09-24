@@ -1,6 +1,6 @@
 //! swapper DIR: exchanges DIR/sub and DIR/sublink until it is killed, as a
 //! payload racing another session's mounts would (ZIG.md, "Phase 6"). The
-//! C that tests/probes.nix held until phase 6, line by line: chdir, then
+//! C that tests/probes.nix held until phase 6 (b), line by line: chdir, then
 //! renameat2(RENAME_EXCHANGE) of the two names in a loop; a usage error is
 //! 2, a failed call perror's line and 1.
 //!

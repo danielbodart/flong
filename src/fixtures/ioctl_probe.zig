@@ -1,7 +1,7 @@
 //! ioctl-probe REQUEST: prints the errno name of ioctl(0, REQUEST, buf), or
-//! ok (ZIG.md, "Phase 6"). The C that tests/probes.nix held until phase 6,
-//! line by line. The buffer, 256 zero bytes, holds whatever a request it is
-//! asked about writes back: TCGETS on a real terminal writes a whole
+//! ok (ZIG.md, "Phase 6"). The C that tests/probes.nix held until phase 6
+//! (b), line by line. The buffer, 256 zero bytes, holds whatever a request
+//! it is asked about writes back: TCGETS on a real terminal writes a whole
 //! termios. The request is passed whole, all 64 bits, which the C library's
 //! ioctl would truncate to an int; it is read as the C's strtoul(s, NULL,
 //! 0) reads it (`strtoul0`).

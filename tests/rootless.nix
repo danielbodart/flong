@@ -28,15 +28,13 @@ let
     system.stateVersion = "24.05";
     users.users.alice = { isNormalUser = true; uid = 1000; group = "users"; };
     users.groups.users.gid = 100;
-    environment.systemPackages = [ pkgs.strace pkgs.nftables (probes pkgs) (probes pkgs).c (fenceProbe pkgs) ];
+    environment.systemPackages = [ pkgs.strace pkgs.nftables (probes pkgs) (fenceProbe pkgs) ];
     # A symlink in the prepared root, which the payload could have planted in
     # its own home, pointing at a directory the caller can write.
     systemd.tmpfiles.rules = [ "L /home/alice/escape - - - - /escview" ];
   };
 
-  # ioctl-probe and swapper (tests/probes.nix), Zig since phase 6; `c` the
-  # C they port, as ioctl-probe-c and swapper-c, for phase 6 (a)'s
-  # transition subtest.
+  # ioctl-probe and swapper (tests/probes.nix), Zig since phase 6.
   probes = import ./probes.nix;
 
   # fence-probe tries, from inside a session, everything that would undo a
@@ -396,7 +394,7 @@ in
           done
         '')
 
-        # race-mounts N [SWAPPER]: the swap race. Session A, a plain one on
+        # race-mounts N: the swap race. Session A, a plain one on
         # /srv/race/ws, exchanges ws/sub (a directory) with ws/sublink (a
         # symlink to /escview) as fast as it can, while session B launches
         # N times with a bind nested at ws/sub/deep/x: first with deep/x
@@ -408,11 +406,8 @@ in
         (pkgs.writeShellScriptBin "race-mounts" ''
           set -u
           n=$1
-          # The swapper A runs (swapper-c for phase 6 (a)'s transition),
-          # whose resolved path A prints first.
-          sw=''${2:-swapper}
           cd /srv/race/ws
-          plain "readlink -f \"\$(command -v $sw)\"; exec $sw ." >/tmp/race-a.out 2>&1 &
+          plain 'exec swapper .' >/tmp/race-a.out 2>&1 &
           a=$!
           # A is running once the host sees the symlink under sub's name.
           until [ -L sub ]; do :; done
@@ -476,16 +471,14 @@ in
           rm -f "$out"
         '')
 
-        # tty-probe [PROBE]: the tty filter where it matters, with the caller's
+        # tty-probe: the tty filter where it matters, with the caller's
         # terminal on the payload's stdin and its output piped, so that the
         # payload holds the real terminal. TCGETS with bit 32 set shows the
         # high bits are dropped by the kernel and the ioctl reaches it.
-        # PROBE, when given, is the ioctl-probe to run (ioctl-probe-c for
-        # phase 6 (a)'s transition).
         (pkgs.writeShellScriptBin "tty-probe" ''
-          script -qfec "${pkgs.writeShellScript "tty-probe-inner" ''
-            plain "[ -t 0 ] && echo stdin-tty; $1 0x5412; $1 0x100005412; $1 0x100005401" | cat
-          ''} ''${1:-ioctl-probe}" /dev/null | tr -d '\r'
+          script -qfec ${pkgs.writeShellScript "tty-probe-inner" ''
+            plain '[ -t 0 ] && echo stdin-tty; ioctl-probe 0x5412; ioctl-probe 0x100005412; ioctl-probe 0x100005401' | cat
+          ''} /dev/null | tr -d '\r'
         '')
       ];
   };
@@ -977,48 +970,6 @@ in
         # On the caller's real terminal, where TIOCSTI would inject.
         out = machine.succeed(as_user("tty-probe"))
         assert out.split() == ["stdin-tty", "EPERM", "EPERM", "ok"], out
-
-    with subtest("the Zig probes against the C: the same ioctl answers, and the swap race"):
-        # ZIG.md phase 6 (a). The subtests above ran the Zig ioctl-probe and
-        # swapper (tests/probes.nix); here the C they port runs beside them.
-        # The controls first: the two sides are different files, the C's
-        # dynamic against glibc, the Zig's static without it.
-        for prog in ("ioctl-probe", "swapper"):
-            paths = machine.succeed(as_user(
-                f"plain 'readlink -f \"$(command -v {prog})\" \"$(command -v {prog}-c)\"'")).split()
-            assert len(paths) == 2 and paths[0] != paths[1], (prog, paths)
-            zig, c = paths
-            machine.succeed(f"grep -q GLIBC_2 {c}")
-            machine.fail(f"grep -q GLIBC_2 {zig}")
-        # The tty filter's requests, off a terminal and on the caller's.
-        for launcher in ("plain", "nested"):
-            reqs = "0x5412 0x100005412 0x10000541c 0x100005401"
-            out = machine.succeed(as_user(
-                f"{launcher} 'for r in {reqs}; do ioctl-probe $r; done; echo ==; "
-                f"for r in {reqs}; do ioctl-probe-c $r; done'"))
-            zig, c = out.split("==\n")
-            assert zig == c and zig.split() == ["EPERM", "EPERM", "EPERM", "ENOTTY"], (launcher, zig, c)
-        outs = [machine.succeed(as_user(f"tty-probe {p}")) for p in ("ioctl-probe", "ioctl-probe-c")]
-        assert outs[0] == outs[1] and outs[0].split() == ["stdin-tty", "EPERM", "EPERM", "ok"], outs
-
-        # The swap race with the C swapper: the same outcome as the Zig's
-        # above, 40 launches refused or contained and A killed while
-        # swapping (race-mounts waits for the first exchange), and each run's
-        # A ran the swapper it was given.
-        ran = {}
-        for sw in ("swapper-c", "swapper"):
-            out = machine.succeed(as_user(f"race-mounts 20 {sw}"))
-            lines = out.splitlines()
-            assert lines[-1] == "a=143", (sw, out)
-            results = lines[:-1]
-            assert len(results) == 40, (sw, out)
-            assert set(results) <= {"refused", "contained"}, (sw, out)
-            print(f"swap race, {sw}: {results.count('refused')} refused, {results.count('contained')} contained")
-            machine.succeed("test -z \"$(ls -A /srv/race/view)\"")
-            ran[sw] = machine.succeed("head -n 1 /tmp/race-a.out").strip()
-        assert ran["swapper-c"].endswith("/bin/swapper-c") and ran["swapper"].endswith("/bin/swapper"), ran
-        machine.succeed(f"grep -q GLIBC_2 {ran['swapper-c']}")
-        machine.fail(f"grep -q GLIBC_2 {ran['swapper']}")
 
     with subtest("^C ends the payload with 130, under a pty and in a pipeline"):
         for mode in ("pty", "pipe"):

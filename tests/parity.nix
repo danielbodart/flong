@@ -22,9 +22,7 @@
 { lib, ... }:
 
 let
-  # bpfdump and syscall-probe, Zig since phase 6 (src/fixtures/); `c` the C
-  # they port, as bpfdump-c and syscall-probe-c, for phase 6 (a)'s
-  # transition subtest below.
+  # bpfdump and syscall-probe, Zig since phase 6 (src/fixtures/).
   tools = pkgs: import ./parity { inherit pkgs; };
 
   # One closure for every declaration, with the probe in it.
@@ -32,7 +30,7 @@ let
     system.stateVersion = "24.05";
     users.users.alice = { isNormalUser = true; uid = 1000; group = "users"; };
     users.groups.users.gid = 100;
-    environment.systemPackages = [ (tools pkgs) (tools pkgs).c ];
+    environment.systemPackages = [ (tools pkgs) ];
   };
 in
 {
@@ -95,7 +93,7 @@ in
 
       environment.systemPackages =
         map (n: config.flong.${n}.launcher) [ "parity" "strict" ]
-        ++ [ (tools pkgs) (tools pkgs).c ];
+        ++ [ (tools pkgs) ];
 
       environment.etc = lib.mapAttrs' (n: f: lib.nameValuePair "flong-parity/${n}.bpf" { source = f; }) {
         parity = tier "parity";
@@ -240,57 +238,5 @@ in
             report.append(f"{n:28} parity {a:14} strict {b:14} {note}")
         print("\n".join(report))
         assert not loosened, "\n".join(report)
-
-    with subtest("the Zig fixtures against the C: the same dumps, evaluations and probe answers"):
-        # ZIG.md phase 6 (a). The subtests above ran the Zig bpfdump and
-        # syscall-probe; here the C they port (tests/parity/bpfdump.c,
-        # probe.c) runs beside them and says the same. The controls first:
-        # the two sides are different files, the C's importing glibc's
-        # strerrorname_np, which the Zig's errno.zig replaces.
-        for prog in ("bpfdump", "syscall-probe"):
-            zig = machine.succeed(f"readlink -f \"$(command -v {prog})\"").strip()
-            c = machine.succeed(f"readlink -f \"$(command -v {prog}-c)\"").strip()
-            assert zig != c, (prog, zig, c)
-            machine.succeed(f"grep -q strerrorname_np {c}")
-            machine.fail(f"grep -q strerrorname_np {zig}")
-            machine.fail(f"cmp -s {zig} {c}")
-
-        # One payload's filters, dumped by each: the same files and lines.
-        machine.succeed(f"mkdir -p {D}/zig {D}/c")
-        rc = "/tmp/rc-dump"
-        machine.succeed(f"rm -f {rc}; "
-                        f"({launch('strict', 'exec sleep 10014')} && echo 0 > {rc} || echo $? > {rc}) "
-                        f">/tmp/out-dump 2>&1 &")
-        pid = machine.wait_until_succeeds("pgrep -xf 'sleep 10014'").split()[0]
-        out = {side: machine.succeed(f"{prog} dump {pid} {D}/{side}/p")
-               for side, prog in (("zig", "bpfdump"), ("c", "bpfdump-c"))}
-        machine.succeed(f"kill {pid}")
-        machine.wait_until_succeeds(f"test -s {rc}")
-        assert out["zig"].replace(f"{D}/zig/", f"{D}/c/") == out["c"], out
-        n = int(out["zig"].split()[-1])
-        assert n == 4, out
-        for i in range(n):
-            machine.succeed(f"cmp {D}/zig/p.{i}.bpf {D}/c/p.{i}.bpf")
-        print(f"dump: {n} filters, the same bytes from both")
-
-        # The evaluations of both tiers' live stacks, as evaluate() ran them.
-        for tag, files in (("parity", parity), ("strict", strict)):
-            machine.succeed(f"bpfdump-c eval {k} {' '.join(files)} > {D}/{tag}.c.eval")
-            machine.succeed(f"cmp {D}/{tag}.eval {D}/{tag}.c.eval")
-            lines = machine.succeed(f"wc -l < {D}/{tag}.eval").strip()
-            print(f"eval {tag}: {lines} lines, the same from both")
-
-        # The probe under each tier, the C's run in the same session: its
-        # stdout, then the byte count of its stderr, which the C never
-        # writes and the Zig writes only in a panic.
-        probe = lambda p: f"{{ {p} 2>&1 >&3 | wc -c; }} 3>&1"
-        for l in ("parity", "strict"):
-            out = machine.succeed(launch(l, f"{probe('syscall-probe')}; echo ==; {probe('syscall-probe-c')}"))
-            zig, c = out.split("==\n")
-            assert zig == c, (l, zig, c)
-            # The control: the probe said its 39 lines, and nothing on stderr.
-            lines = zig.splitlines()
-            assert len(lines) == 40 and lines[-1].strip() == "0", (l, zig)
-            print(f"syscall-probe under {l}: {len(lines) - 1} lines and an empty stderr, the same from both")
   '';
 }

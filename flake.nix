@@ -58,11 +58,6 @@
           # The seccomp compiler, in Zig (native.nix's seccomp set).
           seccomp = import ./seccomp { inherit pkgs; };
 
-          # Phase 6's transition: the C fixtures, built in the check, against
-          # the Zig ones where the build sandbox can run them
-          # (tests/fixtures-transition.nix); the VM tests run the rest.
-          fixtures-transition = import ./tests/fixtures-transition.nix { inherit pkgs; };
-
           # flong's programs against cases recorded from the C, byte for
           # byte: stdout, stderr, status, and filters (tests/golden.nix).
           golden = import ./tests/golden.nix { inherit pkgs; };

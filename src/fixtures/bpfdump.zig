@@ -1,6 +1,7 @@
 //! bpfdump: a live process's seccomp filters, and what a stack of them does
 //! (ZIG.md, "Phase 6"). tests/parity/bpfdump.c, line by line; every
-//! subcommand, output format and exit status is the C's.
+//! subcommand, output format and exit status is the C's. The C was deleted
+//! in phase 6 (b), and its line numbers here are those of b82b18c.
 //!
 //!   bpfdump dump PID PREFIX
 //!       Writes every filter attached to PID as PREFIX.N.bpf, N = 0 the most

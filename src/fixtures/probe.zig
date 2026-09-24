@@ -4,6 +4,8 @@
 //! (ZIG.md, "Phase 6"). tests/parity/probe.c, line by line: each call is
 //! made as glibc makes it there, number and arguments, and each line is
 //! written as it is printed, stdout flushed after each (probe.c:52-57).
+//! The C was deleted in phase 6 (b), and its line numbers here are those
+//! of b82b18c.
 //!
 //! The namespace calls run in a child, so that one that succeeds does not
 //! change what the probes after it run in.

@@ -17,7 +17,7 @@ let
   # The launcher's output, for its flong-init (src/init.zig).
   launcher = import ../launcher { pkgs = hostPkgs; };
   # rootless.nix's ioctl-probe and swapper; the swapper races the walker
-  # (ZIG.md phase 4), and since phase 6 (a) the C one (swapper-c) too.
+  # (ZIG.md phase 4).
   probes = import ./probes.nix;
 
   # The walker's fixture and runs (ZIG.md, "Tests", checks.native; phase
@@ -83,8 +83,7 @@ let
     # The swap race: sub and a symlink to the view exchanged as fast as
     # the swapper can. The control first: opened by path, it escapes.
     # race SWAPPER NAME: the race against SWAPPER, the missing walks making
-    # NAME<i>; each run's lines follow "race SWAPPER PATH". Twice, the Zig
-    # swapper's then the C's (swapper-c, ZIG.md phase 6 (a)).
+    # NAME<i>; each run's lines follow "race SWAPPER PATH".
     race() {
       echo "race $1 $(readlink -f "$(command -v "$1")")"
       state() { if [ -L $R/ws/sub ]; then echo link; else echo dir; fi; }
@@ -106,7 +105,6 @@ let
       echo "view $(ls $R/view/deep | tr '\n' ' ')"
     }
     race swapper y
-    race swapper-c z
   '';
 
   # The sweeper's differential fixture (ZIG.md phase 5, "the record
@@ -373,7 +371,6 @@ in
       pkgs.util-linux
       integration.vm
       (probes pkgs)
-      (probes pkgs).c
     ];
   };
 
@@ -511,8 +508,7 @@ in
     rc=0
     """
         assert out.startswith(want), out
-        # The race's runs, one per swapper: the Zig's, then the C's
-        # (swapper-c; ZIG.md phase 6 (a)), each the same outcome.
+        # The race's runs, one per swapper.
         runs = {}
         for l in out[len(want):].splitlines():
             k, v = l.split(" ", 1)
@@ -521,7 +517,7 @@ in
                 race = runs[sw] = {"path": path}
             else:
                 race[k] = v
-        assert list(runs) == ["swapper", "swapper-c"], runs
+        assert list(runs) == ["swapper"], runs
         for sw, race in runs.items():
             counts = {k: dict(kv.split("=") for kv in race[k].split()) for k in ("naive", "exists", "missing")}
             print(f"{sw}: " + ", ".join(f"{k} {race[k]}" for k in ("naive", "exists", "missing")))
@@ -541,11 +537,9 @@ in
             assert (len(said) > 0) == (int(counts["exists"]["refused"]) + int(counts["missing"]["refused"]) > 0), (sw, race)
             assert race["view"] == "x ", (sw, race)
             assert race["killed"] == "143", (sw, race)
-        # The two runs' swappers: different files, the C's dynamic against
-        # glibc, the Zig's static without it.
-        zig, c = runs["swapper"]["path"], runs["swapper-c"]["path"]
-        assert zig.endswith("/bin/swapper") and c.endswith("/bin/swapper-c"), (zig, c)
-        machine.succeed(f"grep -q GLIBC_2 {c}")
+        # The swapper that ran: the Zig's, static without glibc.
+        zig = runs["swapper"]["path"]
+        assert zig.endswith("/bin/swapper"), zig
         machine.fail(f"grep -q GLIBC_2 {zig}")
 
     # proc.zig, sig.zig and cgroup.zig's sweep half (phase 5), through

@@ -892,7 +892,7 @@ not redesign shipped code. **Before:** the record-bytes subtest with
   `bpfdump dump` files on one payload, `syscall-probe` under both tiers,
   `ioctl-probe` for the rootless requests; identical. **(b)** Delete
   `bpfdump.c`, `probe.c`, the inline C, the subtests.
-- **Accept:** parity and rootless green, the swap race included (`rootless.nix:925-933`).
+- **Accept:** parity and rootless green, the swap race included (`rootless.nix:918-926`).
   **Report:** the fixtures derivation's time.
 
 ### Phase 7: the launcher, on the branch `zig-launch`
