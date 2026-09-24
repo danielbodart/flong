@@ -133,6 +133,62 @@ the one that owns the network namespace, with no capability over either. nft
 loads its kernel modules on demand from a user namespace; a host that turns
 module autoloading off lists them in `boot.kernelModules`.
 
+### A session with a syscall filter
+
+Every session runs under a seccomp allow-list, the `strict` tier, unless you
+say otherwise. `seccomp` shapes that list for the declaration. The names are
+syscalls or systemd's `@groups` (`systemd-analyze syscall-filter` lists them).
+
+```nix
+{
+  flong.agent.seccomp = {
+    tier = "strict";                 # the default: nspawn's list without @keyring, userfaultfd,
+                                     # @mount, io_uring_*, ptrace and process_vm_*
+    debug = true;                    # adds ptrace, so strace and gdb work inside
+    allow = [ "userfaultfd" ];       # added to the tier
+    deny = [ "@swap" "@reboot" ];    # removed last, whatever added them
+    errno = "ENOSYS";                # what a refused call returns; EPERM by default
+  };
+}
+```
+
+To find out what a program needs, run it once with `log = true`: refused
+calls are allowed and logged instead of failing. Then name the numbers:
+
+```sh
+journalctl -k --grep 'type=1326' | grep -o 'syscall=[0-9]*' | sort -u
+scmp_sys_resolver -a x86_64 425     # -> io_uring_setup
+```
+
+The names go into `allow`. `log` is for learning a policy with a payload you
+trust, and it warns.
+
+A policy that differs by project goes in `seccompPolicy`. It runs as you at
+each launch, sees `$workspace`, and prints `allow NAME...` and
+`deny NAME...` lines. flong compiles them onto the declaration's list and
+caches the result, so a policy it has seen costs only a hash:
+
+```nix
+{
+  flong.agent.seccompPolicy = ''
+    # One file per project, kept where only you write: never read it from the
+    # workspace, which the session can write to widen its own next launch.
+    policy="$HOME/.config/flong/seccomp/$(basename "$workspace")"
+    if [ -f "$policy" ]; then cat "$policy"; fi
+  '';
+}
+```
+
+```
+# ~/.config/flong/seccomp/my-project
+allow io_uring_setup io_uring_enter io_uring_register
+deny @swap
+```
+
+A line flong cannot read, or a name systemd does not list, refuses the launch
+and says why. The fixed filters stay whatever a policy says, including
+the one against injecting input into your terminal.
+
 ## Running the launcher
 
 Run the launcher as yourself. There is no sudo rule to write, and a launcher
