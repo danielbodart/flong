@@ -90,8 +90,9 @@ The user decided these on 2026-09-24:
   - The test fixtures that need no libc (`syscall-probe`, `swapper`,
     `ioctl-probe`) become hidden subcommands only if that simplifies
     `tests/probes.nix`.
-  - Dispatch uses the first argument, plus `argv[0]`'s basename for the
-    per-declaration commands (see open decision 1).
+  - Dispatch uses `argv[0]`'s basename first, then the first argument,
+    as busybox does. A basename that is not a subcommand is a declaration
+    name (see "The declaration's command").
   - The old names (`flong-launch`, `flong-init`, `flong-sweeper`) are
     gone in S1, and module.nix, the wrapper, the tests and the consumers
     call `flong <sub>` in the same change.
@@ -154,6 +155,28 @@ The user decided these on 2026-09-24:
   - every parse error is a refusal, never a panic;
   - it is fuzzed with a checked-in corpus, as the record parser is.
 
+### The declaration's command
+
+The user decided this on 2026-09-24: each declaration is a symlink
+`NAME -> flong` on `PATH`, with no script.
+- **The lookup.** flong reads `argv[0]`'s basename, which is the name the
+  caller typed, because the shell passes it through exec. That name is not
+  a subcommand, so flong loads `/etc/flong/NAME.zon`. The module writes
+  that file through `environment.etc`; outside Nix it would be
+  `$XDG_CONFIG_HOME/flong/NAME.zon`.
+  - The fixed directory, rather than a file beside the symlink in the same
+    store path, keeps the lookup obvious: `ls /etc/flong` lists every
+    declaration, and no chain of symlinks has to be followed.
+  - Resolving by name moves no trust boundary. A caller can run
+    `flong launch` with any file anyway.
+- **Making it obvious:**
+  - `flong launch NAME -- ARGS` is exactly what the symlink does, and the
+    docs describe the symlink in those terms.
+  - `flong list` prints each declaration and its config path.
+  - A missing declaration says so and names the path it looked in:
+    `flong: no declaration "agent" (looked for /etc/flong/agent.zon)`.
+  - `ls -l $(command -v agent)` shows `agent -> …/flong`.
+
 ### `flong launch DECL.zon -- ARGS`
 
 It does what each section of `rootless-wrapper.bash` does, in the same
@@ -170,7 +193,7 @@ and no exec.
 | the project's seccomp policy (`:190`) | runs the snippet, hashes the policy, runs `flong-seccomp project` on a cache miss |
 | the depth rule (`:210`) | the mask depth check for writable binds |
 | the maps (`:234`) | `/etc/subuid` and `/etc/subgid`, U1 and U2 extents |
-| the prepared root (`:277`) | the cache lock, and calling the prepare tool (see open decision 2) |
+| the prepared root (`:277`) | the cache lock, and calling the prepare tool (see "Direction") |
 | the payload's identity (`:330`) | reading the prepared root's passwd and group |
 | `$home/tmp` (`:362`) | the tmpfs mount |
 | the spec (`:376`) | built as a value and handed to the launch, never rendered as argv |
@@ -199,8 +222,9 @@ What a native release needs that Nix supplies today:
 - **The root.** Today a session's root is a NixOS container closure plus
   a prepared root (`module.nix:301-401`: `prepareInner`, `cacheTool`).
   Outside Nix, a root must come from somewhere else: a directory, an
-  image, or the host read-only. This is open decision 3, and it is the
-  real work of S5.
+  image, or the host read-only. It is decided only if a release outside
+  Nix is actually pursued, by whoever that release is for. The user's
+  current lean is a directory.
 - **The sweeper's unit.** A documented systemd user unit
   (`flong sweeper %t/flong`), as `module.nix:1002` declares one.
 - **Seccomp.** `flong-seccomp` could ship static against musl and a
@@ -248,7 +272,7 @@ The same pattern as ZIG.md, on trunk only:
 - **S4, the reference.** `flong help`, `flong help decl`, and a generated
   reference page for the declaration, from the same walk as
   `decl-options.json`.
-- **S5, outside Nix.** Open decisions 2 and 3 first; then the release
+- **S5, outside Nix.** Only if pursued: decide the root first; then the release
   artifacts and a README section on using flong without Nix.
 
 ## Constraints kept from ZIG.md
@@ -263,24 +287,14 @@ The same pattern as ZIG.md, on trunk only:
 - **Every test the wrapper passes today passes against `flong launch`.**
   That includes the rootless and basic VM subtests, which call the
   generated wrappers by name. Those names become the per-declaration
-  commands (open decision 1).
+  commands (see "The declaration's command").
 
-## Open decisions
+## Direction, not yet a decision
 
-1. **What a declaration's command is.** Today each declaration is a
-   generated bash script on `PATH`. After S3 it could be:
-   - (a) a symlink `NAME -> flong`, with the declaration's `.zon` found
-     beside it in the same store path (`$out/share/flong/NAME.zon`);
-   - (b) a two-line script, `exec flong launch …/NAME.zon -- "$@"`;
-   - (c) a tiny generated ELF.
-
-   Recommended: (a). It needs no shell, and a symlink shows what it runs
-   (`readlink`). Resolving the `.zon` from the invoked path moves no trust
-   boundary, since a caller can run `flong launch` with any file anyway.
-2. **The prepared root and the cache tool** (`prepareInner`, `cacheTool`,
-   `module.nix:311-401`) are bash and stay bash under ZIG.md. Should
-   `flong launch` call them as it does today, or should they move into Zig
-   with S3 or later? Recommended: call them unchanged in S3, and decide
-   again in S5, where a non-Nix root changes what "prepare" means.
-3. **A session's root outside Nix:** a directory, an OCI or plain image,
-   or the host read-only. It decides S5's scope; spike it first.
+- **More of the tooling moves into Zig over time.** The prepared root and
+  the cache tool (`prepareInner`, `cacheTool`, `module.nix:311-401`) are
+  bash, and S3 calls them unchanged. The direction is that the fiddly
+  parts, the ones that are easy to get wrong and nobody should need to
+  edit, move into the binary as typed code. Each move is its own
+  decision, made when it is due; nothing here makes one.
+- **A session's root outside Nix** is parked with S5 (see "Outside Nix").
