@@ -3,6 +3,12 @@
 What is not built yet, in order. What is built, and why, is in
 [DESIGN.md](DESIGN.md).
 
+Two plans have their own files. [ZIG.md](ZIG.md) moves the native code to
+Zig, and is under way. [STANDALONE.md](STANDALONE.md) follows it: the
+libc-free programs become one `flong` binary, declarations become ZON
+checked by the same parser at build time and at launch, the bash wrapper
+goes, and later flong ships as a native binary that needs no Nix.
+
 ## 1. A uid range per session
 
 Every session maps the payload to the caller's own uid, so an escape lands on
