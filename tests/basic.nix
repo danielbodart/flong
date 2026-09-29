@@ -1,8 +1,9 @@
 # Exercises every option that changes what the container sees: the workspace
 # override, a read-write bind, a tmpfs mask over part of that bind, an overlay,
 # the caller's binds in both modes, the declaration's file and socket binds,
-# the command as an argument list, the identity, the caller's hooks and their
-# teardown, the network, its DNS and the ports it does and does not reach, the
+# the command as an argument list and the environment it is exec'd with,
+# `exec`, the identity, the caller's hooks and their teardown, postStop after
+# a launch that fails before its session, the network, its DNS and the ports it does and does not reach, the
 # session cleanup and the sweep that reclaims what a killed session left.
 #
 # Every launch is made by a lingering alice through her own user manager, on a
@@ -547,7 +548,63 @@ in
       command = [ "printf" "[%s]\\n" "fixed; $HOME *" "trailing\\" ];
     };
 
-    # A program that only the container's /etc/set-environment puts on PATH:
+    # The payload's environment as the exec gives it, with no shell in the
+    # session: `env -0`, exec'd by tini. The subtest holds it to what the
+    # container's /etc/set-environment gives a bash started with the same
+    # launch variables, which is what a session gave the payload while a
+    # shell sourced that file before the exec.
+    flong.envdirect = {
+      container = "demo";
+      user = "alice";
+      workspace = ws ''realpath /srv/work'';
+      command = [ "env" "-0" ];
+    };
+
+    # `exec`: the payload decided at launch, by a command on the host that
+    # prints its variables and its argument list. What it is asked to print
+    # is its first argument, so one declaration covers the payload it gives
+    # and each shape of output the launch refuses. Each run stages a file
+    # for its $machine, as a consumer stages a policy's approval, and
+    # postStop releases it and says so, once per $machine: a launch that
+    # fails after exec has run, before or after its record, still runs it.
+    # seccompPolicy stages too, and prints nothing, which compiles nothing.
+    flong.execd = {
+      container = "demo";
+      user = "alice";
+      workspace = ws ''realpath /srv/work'';
+      seccompPolicy = hook "execd-policy" ''
+        echo "$machine" >> /tmp/execd-policy
+      '';
+      exec = [ (script "exec" ''
+        echo "$machine" >> /tmp/execd-machines
+        touch "/tmp/execd-staged-$machine"
+        field() { printf '%s\0' "$@"; }
+        case "''${1:-}" in
+          ok)
+            shift
+            field "EXEC_WORKSPACE=$workspace" "EXEC_MODE=$workspace_mode" "EXEC_EMPTY=" "EXEC_EQUALS=a=b"
+            field "" bash -c 'printf "%s|" "$EXEC_WORKSPACE" "$EXEC_MODE" "$EXEC_EMPTY" "$EXEC_EQUALS" "$PWD" "$LANG"; printf "[%s]" "$@"; echo' payload "$@" ;;
+          fixed) field "HOME=/root" "" true ;;
+          declared) field "LANG=C" "" true ;;
+          twice) field "A=1" "A=2" "" true ;;
+          noname) field "=1" "" true ;;
+          novar) field "just-a-word" "" true ;;
+          unterminated) field "A=1" ""; printf true ;;
+          noseparator) field "A=1" ;;
+          noargv) field "A=1" "" ;;
+          emptyprogram) field "" "" ;;
+          fail) echo "exec refuses this launch" >&2; exit 3 ;;
+          slow) sleep 60; field "" true ;;
+        esac
+      '') ];
+      postStop = hook "execd-poststop" ''
+        echo "$machine" >> /tmp/execd-released
+        rm -f "/tmp/execd-staged-$machine"
+      '';
+    };
+
+    # A program that only the PATH the container's /etc/set-environment
+    # sets finds:
     # hello is in alice's per-user profile, and absent from the system
     # profile.
     flong.userpath = {
@@ -689,6 +746,8 @@ in
       hookFds = exe "hookfds";
       argv = exe "argv";
       userPath = exe "userpath";
+      envDirect = exe "envdirect";
+      execd = exe "execd";
       networked = exe "networked";
       badMask = exe "badmask";
       symlinkOverlay = exe "symlinkoverlay";
@@ -697,6 +756,7 @@ in
       closure = nodes.machine.containers.demo.path;
     in
     ''
+      import base64
       import re
       import shlex
 
@@ -817,12 +877,124 @@ in
       @test("command runs with the container's PATH, from its set-environment", part="a")
       def _():
           # hello is in alice's per-user profile and not in the system
-          # profile, so a bare `hello` is found only if
-          # /etc/set-environment was sourced before the exec -- and the
-          # argument after it arrives unread, as the others do.
+          # profile, so a bare `hello` is found only on the PATH the
+          # container's /etc/set-environment sets, which module.nix computed
+          # and the launch expanded -- and the argument after it arrives
+          # unread, as the others do.
           machine.succeed("test ! -e ${closure}/sw/bin/hello")
           out = machine.succeed(by_caller("${userPath} 'from the profile; $(false) *'"))
           assert out.strip() == "from the profile; $(false) *", out
+
+      # The session's environment from `env -0`'s output, NUL-separated,
+      # read through base64 so no NUL crosses the test's own pipes.
+      def env_of(command):
+          raw = base64.b64decode(machine.succeed(by_caller(f"{command} | base64 -w0")))
+          return dict(e.split("=", 1) for e in raw.decode().split("\0") if e)
+
+      @test("the payload's environment is its container's /etc/set-environment's, with no shell run", part="a")
+      def _():
+          # The payload's own, exec'd with nothing between: the container's
+          # `environment`, which module.nix computed from its options, with
+          # $HOME and $USER filled in at launch.
+          direct = env_of("TERM=xterm-256color COLORTERM=truecolor ${envDirect}")
+          # What the file itself gives a bash inside a session, started with
+          # the launch's own variables as the payload had them and nothing
+          # else -- PATH the launch's, <closure>/sw/bin -- which is what a
+          # session gave its payload while a shell sourced the file before
+          # the exec.
+          own = ["HOME", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR", "TMPDIR", "FLONG_BINDS", "container", "TERM", "COLORTERM"]
+          start = {k: direct[k] for k in own} | {"PATH": "${closure}/sw/bin"}
+          script = ("exec env -i " + " ".join(shlex.quote(f"{k}={v}") for k, v in start.items())
+                    + " bash -c '. /etc/set-environment; exec env -0'")
+          shell = env_of(f"TERM=xterm-256color COLORTERM=truecolor ${launcher} {shlex.quote(script)}")
+          # What bash sets for itself and exports, which no payload of an
+          # exec is given: its level, its last argument and its previous
+          # directory. PWD it sets too, and flong init sets it to the same
+          # directory, the workspace.
+          for k in ["SHLVL", "_", "OLDPWD"]:
+              shell.pop(k, None)
+          assert direct == shell, sorted(set(direct.items()) ^ set(shell.items()))
+          # The control: the file set what matters, and the launch filled
+          # in what only it knows.
+          assert direct["__NIXOS_SET_ENVIRONMENT_DONE"] == "1", direct
+          assert direct["PWD"] == "/srv/work", direct
+          path = direct["PATH"].split(":")
+          assert "/etc/profiles/per-user/alice/bin" in path and "/home/alice/.nix-profile/bin" in path, path
+          assert "$" not in "".join(direct.values()), direct
+
+      @test("exec: the payload and the variables it prints, and each output the launch refuses")
+      def _():
+          machine.succeed("rm -f /tmp/execd-*")
+          # Its variables reach the payload beside the container's, its
+          # argument list is the payload's whole, the launcher's arguments
+          # arriving only as exec put them there, and the payload starts in
+          # the workspace, PWD with it.
+          out = machine.succeed(by_caller("${execd} ok 'a b' '$HOME' \"\""))
+          assert out == "/srv/work|rw||a=b|/srv/work|en_US.UTF-8|[a b][$HOME][]\n", out
+          # Each refused, 1, saying why under the declaration's name.
+          program = machine.succeed("grep -o '/nix/store/[a-z0-9]*-flong-test-exec' /etc/flong/execd.zon | head -1").strip()
+          for mode, said in [
+              ("fixed", "sets HOME, which the launch sets for every session"),
+              ("declared", "sets LANG, which the container's environment already sets"),
+              ("twice", "sets A twice"),
+              ("noname", "printed a variable with an empty name"),
+              ("novar", 'printed "just-a-word" before the empty field, where each field is a variable, NAME=VALUE'),
+              ("unterminated", "printed a field without the NUL that ends it"),
+              ("noseparator", "printed no empty field to end the variables and begin the payload's argument list"),
+              ("noargv", "printed no argument list after the empty field: the payload needs at least its program"),
+              ("emptyprogram", "printed an empty program as the payload's"),
+              ("fail", "failed (status 3); the payload does not run"),
+          ]:
+              out = machine.succeed(by_caller(f"${execd} {mode} 2>&1; echo rc=$?"))
+              assert out.endswith("\nrc=1\n"), (mode, out)
+              assert out.startswith(f"execd: exec: {program} {said}") or f"\nexecd: exec: {program} {said}" in out, (mode, out)
+          # Every launch that ran exec, the refused ones as well as the one
+          # that ran, ran postStop exactly once for its $machine, which
+          # released what exec and seccompPolicy staged for it.
+          machines = machine.succeed("cat /tmp/execd-machines").split()
+          assert len(machines) == 11 and len(set(machines)) == 11, machines
+          assert machine.succeed("cat /tmp/execd-policy").split() == machines
+          released = machine.succeed("cat /tmp/execd-released").split()
+          assert sorted(released) == sorted(machines), (machines, released)
+          machine.fail("ls /tmp/execd-staged-*")
+          machine.succeed(NO_SESSIONS)
+
+      @test("postStop runs once for a launch a signal ends in its prologue, and for one that fails before its record")
+      def _():
+          machine.succeed("rm -f /tmp/execd-*")
+          # A terminating signal while exec runs: the wait ends, exec is
+          # killed, and postStop releases what exec had staged, where the
+          # launcher once died of the signal with the file left behind.
+          machine.succeed(by_caller("${execd} slow; echo rc=$? > /tmp/execd-slow-rc") + " >/dev/null 2>&1 &")
+          machine.wait_until_succeeds("ls /tmp/execd-staged-*")
+          name = machine.succeed("cat /tmp/execd-machines").strip()
+          machine.succeed(f"kill -TERM {launcher_pid(name)}")
+          machine.wait_until_succeeds("test -e /tmp/execd-slow-rc")
+          assert machine.succeed("cat /tmp/execd-slow-rc").strip() == "rc=143"
+          assert machine.succeed("cat /tmp/execd-released").split() == [name]
+          machine.fail("ls /tmp/execd-staged-*")
+          machine.fail("pgrep -f flong-test-exec")
+
+          # A launch whose spec is built, exec having run, that fails before
+          # its record exists: the holder cannot start, masked, so the
+          # launch ends in its teardown with no record to run postStop from.
+          # The teardown runs it itself, once.
+          machine.succeed(NO_SESSIONS)
+          machine.succeed("rm -f /tmp/execd-*")
+          user = "systemctl -M alice@ --user"
+          machine.succeed(f"{user} stop flong-sessions.service")
+          machine.succeed(f"{user} mask flong-sessions.service")
+          try:
+              out = machine.succeed(by_caller("${execd} ok 2>&1; echo rc=$?"))
+              assert out.endswith("\nrc=125\n"), out
+          finally:
+              machine.succeed(f"{user} unmask flong-sessions.service")
+          name = machine.succeed("cat /tmp/execd-machines").strip()
+          assert machine.succeed("cat /tmp/execd-released").split() == [name]
+          machine.fail("ls /tmp/execd-staged-*")
+          # And the holder starts again on the next launch.
+          machine.succeed(by_caller("${execd} ok"))
+          assert len(machine.succeed("cat /tmp/execd-released").split()) == 2
 
       @test("a clean launch writes nothing to stderr", part="a")
       def _():

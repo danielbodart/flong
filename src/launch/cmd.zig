@@ -1,7 +1,8 @@
 //! launch/cmd.zig: a declaration's command, run as the caller, for
 //! `flong launch DECL.zon`'s prologue (DESIGN.md, "Data is data; shell
-//! is for what only launch knows"): the workspace, binds, guard and
-//! seccompPolicy commands.
+//! is for what only launch knows"): the workspace, binds, guard,
+//! seccompPolicy and exec commands, and what exec prints read as its
+//! protocol (`parseExec`).
 //!
 //! The wrapper ran each snippet as `"$BASH" -euo pipefail -c "$1" flong
 //! "${launcher_args[@]}"` (rootless-wrapper.bash:46-50). A command is an
@@ -231,6 +232,50 @@ pub fn substitute(out: []u8) []const u8 {
     return out[0..n];
 }
 
+/// What the `exec` command printed, read (`parseExec`): the variables it
+/// adds to the payload's environment, in order, and the payload's argv.
+pub const Exec = struct {
+    env: []const Var,
+    argv: []const [:0]const u8,
+};
+
+/// Why `exec`'s output is not its shape.
+pub const ExecBad = union(enum) {
+    /// the last field has no NUL after it
+    unterminated,
+    /// no empty field ends the variables
+    no_separator,
+    /// a field before the empty one has no `=`
+    not_a_variable: []const u8,
+    /// nothing after the empty field
+    no_argv,
+    /// the payload's program is the empty string
+    empty_program,
+};
+
+/// `exec`'s stdout read as its protocol (decl.zig's `exec`): fields each
+/// ended by a NUL, `NAME=VALUE` until the first empty one, the payload's
+/// argv after it. Each variable is split at its first `=`, so a name never
+/// holds one; whether the name is one the payload may be given is the
+/// caller's to judge. The strings are `gpa`'s.
+pub fn parseExec(gpa: Allocator, out: []const u8) Allocator.Error!union(enum) { ok: Exec, bad: ExecBad } {
+    if (out.len == 0 or out[out.len - 1] != 0) return .{ .bad = .unterminated };
+    var fields = std.mem.splitScalar(u8, out[0 .. out.len - 1], 0);
+    var env: std.ArrayList(Var) = .empty;
+    while (true) {
+        const f = fields.next() orelse return .{ .bad = .no_separator };
+        if (f.len == 0) break;
+        const eq = std.mem.indexOfScalar(u8, f, '=') orelse return .{ .bad = .{ .not_a_variable = f } };
+        try env.append(gpa, .{ .name = f[0..eq], .value = f[eq + 1 ..] });
+    }
+    // The separator was the last field: `rest` is null, not empty.
+    if (fields.index == null) return .{ .bad = .no_argv };
+    var argv: std.ArrayList([:0]const u8) = .empty;
+    while (fields.next()) |w| try argv.append(gpa, try gpa.dupeZ(u8, w));
+    if (argv.items[0].len == 0) return .{ .bad = .empty_program };
+    return .{ .ok = .{ .env = env.items, .argv = argv.items } };
+}
+
 fn oom() msg.Error {
     return msg.fail(.NOMEM, "malloc", .{});
 }
@@ -271,6 +316,39 @@ test "getenv takes the first entry of a name" {
     try testing.expectEqualStrings("", getenv(&env, "EMPTY").?);
     try testing.expectEqual(null, getenv(&env, "COLORTERM"));
     try testing.expectEqual(null, getenv(&env, "noequals"));
+}
+
+test "parseExec: variables, the empty field, the argv; each field ended by a NUL" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const full = (try parseExec(a, "A=1\x00B=x=y\x00EMPTY=\x00\x00prog\x00\x00last arg\x00")).ok;
+    try testing.expectEqual(3, full.env.len);
+    try testing.expectEqualStrings("A", full.env[0].name);
+    try testing.expectEqualStrings("1", full.env[0].value);
+    try testing.expectEqualStrings("B", full.env[1].name);
+    try testing.expectEqualStrings("x=y", full.env[1].value);
+    try testing.expectEqualStrings("", full.env[2].value);
+    try testing.expectEqual(3, full.argv.len);
+    try testing.expectEqualStrings("prog", full.argv[0]);
+    try testing.expectEqualStrings("", full.argv[1]);
+    try testing.expectEqualStrings("last arg", full.argv[2]);
+
+    // No variables at all: the output starts with the empty field.
+    const bare = (try parseExec(a, "\x00/bin/true\x00")).ok;
+    try testing.expectEqual(0, bare.env.len);
+    try testing.expectEqualStrings("/bin/true", bare.argv[0]);
+    // A name that is empty is the caller's to refuse.
+    try testing.expectEqualStrings("", (try parseExec(a, "=v\x00\x00p\x00")).ok.env[0].name);
+
+    try testing.expectEqual(ExecBad.unterminated, (try parseExec(a, "")).bad);
+    try testing.expectEqual(ExecBad.unterminated, (try parseExec(a, "\x00prog")).bad);
+    try testing.expectEqual(ExecBad.no_separator, (try parseExec(a, "A=1\x00")).bad);
+    try testing.expectEqual(ExecBad.no_argv, (try parseExec(a, "A=1\x00\x00")).bad);
+    try testing.expectEqual(ExecBad.no_argv, (try parseExec(a, "\x00")).bad);
+    try testing.expectEqual(ExecBad.empty_program, (try parseExec(a, "\x00\x00x\x00")).bad);
+    try testing.expectEqualStrings("prog", (try parseExec(a, "prog\x00\x00")).bad.not_a_variable);
 }
 
 test "substitute drops NULs and the trailing newlines, as $(...) does" {

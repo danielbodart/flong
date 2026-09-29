@@ -189,6 +189,64 @@ let
         (configWith { flong.box.command = lib.mkForce [ ]; }).flong.box.command
         true)).success
         || throw "assertions: an empty command was accepted")
+      # The payload is `command` or `exec`, one and only one.
+      (refused "both command and exec"
+        { flong.box.exec = [ "/bin/exec" ]; }
+        "sets both `command` and `exec`")
+      (refused "neither command nor exec"
+        { flong.box.command = lib.mkForce null; }
+        "sets neither `command` nor `exec`")
+      (accepted "exec in place of command"
+        { flong.box.command = lib.mkForce null; flong.box.exec = [ "/bin/exec" "--tier" ]; })
+      (untyped { flong.box.exec = [ ]; } [ "flong" "box" "exec" ]
+        || throw "assertions: an empty exec command was accepted")
+      # The container's /etc/set-environment, computed without a shell:
+      # what only a shell could say is refused, naming its line.
+      (refused "a command substitution in a variable"
+        { containers.box.config.environment.variables.WHO = "$(id -un)"; }
+        "`export WHO=\"$(id -un)\"` holds `$(id -un)`, which only a shell could read")
+      (refused "a default in a variable"
+        { containers.box.config.environment.variables.STATE = "\${XDG_STATE_HOME:-$HOME/.local/state}"; }
+        "which only a shell could read")
+      (refused "a line of extraInit that is not an export"
+        { containers.box.config.environment.extraInit = "alias ll='ls -l'"; }
+        "`alias ll='ls -l'` is not an `export NAME=VALUE` flong can read without a shell")
+      (refused "a variable the launch sets"
+        { containers.box.config.environment.variables.TMPDIR = "/var/tmp"; }
+        "sets TMPDIR, which the launch sets for every session")
+      (refused "a variable bash sets for itself"
+        { containers.box.config.environment.variables.HERE = "$PWD"; }
+        "refers to $PWD, which bash sets for itself")
+      (refused "a variable only the launch knows"
+        { containers.box.config.environment.variables.T = "$TERM"; }
+        "refers to $TERM, which only the launch knows")
+      (accepted "what the launch expands, a PATH built on the file's own, and an unset name"
+        {
+          containers.box.config.environment = {
+            variables.MINE = "$HOME/x:\${USER}";
+            variables.UNSET = "a\${NOBODY_SETS_THIS}b";
+            homeBinInPath = true;
+            extraInit = "export ALSO=\"$MINE/y\"";
+          };
+        })
+      # What the file becomes: the launch's references kept, an earlier
+      # line's value put in, an unset name nothing, `$` spelt `$$`.
+      ((let
+          text = (declFile {
+            containers.box.config.environment = {
+              variables.MINE = "$HOME/x:\${USER}";
+              variables.UNSET = "a\${NOBODY_SETS_THIS}b";
+              homeBinInPath = true;
+              extraInit = "export ALSO=\"$MINE/y\"";
+            };
+          }).text;
+        in
+        lib.all (v: lib.hasInfix v text) [
+          ''.value = "''${HOME}/x:''${USER}",''
+          ''.value = "ab",''
+          ''.value = "''${HOME}/x:''${USER}/y",''
+          ''.value = "''${HOME}/bin:/run/wrappers/bin:''${HOME}/.nix-profile/bin:''
+        ]) || throw "assertions: the container's environment was not computed as the file would set it")
       # Every hook is a list of commands, and `workspace` one command or
       # null: a shell string, the type they had, does not evaluate, and
       # neither does an empty command.

@@ -162,7 +162,7 @@ test "the record's bytes are tests/golden/records/, locked, linked, removed" {
     }) |c| {
         const cg = try std.fmt.allocPrint(testing.allocator, "/sys/fs/cgroup/h/c/{s}", .{c.machine});
         defer testing.allocator.free(cg);
-        var rec = try record.create(fx.state.sessions, &fx.holder, c.machine, c.commands, cg);
+        var rec = try record.create(fx.state.sessions, &fx.holder, c.machine, c.commands, cg, null);
         // What the teardown runs is what was written.
         try testing.expectEqual(c.poststop == null, rec.poststopList() == null);
         if (c.poststop) |p| try testing.expectEqualStrings(p, rec.poststopList().?);
@@ -220,7 +220,7 @@ test "the record's bytes are tests/golden/records/, locked, linked, removed" {
 test "a record closed without its unlink stays, and its lock is free" {
     var fx = try Fixture.init("/sys/fs/cgroup/h");
     defer fx.deinit();
-    var rec = try record.create(fx.state.sessions, &fx.holder, "kept", none, "/sys/fs/cgroup/h/c/kept");
+    var rec = try record.create(fx.state.sessions, &fx.holder, "kept", none, "/sys/fs/cgroup/h/c/kept", null);
     rec.closeKeeping();
     var dir = fx.sessions();
     defer dir.close();
@@ -231,17 +231,31 @@ test "a record closed without its unlink stays, and its lock is free" {
 
 // ---- a name taken ----
 
-/// record.create's refusal, said and returned.
-fn refused(fx: *Fixture, machine: [:0]const u8, post_stop: []const []const [:0]const u8, cg: []const u8) ![]u8 {
+/// record.create's refusal, said and returned. Whether it was a name
+/// another session holds, whose postStop the launch must not run, is
+/// `taken_want`.
+fn refusedAs(fx: *Fixture, machine: [:0]const u8, post_stop: []const []const [:0]const u8, cg: []const u8, taken_want: bool) ![]u8 {
     var said = Said.start();
-    const r = record.create(fx.state.sessions, &fx.holder, machine, post_stop, cg);
+    var taken = false;
+    const r = record.create(fx.state.sessions, &fx.holder, machine, post_stop, cg, &taken);
     const text = said.stop();
+    try testing.expectEqual(taken_want, taken);
     if (r) |rec| {
         var kept = rec;
         kept.remove();
         return error.NotRefused;
     } else |err| try testing.expectEqual(error.Reported, err);
     return testing.allocator.dupe(u8, text);
+}
+
+/// A refusal whose name is taken: running, or ended and not releasable.
+fn refused(fx: *Fixture, machine: [:0]const u8, post_stop: []const []const [:0]const u8, cg: []const u8) ![]u8 {
+    return refusedAs(fx, machine, post_stop, cg, true);
+}
+
+/// A refusal of what the record would say, the name not taken.
+fn refusedText(fx: *Fixture, machine: [:0]const u8, post_stop: []const []const [:0]const u8, cg: []const u8) ![]u8 {
+    return refusedAs(fx, machine, post_stop, cg, false);
 }
 
 test "a name taken: running, malformed, ended, not a file; a newline, a separator; too long" {
@@ -253,7 +267,7 @@ test "a name taken: running, malformed, ended, not a file; a newline, a separato
     defer dir.close();
 
     // A live launcher's record, no leader= yet: refused, and left.
-    var live = try record.create(fx.state.sessions, &fx.holder, "m", none, "/sys/fs/cgroup/h/c/m");
+    var live = try record.create(fx.state.sessions, &fx.holder, "m", none, "/sys/fs/cgroup/h/c/m", null);
     {
         const said = try refused(&fx, "m", none, "/sys/fs/cgroup/h/c/m");
         defer testing.allocator.free(said);
@@ -275,7 +289,7 @@ test "a name taken: running, malformed, ended, not a file; a newline, a separato
     // An ended session's record, unlocked, its cgroup gone and its leader
     // not the recorded process: released, and the name taken.
     try dir.writeFile(.{ .sub_path = "m", .data = "cgroup=/sys/fs/cgroup/h/c/m\nleader=1:1\n" });
-    var taken = try record.create(fx.state.sessions, &fx.holder, "m", none, "/sys/fs/cgroup/h/c/m");
+    var taken = try record.create(fx.state.sessions, &fx.holder, "m", none, "/sys/fs/cgroup/h/c/m", null);
     {
         const got = try readFile(dir, "m");
         defer testing.allocator.free(got);
@@ -293,19 +307,19 @@ test "a name taken: running, malformed, ended, not a file; a newline, a separato
 
     // A newline in either value, and a record past REC_MAX.
     {
-        const said = try refused(&fx, "n", &.{&.{"/nix/store/x\nleader=1:1"}}, "/sys/fs/cgroup/h/c/n");
+        const said = try refusedText(&fx, "n", &.{&.{"/nix/store/x\nleader=1:1"}}, "/sys/fs/cgroup/h/c/n");
         defer testing.allocator.free(said);
         try testing.expectEqualStrings("flong launch: a newline is in the postStop path or the cgroup path of n\n", said);
     }
     {
         // In any word of any command.
-        const said = try refused(&fx, "n", &.{ &.{"/nix/store/x"}, &.{ "/nix/store/y", "a", "b\nc" } }, "/sys/fs/cgroup/h/c/n");
+        const said = try refusedText(&fx, "n", &.{ &.{"/nix/store/x"}, &.{ "/nix/store/y", "a", "b\nc" } }, "/sys/fs/cgroup/h/c/n");
         defer testing.allocator.free(said);
         try testing.expectEqualStrings("flong launch: a newline is in the postStop path or the cgroup path of n\n", said);
     }
     for ([_][:0]const u8{ "a\x1eb", "\x1f", "/nix/store/x\x1f" }) |w| {
         // A separator in a word would make a command or a word of its own.
-        const said = try refused(&fx, "n", &.{ &.{"/nix/store/x"}, &.{ "/nix/store/y", w } }, "/sys/fs/cgroup/h/c/n");
+        const said = try refusedText(&fx, "n", &.{ &.{"/nix/store/x"}, &.{ "/nix/store/y", w } }, "/sys/fs/cgroup/h/c/n");
         defer testing.allocator.free(said);
         try testing.expectEqualStrings("flong launch: a 0x1E or 0x1F byte is in a postStop word of n\n", said);
     }
@@ -317,15 +331,15 @@ test "a name taken: running, malformed, ended, not a file; a newline, a separato
         defer testing.allocator.free(w);
         @memset(w, 'a');
         @memcpy(w[0.."/nix/store/".len], "/nix/store/");
-        const said = try refused(&fx, "n", &.{ &.{w}, &.{ w, "" } }, "/sys/fs/cgroup/h/c/n");
+        const said = try refusedText(&fx, "n", &.{ &.{w}, &.{ w, "" } }, "/sys/fs/cgroup/h/c/n");
         defer testing.allocator.free(said);
         try testing.expectEqualStrings("flong launch: the record of n is too long\n", said);
-        var fits = try record.create(fx.state.sessions, &fx.holder, "n", &.{ &.{w}, &.{w} }, "/sys/fs/cgroup/h/c/n");
+        var fits = try record.create(fx.state.sessions, &fx.holder, "n", &.{ &.{w}, &.{w} }, "/sys/fs/cgroup/h/c/n", null);
         try testing.expectEqual(@as(usize, sys.path_max - 1), fits.poststopList().?.len);
         fits.remove();
     }
     {
-        const said = try refused(&fx, "n", none, "/sys/fs/cgroup/h/c/n\n");
+        const said = try refusedText(&fx, "n", none, "/sys/fs/cgroup/h/c/n\n");
         defer testing.allocator.free(said);
         try testing.expectEqualStrings("flong launch: a newline is in the postStop path or the cgroup path of n\n", said);
     }
@@ -335,10 +349,10 @@ test "a name taken: running, malformed, ended, not a file; a newline, a separato
         const long = try testing.allocator.alloc(u8, record.rec_max - "cgroup=\n".len);
         defer testing.allocator.free(long);
         @memset(long, 'a');
-        const said = try refused(&fx, "n", none, long);
+        const said = try refusedText(&fx, "n", none, long);
         defer testing.allocator.free(said);
         try testing.expectEqualStrings("flong launch: the record of n is too long\n", said);
-        var fits = try record.create(fx.state.sessions, &fx.holder, "n", none, long[1..]);
+        var fits = try record.create(fx.state.sessions, &fx.holder, "n", none, long[1..], null);
         fits.remove();
     }
     try testing.expectEqual(live_count, fd.liveCount());
@@ -414,7 +428,7 @@ test "a name taken again during the wait: another turn, the loop uncounted" {
     try held.lock(.exclusive);
     var swap: Swap = .{ .dir = dir, .held = held, .parent = linux.getpid() };
     const t = try std.Thread.spawn(.{}, Swap.run, .{&swap});
-    const r = record.create(fx.state.sessions, &fx.holder, "m", none, "/sys/fs/cgroup/h/c/m");
+    const r = record.create(fx.state.sessions, &fx.holder, "m", none, "/sys/fs/cgroup/h/c/m", null);
     t.join();
     var rec = try r;
     try testing.expect(swap.swapped);

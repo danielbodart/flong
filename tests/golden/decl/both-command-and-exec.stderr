@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/both-command-and-exec.zon: flong.box has both `command` and `exec`. The payload is one or the other: `command` when it is known at evaluation, `exec` when only the launch can say it.

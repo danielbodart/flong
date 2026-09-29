@@ -1,0 +1,9 @@
+.{
+    .user = "u",
+    .container = "box",
+    .closure = "/nix/store/x-nixos-system-box",
+    .cuid = 1000,
+    .cgid = 100,
+    .steps8 = "0123abcd",
+    .name = "box",
+}

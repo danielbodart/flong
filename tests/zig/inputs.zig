@@ -250,7 +250,6 @@ pub fn mountinfo(tokens: []const u16, buf: []u8) []u8 {
 const decl_head =
     \\.{ .user = "u", .command = .{"true"}, .container = "box",
     \\  .closure = "/nix/store/x-box", .cuid = 1000, .cgid = 100, .steps8 = "0123abcd",
-    \\  .payload = "/nix/store/x-payload/bin/flong-payload-box",
     \\
 ;
 
@@ -294,6 +293,11 @@ pub fn declaration(tokens: []const u16, buf: []u8) []u8 {
             ".cuid = -1,",
             ".limits = .{ .IOWeight = 1 },",
             ".masks = .{ \"\\x00\", \"/a\\n/b\" },",
+            ".exec = .{\"/nix/store/x-exec/bin/exec\"},",
+            ".command = null, .exec = .{},",
+            ".command = null,",
+            ".environment = .{ .{ .name = \"PATH\", .value = \"${HOME}/bin:$$\" }, .{ .name = \"A=B\", .value = \"$HOME\" } },",
+            ".environment = .{ .{ .name = \"TERM\", .value = \"${PATH}\" }, .{ .name = \"\", .value = \"${\" }, .{ .name = \"X\", .value = \"$\" } },",
         };
         // Its name, a subcommand's one time in four.
         const names = [_][]const u8{ ".name = \"box\",\n", ".name = \"a\",\n", ".name = \"box-2\",\n", ".name = \"check\",\n" };

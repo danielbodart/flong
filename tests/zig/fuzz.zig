@@ -223,7 +223,10 @@ fn declParse(b: []const u8) !void {
     const prefix = try std.fmt.allocPrint(a, "flong.{s}", .{d.name});
     for (refusals) |r| try testing.expect(std.mem.startsWith(u8, r, prefix));
     if (refusals.len == 0) {
-        try testing.expect(d.command.len > 0);
+        // The payload is exactly one of command and exec, and not empty.
+        try testing.expect((d.command == null) != (d.exec == null));
+        try testing.expect((d.command orelse d.exec.?).len > 0);
+        for (d.environment) |v| try testing.expect(spec.isEnvName(v.name) and spec.badReference(v.value) == null);
         for (d.masks) |m| try testing.expect(spec.unclean(m, .absolute) == null);
         for (d.protect) |p| try testing.expect(spec.unclean(p, .absolute) == null);
         try testing.expect(d.cuid <= 65535 and d.cgid <= 65535);

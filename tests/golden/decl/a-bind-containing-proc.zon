@@ -7,7 +7,6 @@
     .cgid = 100,
     .steps8 = "0123abcd",
     .name = "box",
-    .payload = "/nix/store/x-payload/bin/flong-payload-box",
     .containerMounts = .{
         .{ .kind = .bind_ro, .dest = "/host", .src = "/" },
     },

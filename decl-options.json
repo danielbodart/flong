@@ -13,11 +13,24 @@
   {
     "path": "command",
     "type": {
-      "type": "command"
+      "type": "command",
+      "nullable": true
     },
     "default": null,
-    "required": true,
-    "doc": "The payload, as an argument list: the program, then its fixed\narguments. The launcher's own arguments are appended, and it is\nexec'd as `user` in the workspace. No element of either list is\nread by a shell, so a space, a `;` or a `$` in one is passed as it\nis.\n\nIt is exec'd after the container's `/etc/set-environment` has been\nsourced, so a bare name is looked up on the container's `PATH` --\nits `environment.systemPackages`, the user's `packages` -- and\nthe payload inherits every variable the container exports. An\nabsolute path, such as `lib.getExe` of a package, is run as it\nis. Anything that needs a script is a package of its own, named\nhere by `lib.getExe`.",
+    "required": false,
+    "doc": "The payload, as an argument list: the program, then its fixed\narguments. The launcher's own arguments are appended, and it is\nexec'd as `user` in the workspace, under `flong init` and tini,\nwith nothing between: no shell reads any element of either list,\nso a space, a `;` or a `$` in one is passed as it is.\n\nIts environment is the container's, computed on the host: what\nits `/etc/set-environment` would set (the declaration's\n`environment`), so a bare name is looked up on the container's\n`PATH` -- its `environment.systemPackages`, the user's `packages`\n-- and the payload has every variable the container exports. An\nabsolute path, such as `lib.getExe` of a package, is run as it\nis. Anything that needs a script is a package of its own, named\nhere by `lib.getExe`.\n\nA declaration has `command` or `exec`, never both and never\nneither.",
+    "merge": "ordered",
+    "nixOption": true
+  },
+  {
+    "path": "exec",
+    "type": {
+      "type": "command",
+      "nullable": true
+    },
+    "default": null,
+    "required": false,
+    "doc": "A command printing the payload's argument list, and variables to\nadd to its environment, for a payload that only the launch can\ndecide: run on the host as the caller, in place of `command`,\nafter `seccompPolicy`, with the launcher's arguments after its\nown and the environment `seccompPolicy` has -- `$workspace`,\n`$workspace_mode`, `$binds` and `$machine` -- and `path` on\n`PATH`.\n\nIts stdout, at most 1 MiB, is fields each ended by a NUL byte, as\n`printf '%s\\0'` prints them: `NAME=VALUE` for each variable, then\none empty field, then the payload's argument list, at least its\nprogram. The list is the payload's whole: the launcher's arguments\nare not appended again. A program without a `/` is looked up on\nthe payload's `PATH`, as `command`'s is.\n\nA non-zero exit refuses the launch, and so does output that is not\nthat shape, a name that is empty or holds a `=`, a name printed\ntwice, and a name the session already sets: the container's\n`environment`, or one of the launch's own (`PATH`, `HOME`, `USER`,\n`LOGNAME`, `SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`, `FLONG_BINDS`,\n`container`, `TERM`, `COLORTERM`). Nothing is overridden silently.\n\nOnce it has run, as once `seccompPolicy` has, `postStop` runs for\nthe session's `$machine` however the launch ends, even when it\nfails before the session starts, so whatever it staged for\n`$machine` is released. It runs again when the launcher\nrelaunches itself, under a new `$machine`, the old one released\nfirst.",
     "merge": "ordered",
     "nixOption": true
   },
@@ -696,14 +709,41 @@
     "nixOption": false
   },
   {
-    "path": "payload",
+    "path": "environment",
     "type": {
-      "type": "string"
+      "type": "list",
+      "of": {
+        "type": "struct",
+        "fields": [
+          {
+            "path": "environment.*.name",
+            "type": {
+              "type": "string"
+            },
+            "default": null,
+            "required": true,
+            "doc": "The variable's name.",
+            "merge": "single",
+            "nixOption": false
+          },
+          {
+            "path": "environment.*.value",
+            "type": {
+              "type": "string"
+            },
+            "default": null,
+            "required": true,
+            "doc": "Its value, with `${NAME}` references to the launch's own\nvariables and `$$` for a `$`.",
+            "merge": "single",
+            "nixOption": false
+          }
+        ]
+      }
     },
-    "default": null,
-    "required": true,
-    "doc": "The program that runs `command` inside the session, as `user`: it\ntakes the workspace, changes into it, sources the container's\n`/etc/set-environment` and execs `command` with the launcher's\narguments after it. module.nix builds it from `command`\n(`mkPayload`); the launch hands it to `flong init` as the payload.",
-    "merge": "single",
+    "default": [],
+    "required": false,
+    "doc": "The payload's environment from the container: what its\n`/etc/set-environment` would set, worked out at evaluation from\nits configuration, one entry per name, each with its final value.\nIn a value, `${NAME}` is filled in at launch with the session's\nvalue of NAME, one of `HOME`, `USER`, `LOGNAME`, `SHELL`,\n`XDG_RUNTIME_DIR` and `TMPDIR`, and `$$` is one `$`; any other `$`\nis refused. It may set `PATH`, which replaces the launch's own,\nand none of the launch's other names. Under NixOS, module.nix\ncomputes it, and refuses at evaluation a container whose file says\nwhat cannot be computed without a shell.",
+    "merge": "ordered",
     "nixOption": false
   },
   {

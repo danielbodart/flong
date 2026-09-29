@@ -732,7 +732,16 @@ test "the schema says each kind of field as the grammar does" {
 
     const command = find(top, "command").?;
     try testing.expectEqualStrings("command", command.get("type").?.object.get("type").?.string);
-    try testing.expectEqualStrings("ordered", command.get("merge").?.string);
+    try testing.expect(command.get("type").?.object.get("nullable").?.bool);
+    try testing.expect(!command.get("required").?.bool);
+
+    const exec = find(top, "exec").?;
+    try testing.expectEqualStrings("command", exec.get("type").?.object.get("type").?.string);
+    try testing.expect(exec.get("nixOption").?.bool);
+
+    const environment = find(top, "environment").?;
+    try testing.expectEqualStrings("list", environment.get("type").?.object.get("type").?.string);
+    try testing.expect(!environment.get("nixOption").?.bool);
 
     const workspace = find(top, "workspace").?.get("type").?.object;
     try testing.expectEqualStrings("command", workspace.get("type").?.string);
@@ -858,7 +867,10 @@ test "the reference spells each type and default as ZON does" {
     const Case = struct { path: []const u8, type: []const u8, default: ?[]const u8 };
     for ([_]Case{
         .{ .path = "user", .type = "string", .default = null },
-        .{ .path = "command", .type = "command", .default = null },
+        .{ .path = "command", .type = "command, or null", .default = "null" },
+        .{ .path = "exec", .type = "command, or null", .default = "null" },
+        .{ .path = "environment", .type = "list of struct", .default = ".{}" },
+        .{ .path = "environment.*.name", .type = "string", .default = null },
         .{ .path = "workspace", .type = "command, or null", .default = "null" },
         .{ .path = "guard", .type = "list of command", .default = ".{}" },
         .{ .path = "masks", .type = "list of string matching /.*", .default = ".{}" },

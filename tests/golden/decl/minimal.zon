@@ -1,4 +1,5 @@
-// Only what has no default.
+// Only what has no default, and a command, since a payload needs one of
+// command and exec.
 .{
     .user = "u",
     .command = .{"true"},
@@ -8,5 +9,4 @@
     .cgid = 100,
     .steps8 = "0123abcd",
     .name = "box",
-    .payload = "/nix/store/x-payload/bin/flong-payload-box",
 }

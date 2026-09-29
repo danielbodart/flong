@@ -10,7 +10,8 @@
 //!   2  the workspace (:99-150)                          workspace.zig
 //!   3  the caller's binds (:152-195)                    binds.zig
 //!   4  the guard (:197-203)                             cmd.zig
-//!   5  the session's name, the project's policy (:205-223)
+//!   5  the signals, the session's name, the project's policy
+//!      (:205-223), the payload's `exec`                 cmd.zig
 //!   6  the depth rule (:225-247)                        depth.zig
 //!   7  the maps (:249-290)                              subid.zig
 //!   8  the prepared root (:292-343)                     prepare.zig
@@ -29,6 +30,18 @@
 //! The three points where the wrapper found its cache swept before it held
 //! it (:314, 322, 352) relaunch flong with the process's own argv
 //! (prologue.relaunchSelf), so a declaration's link name is looked up again.
+//!
+//! From step 5 on the session has a name, `$machine`, and the commands that
+//! see it -- `seccompPolicy` and `exec` -- may have staged something for it
+//! on the host that only `postStop` releases. So from there every way the
+//! prologue ends but a spec releases it: a refusal, a signal, and a
+//! relaunch, which runs the commands again under a new name, run postStop's
+//! commands for this one first (`Early`), as the record would have; once
+//! the spec is built, the launch takes that over (launch.zig). And the
+//! signals the launch reads from its signalfd are blocked, and the
+//! signalfd opened, at step 5 rather than after the prologue, so a
+//! terminating signal during the commands or the prepare ends a wait and
+//! is released from, where it would have killed the launcher outright.
 //!
 //! What the wrapper exported, the commands, the cache tool, flong-seccomp
 //! and the launch see in their environment, each from the step that set
@@ -63,6 +76,7 @@ const prepare = @import("prepare");
 const identity = @import("identity");
 const depth = @import("depth");
 const hometmp = @import("hometmp");
+const record = @import("record");
 const resolv = @import("resolv");
 
 const Allocator = std.mem.Allocator;
@@ -96,6 +110,9 @@ pub const Assembled = struct {
     /// The environment the launch goes on with, the hooks' and pasta's
     /// base: the caller's, with what the wrapper exported.
     environ: []const [*:0]const u8,
+    /// The signal mask before step 5 blocked the launch's signals, which a
+    /// relaunch restores.
+    old_mask: u64,
 };
 
 pub const Error = error{
@@ -125,6 +142,41 @@ const Env = struct {
 
     fn envp(e: *const Env) Error!cmd.Envp {
         return cmd.environ(e.gpa, e.base, e.vars.items);
+    }
+};
+
+/// postStop's commands for a session named before its record exists
+/// (the header): run once, from the first failure, or before a relaunch,
+/// and never again.
+pub const Early = struct {
+    post_stop: []const spec.Command,
+    machine: []const u8,
+    done: bool = false,
+
+    /// postStop's commands for `machine`, as the teardown and the sweep
+    /// run them (record.poststopCommands), unless they already ran. A
+    /// terminating signal already queued is taken off first, as the
+    /// launch's teardown finds it taken, so it does not end postStop's
+    /// first wait: it is the launch's status still (sig.abort_signal).
+    pub fn runPostStop(e: *Early) void {
+        if (e.done) return;
+        e.done = true;
+        if (sig.fd != null) while (true) {
+            const more = sig.take(0) catch |err| switch (err) {
+                // One taken; there may be more behind it.
+                error.Aborted => continue,
+                // The signalfd cannot be read, and postStop's waits will
+                // say so if it matters.
+                error.Reported => break,
+            };
+            if (!more) break;
+        };
+        record.poststopCommands(e.post_stop, e.machine) catch |err| switch (err) {
+            // A second signal ended a command's wait: it was killed, and
+            // the signal is the launch's status (sig.abort_signal). There
+            // is no record for a sweep to run the list again from.
+            error.Aborted => return,
+        };
     }
 };
 
@@ -170,15 +222,24 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
     // 4. The guard: each command must pass, in order (:197-203).
     if (d.guard.len > 0) try cmd.pass(gpa, d.guard, args, try env.envp());
 
-    // 5. The session's name, exported for the policy and the hooks; the
-    // project's policy, compiled when it says anything (:205-223).
+    // 5. The launch's signals, blocked and read from the signalfd from
+    // here on, SIGPIPE ignored (the header); the session's name, exported
+    // for the policy and the hooks, and released from whatever ends the
+    // prologue now; the project's policy, compiled when it says anything
+    // (:205-223); the payload's `exec`, when it has one.
+    const old_mask = try sig.block();
+    sig.ignorePipe();
+    try sig.openSignalfd();
     const machine = std.fmt.allocPrintSentinel(gpa, "{s}-{d}-{d}", .{ d.container, sys.getpid(), randomWord() }, 0) catch return oom();
+    var early: Early = .{ .post_stop = postStopCommands(gpa, d) catch return oom(), .machine = machine };
+    errdefer early.runPostStop();
     try env.set("machine", machine);
     var tier_bpf: []const u8 = d.seccompTierFilter orelse "";
     if (d.seccompPolicy.len > 0) {
         const policy = cmd.substitute(try cmd.outputOf(gpa, d.seccompPolicy, args, try env.envp()));
         if (!blank(policy)) tier_bpf = try compilePolicy(gpa, d, tools, who.state, policy, try env.envp());
     }
+    const exec: ?cmd.Exec = if (d.exec) |x| try execOf(gpa, d, x, args, try env.envp()) else null;
 
     // 6. The depth rule, for the workspace and the caller's writable binds
     // (:225-247).
@@ -214,14 +275,20 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
     const cold: ?fdt.Dir = switch (try prepare.ensure(gpa, who.state, d.container, paths, tool, closure, user)) {
         .warm => null,
         .cold => |cfd| cfd,
-        .swept => return prologue.relaunchSelf(gpa, p.argv, null, @ptrCast(p.environ.ptr)),
+        .swept => {
+            early.runPostStop();
+            return prologue.relaunchSelf(gpa, p.argv, old_mask, @ptrCast(p.environ.ptr));
+        },
     };
 
     // 9. The payload's identity, from the prepared root's passwd and
     // group; swept, relaunched (:345-375).
     const files = switch (try identity.open(gpa, paths.prepared)) {
         .files => |f| f,
-        .swept => return prologue.relaunchSelf(gpa, p.argv, null, @ptrCast(p.environ.ptr)),
+        .swept => {
+            early.runPostStop();
+            return prologue.relaunchSelf(gpa, p.argv, old_mask, @ptrCast(p.environ.ptr));
+        },
     };
     const id = try identity.of(gpa, files, paths.prepared, d.user, d.cuid, d.cgid);
     try env.set("uid", id.uid);
@@ -257,9 +324,11 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
             .cache = paths.cache,
             .id = id,
             .home_tmp = if (home_tmp) home_tmp_path else null,
+            .exec = exec,
         }),
         .cold = cold,
         .environ = @ptrCast(environ[0..envLen(environ)]),
+        .old_mask = old_mask,
     };
 }
 
@@ -283,6 +352,8 @@ const Found = struct {
     id: identity.Identity,
     /// $home/tmp when it is a private tmpfs
     home_tmp: ?[:0]const u8,
+    /// what `exec` printed, when the declaration has it
+    exec: ?cmd.Exec,
 };
 
 /// The holder unit's cgroup, relative to user@UID.service, and how the
@@ -417,12 +488,7 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
         for (p.args) |a| try w.append(gpa, std.mem.span(a));
         try l.post_start.append(gpa, w.items);
     }
-    for (d.postStop) |c| {
-        var w: std.ArrayList([:0]const u8) = .empty;
-        if (d.postStopProgram) |prog| try w.append(gpa, try z.of(gpa, prog));
-        try w.appendSlice(gpa, c);
-        try l.post_stop.append(gpa, w.items);
-    }
+    try l.post_stop.appendSlice(gpa, try postStopCommands(gpa, d));
 
     // The network: pasta's ports (portList, hostPorts) and
     // --no-map-gw, then the resolver, read once (:423-461).
@@ -443,16 +509,28 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
     }
 
     // The payload's environment, built from nothing, so the caller's
-    // tokens and agent sockets never reach it (:463-473).
+    // tokens and agent sockets never reach it (:463-473): the launch's own
+    // (spec.fixed_env), then the container's, from its /etc/set-environment
+    // (the declaration's `environment`), whose PATH replaces the launch's,
+    // then what `exec` printed. flong check has refused a declared name of
+    // the launch's other than PATH, and execOf a name of `exec`'s that
+    // either sets, so no name is set twice.
     const tmpdir: []const u8 = if (f.home_tmp) |t| t else "/tmp";
     const term = getenv(p.environ, "TERM") orelse "";
+    const runtime = try z.print(gpa, "/run/user/{s}", .{f.id.uid});
+    // spec.expandable's values, in its order.
+    const known = [spec.expandable.len][]const u8{ f.id.home, d.user, d.user, f.id.shell, runtime, tmpdir };
+    var path: [:0]const u8 = try z.print(gpa, "{s}/sw/bin", .{d.closure});
+    for (d.environment) |v| if (std.mem.eql(u8, v.name, "PATH")) {
+        path = try spec.expand(gpa, v.value, &known);
+    };
     const vars = [_][2][]const u8{
-        .{ "PATH", try z.print(gpa, "{s}/sw/bin", .{d.closure}) },
+        .{ "PATH", path },
         .{ "HOME", f.id.home },
         .{ "USER", d.user },
         .{ "LOGNAME", d.user },
         .{ "SHELL", f.id.shell },
-        .{ "XDG_RUNTIME_DIR", try z.print(gpa, "/run/user/{s}", .{f.id.uid}) },
+        .{ "XDG_RUNTIME_DIR", runtime },
         .{ "TMPDIR", tmpdir },
         .{ "FLONG_BINDS", f.b.text },
         .{ "container", "flong" },
@@ -460,12 +538,19 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
     };
     for (vars) |v| try l.env.append(gpa, .{ .name = try z.of(gpa, v[0]), .value = try z.of(gpa, v[1]) });
     if (getenv(p.environ, "COLORTERM")) |c| if (c.len > 0) try l.env.append(gpa, .{ .name = "COLORTERM", .value = try z.of(gpa, c) });
+    for (d.environment) |v| if (!std.mem.eql(u8, v.name, "PATH")) {
+        try l.env.append(gpa, .{ .name = try z.of(gpa, v.name), .value = try spec.expand(gpa, v.value, &known) });
+    };
+    if (f.exec) |x| for (x.env) |v| try l.env.append(gpa, .{ .name = try z.of(gpa, v.name), .value = try z.of(gpa, v.value) });
 
-    // The payload: its program, the workspace, the launcher's arguments.
-    const command = try gpa.allocSentinel(?[*:0]const u8, 2 + p.args.len, null);
-    command[0] = (try z.of(gpa, d.payload)).ptr;
-    command[1] = f.ws.path.ptr;
-    for (command[2..], p.args) |*c, a| c.* = a;
+    // The payload, exec'd by tini as it is, in the workspace flong init
+    // changes to: what `exec` printed, or `command` and the launcher's
+    // arguments.
+    const words: []const [:0]const u8 = if (f.exec) |x| x.argv else d.command.?;
+    const extra: []const [*:0]const u8 = if (f.exec != null) &.{} else p.args;
+    const command = try gpa.allocSentinel(?[*:0]const u8, words.len + extra.len, null);
+    for (command[0..words.len], words) |*c, w| c.* = w.ptr;
+    for (command[words.len..], extra) |*c, a| c.* = a;
 
     const groups = try gpa.alloc(u32, f.id.groups.len);
     for (groups, f.id.groups) |*g, t| g.* = try idOf("group", t);
@@ -501,8 +586,55 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
         .hostname = try z.of(gpa, d.container),
         .resolv_conf = resolv_conf,
         .trace = if (getenv(p.environ, "FLONG_TRACE")) |t| t.len > 0 else false,
-        .command = @ptrCast(command[0 .. 2 + p.args.len]),
+        .command = @ptrCast(command[0 .. words.len + extra.len]),
     };
+}
+
+/// postStop's commands as the spec and the record hold them: each through
+/// the declaration's program, when it has one (:413-421; module.nix's
+/// post-stop tokens).
+fn postStopCommands(gpa: Allocator, d: *const Declaration) Allocator.Error![]const spec.Command {
+    const out = try gpa.alloc(spec.Command, d.postStop.len);
+    for (out, d.postStop) |*o, c| {
+        var w: std.ArrayList([:0]const u8) = .empty;
+        if (d.postStopProgram) |prog| try w.append(gpa, try gpa.dupeZ(u8, prog));
+        try w.appendSlice(gpa, c);
+        o.* = w.items;
+    }
+    return out;
+}
+
+/// The declaration's `exec`, run as the other commands are, with the
+/// launcher's arguments after its own, its stdout captured as theirs is
+/// (at most cmd.output_max) and read as its protocol (cmd.parseExec). Its
+/// failure, output of another shape, a name that is no variable's, one
+/// printed twice and one the session already sets -- the launch's own
+/// (spec.fixed_env) or the container's (`environment`) -- are each
+/// refused, saying so: nothing it prints overrides anything silently.
+fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const [*:0]const u8, envp: cmd.Envp) Error!cmd.Exec {
+    const o = try cmd.capture(gpa, x, args, envp, cmd.output_max);
+    if (o.status != 0) return msg.refuse("exec: {s} failed (status {d}); the payload does not run", .{ x[0], o.status });
+    const e = switch (cmd.parseExec(gpa, o.out) catch return oom()) {
+        .ok => |e| e,
+        .bad => |bad| return switch (bad) {
+            .unterminated => msg.refuse("exec: {s} printed a field without the NUL that ends it: every field, the last one too, ends with a NUL", .{x[0]}),
+            .no_separator => msg.refuse("exec: {s} printed no empty field to end the variables and begin the payload's argument list", .{x[0]}),
+            .not_a_variable => |field| msg.refuse("exec: {s} printed \"{s}\" before the empty field, where each field is a variable, NAME=VALUE", .{ x[0], field }),
+            .no_argv => msg.refuse("exec: {s} printed no argument list after the empty field: the payload needs at least its program", .{x[0]}),
+            .empty_program => msg.refuse("exec: {s} printed an empty program as the payload's", .{x[0]}),
+        },
+    };
+    for (e.env, 0..) |v, i| {
+        if (!spec.isEnvName(v.name))
+            return msg.refuse("exec: {s} printed a variable with an empty name", .{x[0]});
+        if (spec.isOneOf(&spec.fixed_env, v.name))
+            return msg.refuse("exec: {s} sets {s}, which the launch sets for every session", .{ x[0], v.name });
+        for (d.environment) |w| if (std.mem.eql(u8, w.name, v.name))
+            return msg.refuse("exec: {s} sets {s}, which the container's environment already sets", .{ x[0], v.name });
+        for (e.env[0..i]) |w| if (std.mem.eql(u8, w.name, v.name))
+            return msg.refuse("exec: {s} sets {s} twice", .{ x[0], v.name });
+    }
+    return e;
 }
 
 /// A port class of pasta's: "none", or each forward HOST:CONTAINER of

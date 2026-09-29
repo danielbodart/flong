@@ -43,7 +43,6 @@
     .cgid = 100,
     .steps8 = "0123abcd",
     .name = "agent",
-    .payload = "/nix/store/x-payload/bin/flong-payload-agent",
     .containerMounts = .{
         .{ .kind = .bind_rw, .dest = "/home/alice/src", .src = "/srv/src" },
         .{ .kind = .bind_ro, .dest = "/srv/ref" },

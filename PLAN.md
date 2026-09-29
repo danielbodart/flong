@@ -88,6 +88,18 @@ toolchain survives.
   machine name the record appends to a `postStop` command. They can go once
   the launch and the sweeper put the declaration's `commandPath` on `PATH`
   themselves.
+- **A SIGKILL before the record.** From the moment the prologue names the
+  session, `postStop` runs for it however the launch ends, but a SIGKILL
+  before the record exists leaves nothing that knows the name: the sweep
+  finds records only. What `seccompPolicy` or `exec` staged for that
+  `$machine` stays until something else releases it. A record written as
+  the session is named, before the hooks, would close it, at the cost of a
+  record for every launch the prologue refuses.
+- **NIX_PATH's channels.** module.nix reads nix-channel's lines in
+  `/etc/set-environment`, which put `$HOME/.nix-defexpr/channels` in front
+  of `NIX_PATH` when it exists, as doing nothing: a session's home is the
+  prepared root's, and no session has a daemon. A declaration that binds a
+  home holding channels loses that prefix, which no session could use.
 - **flong's size.** flong grew from 513,200 bytes as one binary (S1) to
   1,417,640 with the ZON parser, the schema's walk and the doc comments'
   text, and it is every session's pid 1, as `flong init`.
@@ -149,8 +161,18 @@ asserted rather than assumed:
 - `command` is an argument list: the launcher's arguments are appended, and a
   double space, `;`, `$(…)`, `$HOME`, quotes, a glob, an empty argument and a
   trailing backslash each arrive as that argument, past `systemd-run` as well
-  as any shell. A bare name is found on the container's `/etc/set-environment`
-  `PATH`, and a program in the user's `packages` alone proves it.
+  as any shell. A bare name is found on the `PATH` the container's
+  `/etc/set-environment` sets, computed at evaluation, and a program in the
+  user's `packages` alone proves it.
+- The payload's environment, exec'd with no shell, equals what a bash in the
+  same session makes of the container's `/etc/set-environment` from the same
+  launch variables, but for the three bash sets for itself. What only a
+  shell could compute is refused at evaluation, naming its line.
+- `exec`'s variables and argument list reach the payload, and each malformed
+  output, a name set twice or already set, and a failing `exec` refuse the
+  launch. `postStop` runs once for every `$machine` `seccompPolicy` and
+  `exec` saw: after a refusal, a signal during `exec`, and a failure before
+  the record.
 - The declaration binds single files and a socket at paths of its choosing,
   absent from `FLONG_BINDS`; a file bound read-only refuses a write and a
   `chmod` with `EROFS` though the payload owns it, and a socket bound read-only

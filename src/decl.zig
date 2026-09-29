@@ -59,18 +59,52 @@ pub const Declaration = struct {
 
     /// The payload, as an argument list: the program, then its fixed
     /// arguments. The launcher's own arguments are appended, and it is
-    /// exec'd as `user` in the workspace. No element of either list is
-    /// read by a shell, so a space, a `;` or a `$` in one is passed as it
-    /// is.
+    /// exec'd as `user` in the workspace, under `flong init` and tini,
+    /// with nothing between: no shell reads any element of either list,
+    /// so a space, a `;` or a `$` in one is passed as it is.
     ///
-    /// It is exec'd after the container's `/etc/set-environment` has been
-    /// sourced, so a bare name is looked up on the container's `PATH` --
-    /// its `environment.systemPackages`, the user's `packages` -- and
-    /// the payload inherits every variable the container exports. An
+    /// Its environment is the container's, computed on the host: what
+    /// its `/etc/set-environment` would set (the declaration's
+    /// `environment`), so a bare name is looked up on the container's
+    /// `PATH` -- its `environment.systemPackages`, the user's `packages`
+    /// -- and the payload has every variable the container exports. An
     /// absolute path, such as `lib.getExe` of a package, is run as it
     /// is. Anything that needs a script is a package of its own, named
     /// here by `lib.getExe`.
-    command: Command,
+    ///
+    /// A declaration has `command` or `exec`, never both and never
+    /// neither.
+    command: ?Command = null,
+
+    /// A command printing the payload's argument list, and variables to
+    /// add to its environment, for a payload that only the launch can
+    /// decide: run on the host as the caller, in place of `command`,
+    /// after `seccompPolicy`, with the launcher's arguments after its
+    /// own and the environment `seccompPolicy` has -- `$workspace`,
+    /// `$workspace_mode`, `$binds` and `$machine` -- and `path` on
+    /// `PATH`.
+    ///
+    /// Its stdout, at most 1 MiB, is fields each ended by a NUL byte, as
+    /// `printf '%s\0'` prints them: `NAME=VALUE` for each variable, then
+    /// one empty field, then the payload's argument list, at least its
+    /// program. The list is the payload's whole: the launcher's arguments
+    /// are not appended again. A program without a `/` is looked up on
+    /// the payload's `PATH`, as `command`'s is.
+    ///
+    /// A non-zero exit refuses the launch, and so does output that is not
+    /// that shape, a name that is empty or holds a `=`, a name printed
+    /// twice, and a name the session already sets: the container's
+    /// `environment`, or one of the launch's own (`PATH`, `HOME`, `USER`,
+    /// `LOGNAME`, `SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`, `FLONG_BINDS`,
+    /// `container`, `TERM`, `COLORTERM`). Nothing is overridden silently.
+    ///
+    /// Once it has run, as once `seccompPolicy` has, `postStop` runs for
+    /// the session's `$machine` however the launch ends, even when it
+    /// fails before the session starts, so whatever it staged for
+    /// `$machine` is released. It runs again when the launcher
+    /// relaunches itself, under a new `$machine`, the old one released
+    /// first.
+    exec: ?Command = null,
 
     /// A command printing the directory to bind into the container at its
     /// own path and start in: `PATH`, bound read-write, or `PATH:ro`,
@@ -366,12 +400,17 @@ pub const Declaration = struct {
     /// of its command.
     name: []const u8,
 
-    /// The program that runs `command` inside the session, as `user`: it
-    /// takes the workspace, changes into it, sources the container's
-    /// `/etc/set-environment` and execs `command` with the launcher's
-    /// arguments after it. module.nix builds it from `command`
-    /// (`mkPayload`); the launch hands it to `flong init` as the payload.
-    payload: []const u8,
+    /// The payload's environment from the container: what its
+    /// `/etc/set-environment` would set, worked out at evaluation from
+    /// its configuration, one entry per name, each with its final value.
+    /// In a value, `${NAME}` is filled in at launch with the session's
+    /// value of NAME, one of `HOME`, `USER`, `LOGNAME`, `SHELL`,
+    /// `XDG_RUNTIME_DIR` and `TMPDIR`, and `$$` is one `$`; any other `$`
+    /// is refused. It may set `PATH`, which replaces the launch's own,
+    /// and none of the launch's other names. Under NixOS, module.nix
+    /// computes it, and refuses at evaluation a container whose file says
+    /// what cannot be computed without a shell.
+    environment: []const EnvVar = &.{},
 
     /// The compiled filter of `seccomp`'s tier, its loosenings, `allow`
     /// and `deny`, installed first; null when `seccomp.tier` is null. A
@@ -417,7 +456,7 @@ pub const Declaration = struct {
     /// `container` keeps an option, written by hand in module.nix.
     pub const computed = [_][]const u8{
         "container",       "closure",     "cuid",             "cgid",              "steps8",
-        "containerMounts", "name",        "payload",          "seccompTierFilter", "seccompFixedFilters",
+        "containerMounts", "name",        "environment",      "seccompTierFilter", "seccompFixedFilters",
         "seccompProject",  "commandPath", "postStartProgram", "postStopProgram",
     };
 
@@ -607,6 +646,15 @@ pub const ContainerMount = struct {
 };
 
 pub const MountKind = enum { bind_ro, bind_rw, dev, tmpfs };
+
+/// One of `environment`.
+pub const EnvVar = struct {
+    /// The variable's name.
+    name: []const u8,
+    /// Its value, with `${NAME}` references to the launch's own
+    /// variables and `$$` for a `$`.
+    value: []const u8,
+};
 
 /// `seccompProject`: the arguments of `flong-seccomp project` other than
 /// its cache directory, which the launch names. The compiler itself is
@@ -843,7 +891,10 @@ const full =
     \\        .{ .kind = .dev, .dest = "/dev/fuse", .src = "/dev/fuse", .mode = "rwm" },
     \\    },
     \\    .name = "agent-trusted",
-    \\    .payload = "/nix/store/x-payload/bin/flong-payload-agent-trusted",
+    \\    .environment = .{
+    \\        .{ .name = "PATH", .value = "/etc/profiles/per-user/${USER}/bin:/run/current-system/sw/bin" },
+    \\        .{ .name = "LANG", .value = "en_US.UTF-8" },
+    \\    },
     \\    .seccompTierFilter = "/nix/store/x-tier/flong-seccomp.bpf",
     \\    .seccompFixedFilters = .{ "/nix/store/x-audit.bpf", "/nix/store/x-tty.bpf" },
     \\    .seccompProject = .{
@@ -865,7 +916,6 @@ const minimal =
     \\    .cgid = 100,
     \\    .steps8 = "0123abcd",
     \\    .name = "agent",
-    \\    .payload = "/nix/store/x-payload/bin/flong-payload-agent",
     \\}
 ;
 
@@ -875,8 +925,9 @@ test "a full declaration parses, every field as written" {
     const d = try parse(arena_state.allocator(), full, null);
 
     try testing.expectEqualStrings("alice", d.user);
-    try testing.expectEqual(2, d.command.len);
-    try testing.expectEqualStrings("--greeting=hi there", d.command[1]);
+    try testing.expectEqual(2, d.command.?.len);
+    try testing.expectEqualStrings("--greeting=hi there", d.command.?[1]);
+    try testing.expectEqual(null, d.exec);
     try testing.expectEqualStrings("--git", d.workspace.?[1]);
     try testing.expectEqual(2, d.binds.len);
     try testing.expectEqualStrings("a", d.binds[1][1]);
@@ -922,6 +973,9 @@ test "a full declaration parses, every field as written" {
     try testing.expectEqual(.tmpfs, d.containerMounts[1].kind);
     try testing.expectEqual(null, d.containerMounts[1].src);
     try testing.expectEqualStrings("rwm", d.containerMounts[2].mode.?);
+    try testing.expectEqual(2, d.environment.len);
+    try testing.expectEqualStrings("PATH", d.environment[0].name);
+    try testing.expectEqualStrings("en_US.UTF-8", d.environment[1].value);
 }
 
 test "a minimal declaration takes module.nix's defaults" {
@@ -929,7 +983,9 @@ test "a minimal declaration takes module.nix's defaults" {
     defer arena_state.deinit();
     const d = try parse(arena_state.allocator(), minimal, null);
 
-    try testing.expectEqualStrings("hello", d.command[0]);
+    try testing.expectEqualStrings("hello", d.command.?[0]);
+    try testing.expectEqual(null, d.exec);
+    try testing.expectEqual(0, d.environment.len);
     try testing.expectEqual(null, d.workspace);
     try testing.expectEqual(0, d.binds.len + d.guard.len + d.postStart.len + d.postStop.len + d.seccompPolicy.len);
     try testing.expectEqual(null, d.network);
@@ -970,7 +1026,7 @@ test "an unknown field is refused at its line" {
 
     // A Nix name translated, which no compatibility layer allows.
     const r = try refusal(a, minimal[0 .. minimal.len - 1] ++ "    .post_start = .{},\n}");
-    try testing.expectEqual(11, r.line);
+    try testing.expectEqual(10, r.line);
     try testing.expectEqualStrings("unexpected field 'post_start'", r.text);
 
     // And one inside a section.
@@ -1004,7 +1060,7 @@ test "a wrong type is refused at its line" {
         "    .containerMounts = .{.{ .kind = .overlay, .dest = \"/x\" }},\n}",
     }) |line| {
         const r = try refusal(a, try std.mem.concatWithSentinel(a, u8, &.{ minimal[0 .. minimal.len - 1], line }, 0));
-        try testing.expectEqual(11, r.line);
+        try testing.expectEqual(10, r.line);
     }
 }
 
@@ -1017,7 +1073,7 @@ test "a missing required field is refused" {
         \\}
     );
     try testing.expectEqual(1, r.line);
-    try testing.expectEqualStrings("missing required field command", r.text);
+    try testing.expectEqualStrings("missing required field container", r.text);
 }
 
 test "notZon bounds what the parser would recurse on, before it does" {

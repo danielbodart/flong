@@ -1,0 +1,21 @@
+.{
+    .user = "u",
+    .command = .{"true"},
+    .container = "box",
+    .closure = "/nix/store/x-nixos-system-box",
+    .cuid = 1000,
+    .cgid = 100,
+    .steps8 = "0123abcd",
+    .name = "box",
+    .environment = .{
+        .{ .name = "HOME", .value = "/root" },
+        .{ .name = "TERM", .value = "xterm" },
+        .{ .name = "NIX_PATH", .value = "${NIX_PATH}:/x" },
+        .{ .name = "WHO", .value = "$(id -un)" },
+        .{ .name = "BARE", .value = "$HOME/x" },
+        .{ .name = "DEFAULTED", .value = "${XDG_STATE_HOME:-$HOME/.local/state}" },
+        .{ .name = "A=B", .value = "x" },
+        .{ .name = "", .value = "x" },
+        .{ .name = "WHO", .value = "again" },
+    },
+}

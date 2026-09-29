@@ -207,7 +207,12 @@ let
     # cannot, and escapes, nix/to-zon.nix's render of escapes.nix: every
     # other character a Nix string can hold, which passes (see
     # escapesRendered below). a-snippet-guard is the control that a
-    # declaration of the wrong shape is refused. These are now the only
+    # declaration of the wrong shape is refused. The payload as `command` or
+    # `exec`, both and neither refused, and the container's `environment`,
+    # what the launch expands and what it refuses to leave for a shell,
+    # were added when the payload lost its wrapper (both-command-and-exec,
+    # neither-command-nor-exec, an-exec-in-place-of-command, an-empty-exec,
+    # an-environment-*). These are now the only
     # cases of those refusals: module.nix no longer asserts them
     # (tests/assertions.nix). Each case NAME's declaration is NAME.zon,
     # GOLDEN the store directory holding them.

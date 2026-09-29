@@ -103,6 +103,15 @@ pub fn argvSlots() [][*:0]const u8 {
     return @ptrCast(a);
 }
 
+/// The environment's pointer slots as the process may rewrite them, as
+/// argvSlots is argv's: the kernel's own, null-terminated past the last.
+/// flong init points one at a string of its own (its PWD). Confined to the
+/// roots as `environ` is.
+pub fn environSlots() [][*:0]const u8 {
+    const e = std.os.environ;
+    return @ptrCast(e);
+}
+
 fn result(comptime T: type, rc: usize) Result(T) {
     return switch (E.init(rc)) {
         .SUCCESS => .{ .ok = if (T == void) {} else @intCast(rc) },

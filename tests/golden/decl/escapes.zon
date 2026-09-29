@@ -13,7 +13,6 @@
     .network = .{
         .forwardPorts = .auto,
     },
-    .payload = "/nix/store/x-payload/bin/flong-payload-box",
     .seccomp = .{
         .tier = .parity,
     },

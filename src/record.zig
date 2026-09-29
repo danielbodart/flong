@@ -403,8 +403,10 @@ fn encode(commands: []const []const [:0]const u8, out: *[path_max]u8) union(enum
 /// the sweep does), and links the name then. error.Aborted when a
 /// terminating signal ended that wait.
 /// `post_stop` is postStop's commands, in order (spec.Spec's), each at
-/// least a word; none, no poststop=.
-pub fn create(sessions: fdt.Held(.dir), h: *const cgroup.Holder, machine: [:0]const u8, post_stop: []const []const [:0]const u8, cgroup_path: []const u8) sig.Error!Record {
+/// least a word; none, no poststop=. `taken`, when given, is set when the
+/// refusal is a name another session holds, whose postStop is not this
+/// launch's to run.
+pub fn create(sessions: fdt.Held(.dir), h: *const cgroup.Holder, machine: [:0]const u8, post_stop: []const []const [:0]const u8, cgroup_path: []const u8, taken: ?*bool) sig.Error!Record {
     // 1. The text. A newline in a value would be a line of its own
     // choosing (:333-341), and a separator in a word a command or a word of
     // its own.
@@ -455,10 +457,16 @@ pub fn create(sessions: fdt.Held(.dir), h: *const cgroup.Holder, machine: [:0]co
             // refuses.
             switch (sweepOne(sessions, machine, h, .wait_ended) catch |e| break :steps e) {
                 .released, .gone => continue,
-                .running => break :steps msg.refuse("a session named {s} is already running", .{machine}),
+                .running => {
+                    if (taken) |t| t.* = true;
+                    break :steps msg.refuse("a session named {s} is already running", .{machine});
+                },
                 // A record the sweep left, a malformed one under the name
                 // included (quirk 5, kept).
-                .left => break :steps msg.refuse("a session named {s} has ended but cannot be released yet", .{machine}),
+                .left => {
+                    if (taken) |t| t.* = true;
+                    break :steps msg.refuse("a session named {s} has ended but cannot be released yet", .{machine});
+                },
             }
         }
     };
@@ -524,6 +532,19 @@ pub fn poststop(list: []const u8, machine: []const u8) error{Aborted}!void {
     var it = std.mem.splitScalar(u8, list, command_sep);
     while (it.next()) |cmd| {
         if (!try poststopOne(cmd, machine)) return;
+    }
+}
+
+/// postStop's commands for a launch that failed before its record held
+/// them (DESIGN.md, "Teardown"): `post_stop` encoded as the record would
+/// keep it, then `poststop`, so they run exactly as the teardown and the
+/// sweep run them, with `$machine` alone. A list the record would have
+/// refused is said, as postStop failing, and not run.
+pub fn poststopCommands(post_stop: []const []const [:0]const u8, machine: []const u8) error{Aborted}!void {
+    var list_buf: [path_max]u8 = undefined;
+    switch (encode(post_stop, &list_buf)) {
+        .ok => |l| if (l.len > 0) try poststop(l, machine),
+        .newline, .separator, .too_long => msg.say("postStop failed for {s}: its commands cannot be kept in a record", .{machine}),
     }
 }
 

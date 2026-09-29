@@ -29,8 +29,12 @@ wrapper it replaced did (`src/launch/assemble.zig`):
 1. Refuse a caller of uid 0 or of primary group 0. Use `/run/user/$UID`,
    which must exist and be the caller's.
 2. `workspace`, then `binds`, then `guard`, each as the caller.
-3. Name the session `<container>-<launcher pid>-<random>`, then run
-   `seccompPolicy`, as the caller, and compile what it prints.
+3. Block the launch's signals and read them from a signalfd. Name the
+   session `<container>-<launcher pid>-<random>`, then run `seccompPolicy`,
+   as the caller, and compile what it prints; then `exec`, when the
+   declaration has it, and read the payload it prints. From here, a
+   prologue or launch that fails before the session's record exists runs
+   `postStop` for the name itself ([Teardown](#teardown)).
 4. Check the depth rule against the caller's writable binds.
 5. Build the id maps from `/etc/subuid` and `/etc/subgid`.
 6. Prepare the root if this closure, prepare program and map have none yet.
@@ -49,7 +53,8 @@ The launch then runs the session, in this order (the full table is in
 7. Fork the mount helper at bwrap's child pid; it mounts once flong init
    reports the root built.
 8. `postStart`, then pasta (with `network`).
-9. Open the gate: flong init execs tini and the payload.
+9. Open the gate: flong init execs tini, and tini the payload, with no
+   shell anywhere in the session.
 10. Wait for the session. Then kill its cgroup, run `postStop` and release
     the rest.
 
@@ -75,22 +80,25 @@ rather than asking its user for shell.
 So nothing is declared by running a command:
 
 - **`command` is an argument list**, `nonEmptyListOf str`: a program and its
-  fixed arguments, to which the launcher's arguments are appended. Anything
-  that needs a script is a package of its own, named by `lib.getExe`.
+  fixed arguments, to which the launcher's arguments are appended, exec'd
+  as it is. Anything that needs a script is a package of its own, named by
+  `lib.getExe`; a payload only the launch can decide is `exec`'s, a command
+  on the host that prints it.
 - **Every mount known at evaluation is the declaration's**: `bindMounts`,
   `tmpfs` and `allowedDevices` on `containers.<name>`, read as the typed
   records they are. There is no hook before the session starts, because
   nothing a session is given at start is unknown at evaluation except the
   caller's directories, which `workspace` and `binds` compute.
-- **The hooks are commands, never shell.** `workspace`, `binds`, `guard` and
-  `seccompPolicy` run at launch because what they answer is known only then
-  (the repository around the caller's working directory, what travels with
-  it, a project's own syscall policy) or is a judgement on this launch;
+- **The hooks are commands, never shell.** `workspace`, `binds`, `guard`,
+  `seccompPolicy` and `exec` run at launch because what they answer is known
+  only then (the repository around the caller's working directory, what
+  travels with it, a project's own syscall policy, the payload a project
+  asks for) or is a judgement on this launch;
   `postStart` and `postStop` because they act on the session. Each is an
   argument list run as it is, with the launcher's arguments after its own
   (they were shell snippets until the declaration became data; see [The
   declaration](#the-declaration)), and all but
-  `workspace` are lists of them, which a module such as frisket's adapter
+  `workspace` and `exec` are lists of them, which a module such as frisket's adapter
   adds to: several modules' lists merge, ordered with `mkBefore` and
   `mkAfter`. flong runs no shell of its own; a hook that wants one names a
   script.
@@ -105,33 +113,94 @@ declaration's hook program, `flong-poststart-<name>` or
 `flong-poststop-<name>` (the declaration's `postStartProgram` and
 `postStopProgram`), which puts `path` on `PATH`, drops the machine name the
 record appends to a `postStop` command, and execs the command. The caller's
-own commands (`workspace`, `binds`, `guard`, `seccompPolicy`) get `path` as
+own commands (`workspace`, `binds`, `guard`, `seccompPolicy`, `exec`) get `path` as
 the declaration's `commandPath`, in front of `PATH`. The prologue exports
 nothing of its own but what the commands are documented to see, so a
 variable of the caller's reaches them and the launch as it came.
 
-## `command` is exec'd through the container's environment
+## The payload is exec'd, with an environment computed on the host
 
-The payload script `cd`s into the workspace and runs
-`bash -c '. /etc/set-environment; exec "$@"'` with `command` and the launcher's
-arguments as that bash's positional parameters. None of them is ever the text
-of a script, so a space, `;`, `$` or glob in any argument arrives as that
-character. The spec is a value inside `flong launch` and bwrap takes each
-path as a whole argument, so nothing on the way splits or expands a word
-either.
+Nothing script-like runs inside a session. flong init execs tini, and tini
+execs the payload: `command` with the launcher's arguments appended, or
+the argument list `exec` printed. No word of either is ever the text of a
+script, so a space, `;`, `$` or glob in any argument arrives as that
+character, and tini finds a program without a `/` on the payload's `PATH`.
+The spec is a value inside `flong launch` and bwrap takes each word as a
+whole argument, so nothing on the way splits or expands one either. flong
+init changes into the workspace before the exec, and sets `PWD` to it, as
+a shell's `cd` did: bwrap set `PWD` to where it left its own working
+directory, and nothing after flong init would set it again.
 
-It goes through `/etc/set-environment` because that file is where the
-container's `PATH` comes from: its system profile,
-`/etc/profiles/per-user/$USER` for the user's `packages`, and every variable
-the declaration exports. An absolute path, such as `lib.getExe` of a package,
-runs as it is: the store is shared.
+Until the payload lost its wrapper, a script in the store did that `cd`
+and ran `bash -c '. /etc/set-environment; exec "$@"'`, because that file is
+where the container's `PATH` comes from (its system profile,
+`/etc/profiles/per-user/$USER` for the user's `packages`) and every variable
+the declaration exports. The file is shell, which nixpkgs generates from
+options (`nixos/modules/config/shells-environment.nix`), so module.nix now
+reads the same options and works out, at evaluation, what the file would
+set, one final value per name: the declaration's computed `environment`.
+It writes the file's text as nixpkgs does and reads it a line at a time,
+as bash would run it, with what the session's environment holds before it:
+
+- `export NAME="TEXT"` and `export NAME=WORD` set NAME. A reference to a
+  name an earlier line set is that line's value. One to a variable only the
+  launch knows the value of, `$HOME`, `$USER`, `$LOGNAME`, `$SHELL`,
+  `$XDG_RUNTIME_DIR` or `$TMPDIR`, stays a reference, `${NAME}`, which
+  `flong launch` fills in (`spec.expand`), with `$$` for a `$`. One to
+  `PATH` before any line sets it is the launch's own, `<closure>/sw/bin`,
+  and to `container` is `flong`. A name nothing sets is unset, since the
+  environment is built from nothing, and expands to nothing as bash expanded
+  it: the profiles' `${XDG_STATE_HOME}` is the case every container has.
+- `export NAME=$NAME` (terminfo's `TERM`) is nothing, and so are
+  nix-channel's three lines, which put `$HOME/.nix-defexpr/channels` in
+  front of `NIX_PATH` when that directory exists: a session's home is the
+  prepared root's, where it does not, and no session has the daemon a
+  `NIX_PATH` would be for.
+- Everything else is refused at evaluation, naming the line: another
+  command, a conditional, a backtick, a backslash, a quote in a value,
+  `$(`, `${NAME:-...}`, a reference to a variable bash sets for itself
+  (`$PWD`, `$UID`, `$SHLVL`) or to one only the launch knows and flong does
+  not expand (`$TERM`, `$COLORTERM`, `$FLONG_BINDS`), and a line setting a
+  variable of the launch's own other than `PATH`. A surprise in the
+  container's configuration fails `nixos-rebuild` with its line, rather
+  than showing up as a wrong value in a session.
+
+The declaration's build compares nixpkgs's file with the text module.nix
+read, byte for byte, so a nixpkgs that writes the file differently fails the
+build rather than drifting from it; and `flong check` holds the computed
+list to its own rules (a name set once, none of the launch's but `PATH`,
+every `$` a `$$` or a reference it fills in). `checks.basic`'s
+environment subtest holds a session's payload's environment to what a bash
+in the same session makes of the container's file, started with the same
+launch variables: equal, but for the three bash sets for itself (`SHLVL`,
+`_`, `OLDPWD`).
 
 The payload's environment is otherwise built from nothing (`--clearenv`), so
 the caller's tokens and agent sockets never reach it. It gets `PATH` (the
-closure's `sw/bin`, until `set-environment` replaces it), `HOME`, `USER`,
-`LOGNAME`, `SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`, `FLONG_BINDS`,
-`container=flong`, `TERM` and, when the caller has it, `COLORTERM`, and its
-hostname is the container's name.
+container's, or the closure's `sw/bin` when the container sets none),
+`HOME`, `USER`, `LOGNAME`, `SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`,
+`FLONG_BINDS`, `container=flong`, `TERM` and, when the caller has it,
+`COLORTERM`; then the container's `environment`; then what `exec` printed.
+No name is set twice: `flong check` refuses a container variable of the
+launch's own but `PATH`, and the launch refuses an `exec` variable that
+either sets. Its hostname is the container's name.
+
+### `exec`: a payload only the launch can decide
+
+`exec` is one command, in place of `command` (a declaration has exactly
+one of them, which `flong check` and a module assertion both hold), run on
+the host as the caller after `seccompPolicy`, with the same environment
+(`$workspace`, `$workspace_mode`, `$binds`, `$machine`, `path` on `PATH`)
+and the launcher's arguments after its own. Its stdout, at most 1 MiB as
+every command's, is NUL-ended fields: `NAME=VALUE` for each variable it
+adds to the payload's environment, one empty field, then the payload's
+whole argument list, at least its program. It is how a consumer decides at
+launch what runs and with what, on the host, where a wrapper script in the
+session used to: the session then runs one exec'd program and nothing
+else. A non-zero exit, output of another shape, a name that is empty, one
+printed twice, and one the launch or the container already sets are each
+a refusal, 1, said under the declaration's name; nothing it prints
+overrides anything silently.
 
 ## Sessions are overlays on a prepared root
 
@@ -241,7 +310,8 @@ directory is a tmpfs of 10% of RAM.
   up again), which prepares afresh or waits on the preparer's lock; so do
   the three points of the prologue that find the cache swept before they
   hold it. There is no count: each turn follows a sweep's rename, an event.
-  A relaunch runs `guard` and `seccompPolicy` again.
+  A relaunch runs `guard`, `seccompPolicy` and `exec` again, under a new
+  `$machine`, after `postStop` has run for the old one.
 
 **Integrity is the caller's.** Anything running as the caller can edit the
 cache, and nothing stored in space the caller can write could stop that.
@@ -296,8 +366,8 @@ so there is no other to choose.
 
 ## Every hook runs as the caller
 
-`workspace`, `binds`, `guard`, `seccompPolicy`, `postStart` and `postStop` all
-run as the caller, with the caller's privilege and no more. A hook that
+`workspace`, `binds`, `guard`, `seccompPolicy`, `exec`, `postStart` and
+`postStop` all run as the caller, with the caller's privilege and no more. A hook that
 configures the session enters its namespaces (see
 [postStart](#poststart-the-gate-and-readiness)); nothing is done as host root.
 
@@ -338,7 +408,24 @@ reaches the launcher.
 `$machine`, the name `postStart` and `postStop` will see: what it approves
 for them can be staged per launch rather than per checkout, where two
 launches of one checkout at once would each apply the other's approval. See
-[Seccomp](#seccomp).
+[Seccomp](#seccomp). **`exec` runs after it**, with the same, and prints
+the payload ([`exec`](#exec-a-payload-only-the-launch-can-decide)).
+
+**What those two stage, `postStop` releases, however the launch ends.**
+From the moment the session is named, before `seccompPolicy`, every way a
+launch can end runs `postStop` for `$machine` exactly once: the session's
+teardown or the sweep, from its record, once the record exists; before
+that, the launch itself (`assemble.Early`), whether the prologue refuses,
+the spec is refused, the cache is swept and flong relaunches under a new
+name, or the launch fails before its record (the holder cannot start, say).
+The prologue blocks the launch's signals and opens its signalfd just before
+it names the session, so a terminating signal while `seccompPolicy` or
+`exec` runs, or the root is prepared, ends that wait as an event, kills the
+command and runs `postStop`, where it once killed the launcher with
+whatever had been staged left behind. A record-less launch that finds its
+name held by another live session does not run `postStop`: that session's
+is not its to run. A SIGKILL before the record exists leaves nothing to run
+it from.
 
 Every hook runs under `set -euo pipefail` with `path` on `PATH`, and every
 one but `postStop` sees the launcher's arguments in `"$@"`. `postStop` runs
@@ -621,9 +708,11 @@ environment; the argv is gone at the exec of tini. In order, it:
    never runs if the launcher fails, is killed or is signalled first (a
    failing hook and a SIGKILL mid-hook were both measured);
 6. changes to the workspace, which is a helper mount made after bwrap built
-   the root, so bwrap's `--chdir` would name the directory underneath it;
+   the root, so bwrap's `--chdir` would name the directory underneath it,
+   and points `PWD` there;
 7. closes every descriptor above stderr (bwrap leaks its namespace
-   descriptors), and execs `tini -g -- payload`.
+   descriptors), and execs `tini -g -- payload`; `PWD` is the workspace,
+   where bwrap left it naming its own working directory.
 
 Any failure before the exec exits 125. tini then stays pid 1, reaping
 orphans and forwarding signals to the payload's group (`-g`).
@@ -1015,8 +1104,10 @@ One function, run whatever stage the launch reached, in this order:
    never at cgroupfs.
 9. The cache lock goes with the process.
 
-Each step happens only for what exists: no record, no `postStop`; no cgroup,
-nothing to kill or wait for. A terminating signal during one of the
+Each step happens only for what exists: no cgroup, nothing to kill or wait
+for; no record, and `postStop` runs from the spec instead, once, since a
+launch that failed before its record has no session to wait for (see
+[Every hook runs as the caller](#every-hook-runs-as-the-caller)). A terminating signal during one of the
 teardown's waits, or a failed kill, blank or removal, leaves the session
 possibly not empty: the teardown then runs no `postStop`, removes nothing,
 and closes the record for the sweeper.
@@ -1280,11 +1371,17 @@ than one that fails to build.
   rule sees it. A `trusted-users` member could also set sandbox options, which is
   root-equivalent. A read-only local store would also miss paths registered
   after the database's last checkpoint. See PLAN.md's `nix` inside a session.
-- **A payload `PATH` option.** The payload's `PATH` is the one
-  `/etc/set-environment` sets, so the workload's tools belong in the
-  container's `environment.systemPackages` or the user's `packages`, and a
-  program outside them is named by absolute path, with `lib.getExe`. `path` is
-  for the hooks only.
+- **A payload `PATH` option.** The payload's `PATH` is the one the
+  container's `/etc/set-environment` sets, computed at evaluation, so the
+  workload's tools belong in the container's `environment.systemPackages`
+  or the user's `packages`, and a program outside them is named by absolute
+  path, with `lib.getExe`, or printed by `exec`. `path` is for the hooks
+  only.
+- **A shell's environment.** `environment.extraInit` and the rest of
+  `/etc/set-environment` are shell, and no shell runs in a session to run
+  them; what cannot be computed without one is refused at evaluation (see
+  [The payload is
+  exec'd](#the-payload-is-execd-with-an-environment-computed-on-the-host)).
 - **`machinectl`.** Sessions are not machines: `systemctl --user` shows and
   stops them, and `nsenter --user --net` (or `--mount --pid`) enters one.
 
@@ -1611,7 +1708,8 @@ with one parser:
   `.{ .size = "8G" }`). What the parse cannot check, a type's `patterns`
   and `ranges` say. An unknown field or a wrong type is a parse error at
   its line and column. The computed fields (`Declaration.computed`: the
-  closure, the ids, the filters, `commandPath`, the hook programs) are
+  closure, the ids, the filters, `commandPath`, the hook programs, the
+  container's `environment`) are
   worked out by module.nix from `containers.<name>`; a configuration made
   without Nix writes them itself.
 - **One description, the doc comment.** Each field's doc comment is its
@@ -1857,11 +1955,16 @@ the declaration's spelling, where the launcher's checks are canonical and
 stay the authority; and what only a declaration can say: the mask depth
 rule against its own writable binds, devices, seccomp settings with no
 tier, the container's ids, the patterns and ranges `src/decl.zig`
-declares, an empty command, and a NUL in any string, which ZON can write
-and an argv or a path would cut short. `tests/golden/decl/` is its cases,
+declares, an empty command, a payload that is not exactly one of `command`
+and `exec`, a container `environment` a shell would have to expand, and a
+NUL in any string, which ZON can write and an argv or a path would cut
+short. `tests/golden/decl/` is its cases,
 each refusal and its accepted counterpart. `module.nix`'s assertions keep
 only what NixOS alone can say, of `containers.<name>`, the host and the
-option types (`tests/assertions.nix`, evaluated in shards), and
+option types (`tests/assertions.nix`, evaluated in shards) -- the
+container's `/etc/set-environment` among them, each line flong cannot
+compute without a shell refused and what it can computed as the file
+would set it --, and
 `assertions-decl` builds a refused declaration's file to hold that the
 refusal surfaces there, in `flong check`'s words.
 
@@ -1967,8 +2070,9 @@ sweeper reads a new launcher's records.
   returning single-threaded `main` ends in `exit`. Nothing with a side
   effect is deferred across a fork.
 - **Signals.** The launcher blocks TERM, HUP, INT, QUIT, WINCH and CONT
-  first and reads them from a signalfd, so every wait ends on one as an
-  event and none interrupts a step half done. SIGPIPE is ignored. SIGCHLD is
+  once its prologue has run the commands that stage nothing, just before
+  it names the session, and reads them from a signalfd, so every wait from
+  there ends on one as an event and none interrupts a step half done. SIGPIPE is ignored. SIGCHLD is
   reset to its default, in the sweeper too: an ignored SIGCHLD survives
   `execve`, the kernel then reaps children itself, and `waitid` says
   `ECHILD`, which would lose a helper's, a hook's or pasta's failure. A
@@ -2026,7 +2130,7 @@ sweeper reads a new launcher's records.
 
 | # | order | where | held by |
 |---|---|---|---|
-| 1 | the prologue: the time as `main`'s first statement; SIGCHLD default; the wrapper's work, in its order, ahead of the launch's own (`assemble.run`, itself one linear function, its refusals under the declaration's name, 1); then block signals, SIGPIPE ignored; the spec's checks over the value, refusing root first (`spec.validate`); the signalfd; `launcher-start`; the state directory; the cache lock (swept: relaunch this binary with its argv); the prologue's own shared lock on a cold cache closed; close what was inherited. Nothing chdirs before step 4 | `launch.zig`'s `launch`, `launch/assemble.zig`'s `run` | spec_test's validate cases, wrapper_test, golden's launch set, the payload-descriptor subtest |
+| 1 | the prologue: the time as `main`'s first statement; SIGCHLD default; the wrapper's work, in its order, ahead of the launch's own (`assemble.run`, itself one linear function, its refusals under the declaration's name, 1), blocking signals, ignoring SIGPIPE and opening the signalfd just before it names the session, and from there running `postStop` for the name on any failure (`assemble.Early`); the spec's checks over the value, refusing root first (`spec.validate`); `launcher-start`; the state directory; the cache lock (swept: relaunch this binary with its argv); the prologue's own shared lock on a cold cache closed; close what was inherited. Nothing chdirs before step 4 | `launch.zig`'s `launch`, `launch/assemble.zig`'s `run` | spec_test's validate cases, wrapper_test, golden's launch set, the payload-descriptor subtest |
 | 2 | the child's ends close at once after bwrap's spawn, whether or not it succeeded: info, ready and gate write ends, the seccomp files, U2, the resolver's memfd | `run` | the gate subtests |
 | 3 | the ready pipe's read end closes right after the helper's fork, so the helper alone sees the byte or EOF | `run` | the mount subtests |
 | 4 | U2 is strictly sequential: the grandchild unshares and writes `u`; the helper writes the maps, then `m`; the grandchild then writes `max_user_namespaces` and `n`; only then the helper sends the pid and waits. On failure every pipe closes before any reap, then the map programs are killed and the helpers waited for | `ns.zig` | the U2 tests in `checks.native` |
@@ -2173,10 +2277,10 @@ is how the tests quote them. A list is empty when the launch has none.
 | `pasta_args` (`pasta-arg`) | pasta's port and DNS flags; only with `network` |
 | `pasta_wait` (`pasta-wait`) | fixed `forwardPorts`: the teardown waits for pasta's exit; only with `network` |
 | `resolv_conf` | a networked session's `/etc/resolv.conf`, whole, which bwrap binds read-only from a memfd |
-| `env` (`bwrap-arg`) | the payload's environment, built from nothing: `--clearenv`, then a `--setenv` for each, its name non-empty and without `=` |
+| `env` (`bwrap-arg`) | the payload's environment, built from nothing: the launch's own, the container's `environment` expanded, `exec`'s; `--clearenv`, then a `--setenv` for each, its name non-empty and without `=` |
 | `hostname` (`bwrap-arg --hostname`) | bwrap's `--hostname`, not empty |
 | `trace` | stage timestamps on stderr, `T <µs> <stage>` |
-| `command` | the payload, run as `tini -g -- COMMAND…`; not empty |
+| `command` | the payload, run as `tini -g -- COMMAND…`, tini finding a program without a `/` on the payload's `PATH`: the declaration's `command` and the launcher's arguments, or what `exec` printed; not empty |
 
 bwrap is given no option but the fixed part and the three typed ones (the
 resolver's file, the environment, the hostname), so a path mount can only
@@ -2221,9 +2325,9 @@ prologue does the wrapper's work, building the spec (`assemble.run`; see
 
 | # | step | call | trace stage |
 |---|---|---|---|
-| 0 | SIGCHLD to its default; the prologue, which builds the spec | `sig.defaultChld`, `assemble.run` | `prologue-start` |
-| 1 | block signals, ignore SIGPIPE | `sig.block`, `sig.ignorePipe` | |
-| 2 | the spec's checks, refusing uid 0 first; then the signalfd | `spec.validate`, `sig.openSignalfd` | `launcher-start` |
+| 0 | SIGCHLD to its default; the prologue, which builds the spec, and before it names the session blocks signals, ignores SIGPIPE and opens the signalfd | `sig.defaultChld`, `assemble.run` (`sig.block`, `sig.ignorePipe`, `sig.openSignalfd`) | `prologue-start` |
+| 1 | from here until the record, a failure runs `postStop` for the session's name, once | `assemble.Early` | |
+| 2 | the spec's checks, refusing uid 0 first | `spec.validate` | `launcher-start` |
 | 3 | open and check the state directory | `prologue.stateOpen` (`record.stateOpen`) | |
 | 4 | lock the cache shared; swept: exec flong again with the launch's argv | `prologue.cacheLock`, `prologue.relaunchSwept` | `cache-locked` |
 | 5 | close the prologue's own shared lock on a cold cache, then every inherited descriptor but our own | `prologue.closeUntracked` | |
@@ -2243,7 +2347,11 @@ prologue does the wrapper's work, building the spec (`assemble.run`; see
 | 19 | teardown | `teardown` | `poststop-done`, `pasta-gone`, `released` |
 
 A failure or a terminating signal at any step before the gate goes straight
-to the teardown, and the gate is never written.
+to the teardown, and the gate is never written. Before step 9 there is no
+record to run `postStop` from, so a failure there runs it from the spec
+(`Launch.early`), once, and a failure in steps 2 to 5, before there is a
+`Launch`, does the same before it exits; a relaunch at step 4 runs it
+before the exec, since the relaunch names another session.
 
 - **The helper is forked at child-pid, not at the ready byte**, so its source
   work overlaps bwrap's setup; it does nothing in the session's mount
@@ -2263,9 +2371,9 @@ to the teardown, and the gate is never written.
 |---|---|
 | the payload's | the gate opened: bwrap's status, which is pid 1's, which is tini's, which is the payload's; 128+n when a signal killed it |
 | 125 | the payload never ran: a refusal of the spec, a failed step, a failing hook, pasta failing (a host port in use), bwrap failing, flong init's gate EOF, a relaunch that could not exec. stderr says which |
-| 1 | the prologue refused, before the spec: the declaration, the caller, the workspace, a command, the maps, the prepared root |
+| 1 | the prologue refused, before the spec: the declaration, the caller, the workspace, a command, `exec`'s output, the maps, the prepared root |
 | 2 | a usage error, or a name with no declaration |
-| 128+n | a terminating signal n reached the launcher before the gate: the launch was aborted and torn down |
+| 128+n | a terminating signal n reached the launcher before the gate, from the moment the prologue names the session: the launch was aborted, `postStop` run and the rest torn down. Before then, while `workspace`, `binds` and `guard` run, a signal ends the launcher as its default action |
 
 After the gate a signal is forwarded, not acted on, so the payload's status
 tells what happened: `^C` is 130 under a pty and in a pipeline, `^]^]^]` is

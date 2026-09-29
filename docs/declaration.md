@@ -59,23 +59,62 @@ its uid.
 
 ### `command`
 
-- type: `command`
-- required
+- type: `command, or null`
+- default: `null`
 - ordered
 
 The payload, as an argument list: the program, then its fixed
 arguments. The launcher's own arguments are appended, and it is
-exec'd as `user` in the workspace. No element of either list is
-read by a shell, so a space, a `;` or a `$` in one is passed as it
-is.
+exec'd as `user` in the workspace, under `flong init` and tini,
+with nothing between: no shell reads any element of either list,
+so a space, a `;` or a `$` in one is passed as it is.
 
-It is exec'd after the container's `/etc/set-environment` has been
-sourced, so a bare name is looked up on the container's `PATH` --
-its `environment.systemPackages`, the user's `packages` -- and
-the payload inherits every variable the container exports. An
+Its environment is the container's, computed on the host: what
+its `/etc/set-environment` would set (the declaration's
+`environment`), so a bare name is looked up on the container's
+`PATH` -- its `environment.systemPackages`, the user's `packages`
+-- and the payload has every variable the container exports. An
 absolute path, such as `lib.getExe` of a package, is run as it
 is. Anything that needs a script is a package of its own, named
 here by `lib.getExe`.
+
+A declaration has `command` or `exec`, never both and never
+neither.
+
+### `exec`
+
+- type: `command, or null`
+- default: `null`
+- ordered
+
+A command printing the payload's argument list, and variables to
+add to its environment, for a payload that only the launch can
+decide: run on the host as the caller, in place of `command`,
+after `seccompPolicy`, with the launcher's arguments after its
+own and the environment `seccompPolicy` has -- `$workspace`,
+`$workspace_mode`, `$binds` and `$machine` -- and `path` on
+`PATH`.
+
+Its stdout, at most 1 MiB, is fields each ended by a NUL byte, as
+`printf '%s\0'` prints them: `NAME=VALUE` for each variable, then
+one empty field, then the payload's argument list, at least its
+program. The list is the payload's whole: the launcher's arguments
+are not appended again. A program without a `/` is looked up on
+the payload's `PATH`, as `command`'s is.
+
+A non-zero exit refuses the launch, and so does output that is not
+that shape, a name that is empty or holds a `=`, a name printed
+twice, and a name the session already sets: the container's
+`environment`, or one of the launch's own (`PATH`, `HOME`, `USER`,
+`LOGNAME`, `SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`, `FLONG_BINDS`,
+`container`, `TERM`, `COLORTERM`). Nothing is overridden silently.
+
+Once it has run, as once `seccompPolicy` has, `postStop` runs for
+the session's `$machine` however the launch ends, even when it
+fails before the session starts, so whatever it staged for
+`$machine` is released. It runs again when the launcher
+relaunches itself, under a new `$machine`, the old one released
+first.
 
 ### `workspace`
 
@@ -721,17 +760,40 @@ The declaration's own name, `<name>` in `flong.<name>`: what every
 refusal the launch makes starts with, `<name>: ...`, and the name
 of its command.
 
-### `payload`
+### `environment`
+
+- type: `list of struct`
+- default: `.{}`
+- ordered
+- computed
+
+The payload's environment from the container: what its
+`/etc/set-environment` would set, worked out at evaluation from
+its configuration, one entry per name, each with its final value.
+In a value, `${NAME}` is filled in at launch with the session's
+value of NAME, one of `HOME`, `USER`, `LOGNAME`, `SHELL`,
+`XDG_RUNTIME_DIR` and `TMPDIR`, and `$$` is one `$`; any other `$`
+is refused. It may set `PATH`, which replaces the launch's own,
+and none of the launch's other names. Under NixOS, module.nix
+computes it, and refuses at evaluation a container whose file says
+what cannot be computed without a shell.
+
+### `environment.*.name`
 
 - type: `string`
 - required
 - computed
 
-The program that runs `command` inside the session, as `user`: it
-takes the workspace, changes into it, sources the container's
-`/etc/set-environment` and execs `command` with the launcher's
-arguments after it. module.nix builds it from `command`
-(`mkPayload`); the launch hands it to `flong init` as the payload.
+The variable's name.
+
+### `environment.*.value`
+
+- type: `string`
+- required
+- computed
+
+Its value, with `${NAME}` references to the launch's own
+variables and `$$` for a `$`.
 
 ### `seccompTierFilter`
 

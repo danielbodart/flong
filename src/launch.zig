@@ -140,6 +140,12 @@ const Launch = struct {
 
     /// the payload may have run: its status is the launch's
     gate_opened: bool = false,
+    /// postStop's commands for the session's name while no record holds
+    /// them: run by the teardown of a launch that failed before its record
+    /// was made, and done once the record holds them, or once another
+    /// session is found holding the name, whose postStop is not this
+    /// launch's (record.create's `taken`)
+    early: assemble.Early,
 };
 
 const usage = "usage: flong launch DECL.zon|NAME [-- ARGS...]";
@@ -216,12 +222,19 @@ fn outOfMemory() noreturn {
     proc.exit(prologue.exit_refused);
 }
 
+/// A launch that ends before its record: postStop's commands for its
+/// name, then `status`.
+fn refuseEarly(early: *assemble.Early, status: u8) noreturn {
+    early.runPostStop();
+    proc.exit(status);
+}
+
 /// Ordering checkpoint 1 (flong-launch.c:847-925): the prologue, which
 /// does the wrapper's work in its order (launch/assemble.zig), then the
 /// launcher's own steps on the spec it assembled, as a value. The prologue
-/// runs before the signals are blocked, as the wrapper ran before flong
-/// launch; SIGCHLD's default comes first, so a command's status is seen
-/// whatever the caller left it as. `argv` is the process's whole, a
+/// blocks the signals itself, once the commands that need no cleanup have
+/// run and before it names the session; SIGCHLD's default comes first, so
+/// a command's status is seen whatever the caller left it as. `argv` is the process's whole, a
 /// relaunch's; the relaunch at the cache lock execs this binary with it
 /// (quirk 2), as each of the prologue's own does. Nothing here changes
 /// directory: `argv` may be relative to the caller's (quirk 30).
@@ -234,59 +247,63 @@ fn launch(start: sys.timespec, arena: Allocator, d: *const decl.Declaration, arg
 
     // 2. The prologue: the caller, the workspace, the commands, the maps,
     // the prepared root and the payload's identity, then the spec. Its
-    // refusals are the wrapper's, 1; the spec's, 125.
+    // refusals are the wrapper's, 1; the spec's, 125; a terminating signal
+    // ends it with 128+n. It blocks the launch's signals and opens the
+    // signalfd before it names the session (assemble.zig's step 5): from
+    // there on a wait ends on a terminating signal as an event, SIGPIPE is
+    // ignored, and a failure runs postStop for the session's name.
     msg.tracing = if (assemble.getenv(envp, "FLONG_TRACE")) |t| t.len > 0 else false;
     msg.traceAt(start, "prologue-start");
     const a = assemble.run(arena, d, .{ .argv = argv, .args = args, .environ = envp }, tools) catch |err| proc.exit(switch (err) {
-        error.Reported, error.Aborted => prologue.exit_refused,
+        error.Reported => prologue.exit_refused,
+        error.Aborted => 128 + sig.abort_signal,
         error.NotRun => not_run,
     });
     const s = &a.spec;
+    const old_mask = a.old_mask;
+    // From here until the record holds them, postStop's commands are the
+    // launch's to run on a failure, once (`Launch.early`).
+    var early: assemble.Early = .{ .post_stop = s.post_stop, .machine = s.machine };
 
-    // 3. Signals are read from a signalfd, so every wait can end on one as
-    // an event, and none interrupts a step half done. They are blocked now
-    // and stay queued. SIGPIPE is ignored (:857-877).
-    const old_mask = sig.block() catch proc.exit(not_run);
-    sig.ignorePipe();
-
-    // 4. The spec's checks, over the value, refusing root first
+    // 3. The spec's checks, over the value, refusing root first
     // (spec.validate; :879-881).
-    spec.validate(s) catch proc.exit(not_run);
+    spec.validate(s) catch refuseEarly(&early, not_run);
 
-    // 5. The signalfd (:882-886).
-    sig.openSignalfd() catch proc.exit(not_run);
-
-    // 6. The trace flag; the stage is when the launch proper began.
+    // 4. The trace flag; the stage is when the launch proper began.
     msg.tracing = s.trace;
     msg.trace("launcher-start");
 
-    // 7. DESIGN.md's step 3: the state directory and its sessions/
+    // 5. DESIGN.md's step 3: the state directory and its sessions/
     // (:891-893).
-    const state = prologue.stateOpen(s.state) catch proc.exit(not_run);
+    const state = prologue.stateOpen(s.state) catch refuseEarly(&early, not_run);
 
-    // 8. Step 4, before the prologue's own shared lock goes: swept,
-    // relaunch this binary with the process's argv. A terminating signal
-    // ends the wait for a cache being swept, and the launch then exits the
-    // way teardown would say (:895-907).
-    const cache = switch (prologue.cacheLock(s.cache) catch |err| proc.exit(switch (err) {
+    // 6. Step 4, before the prologue's own shared lock goes: swept,
+    // relaunch this binary with the process's argv, having run postStop
+    // for this session's name, since the relaunch names another. A
+    // terminating signal ends the wait for a cache being swept, and the
+    // launch then exits the way teardown would say (:895-907).
+    const cache = switch (prologue.cacheLock(s.cache) catch |err| refuseEarly(&early, switch (err) {
         error.Aborted => 128 + sig.abort_signal,
         error.Reported => not_run,
     })) {
         .locked => |h| h,
-        .swept => proc.exit(prologue.relaunchSwept(arena, s.cache, argv, old_mask, @ptrCast(envp.ptr))),
+        .swept => {
+            early.runPostStop();
+            proc.exit(prologue.relaunchSwept(arena, s.cache, argv, old_mask, @ptrCast(envp.ptr)));
+        },
     };
     msg.trace("cache-locked");
 
-    // 9. The cold path's shared lock, which held the cache from the
+    // 7. The cold path's shared lock, which held the cache from the
     // prepare to here, as the wrapper's descriptor did into flong launch.
     if (a.cold) |c| c.close();
 
-    // 10. Step 5: whatever else was inherited. The table holds the
+    // 8. Step 5: whatever else was inherited. The table holds the
     // signalfd, the state and sessions directories and the cache
     // (:909-924).
-    prologue.closeUntracked() catch proc.exit(not_run);
+    prologue.closeUntracked() catch refuseEarly(&early, not_run);
 
-    var l: Launch = .{ .arena = arena, .s = s, .environ = a.environ, .default_envp = @ptrCast(a.environ.ptr), .state = state, .cache = cache };
+    var l: Launch = .{ .arena = arena, .s = s, .environ = a.environ, .default_envp = @ptrCast(a.environ.ptr), .state = state, .cache = cache, .early = early };
     proc.exit(teardown(&l, run(&l)));
 }
 
@@ -338,7 +355,12 @@ fn run(l: *Launch) sig.Error!u8 {
     // 9. The record, locked, naming the cgroup the session will have
     // (:724-730).
     const cg_path = try cgroup.sessionPath(holder, s.container, s.machine);
-    l.rec = try record.create(l.state.sessions, holder, s.machine, s.post_stop, cg_path.slice());
+    var taken = false;
+    l.rec = record.create(l.state.sessions, holder, s.machine, s.post_stop, cg_path.slice(), &taken) catch |err| {
+        if (taken) l.early.done = true;
+        return err;
+    };
+    l.early.done = true;
     msg.trace("recorded");
 
     // 10. U1, then U2 (:732-733). U1 is held until exit; U2 is bwrap's
@@ -559,7 +581,9 @@ fn teardown(l: *Launch, result: sig.Error!u8) u8 {
     // 4. postStop's commands, in order, as the record lists them. A
     // failing one is reported, ends the list and does not change the status
     // (quirk 6); an aborted one keeps poststop= in the record, which is
-    // closed, so the sweeper runs the list again.
+    // closed, so the sweeper runs the list again. A launch that failed
+    // before its record has no session to wait for: its commands run from
+    // the spec, once (`early`).
     if (l.rec) |*rec| {
         if (settled and rec.poststopList() != null) {
             if (record.poststop(rec.poststopList().?, l.s.machine)) |_| {
@@ -568,7 +592,7 @@ fn teardown(l: *Launch, result: sig.Error!u8) u8 {
                 } else |_| settled = false;
             } else |_| settled = false;
         }
-    }
+    } else l.early.runPostStop();
 
     // 5. Fixed forwardPorts bind host ports: pasta must have let them go
     // before the next launch binds them again. Nothing else waits for

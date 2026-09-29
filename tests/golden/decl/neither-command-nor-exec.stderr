@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/neither-command-nor-exec.zon: flong.box has neither `command` nor `exec`, so nothing names the payload.

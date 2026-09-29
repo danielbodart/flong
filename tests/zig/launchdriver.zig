@@ -300,7 +300,7 @@ fn run(gpa: std.mem.Allocator, args: []const [*:0]const u8) !void {
         const words = try gpa.alloc([:0]const u8, a.len - 4);
         for (words, a[4..]) |*w, x| w.* = std.mem.span(x);
         const one = [_]spec.Command{words};
-        var rec = try record.create(state.sessions, &h, machine, if (words.len > 0) one[0..] else one[0..0], path.slice());
+        var rec = try record.create(state.sessions, &h, machine, if (words.len > 0) one[0..] else one[0..0], path.slice(), null);
         var s = try cgroup.sessionCreate(&h, std.mem.span(a[2]), machine, &[_]spec.Limit{});
         s.closeAll();
         try rec.setLeader(linux.getpid());

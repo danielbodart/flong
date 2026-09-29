@@ -31,7 +31,10 @@
 //!    never runs.
 //! 7. changes to DIR. The workspace is a helper mount made after bwrap built
 //!    the root, so this has to follow the gate; bwrap's --chdir would name the
-//!    directory underneath it.
+//!    directory underneath it. PWD is then DIR: bwrap set it to where it
+//!    left its own working directory, and the payload is exec'd with no
+//!    shell to set it again, so a program that trusts $PWD, as a shell's
+//!    `pwd` does, would be told the wrong directory.
 //! 8. closes every descriptor above stderr (bwrap leaks its namespace fds),
 //!    and execs tini -g -- COMMAND.
 //!
@@ -55,6 +58,25 @@ const tini = std.fmt.comptimePrint("{s}", .{config.tini});
 /// The groups, parsed (flong-init.c:113-138's calloc): at most NGROUPS_MAX,
 /// counted before any is parsed.
 var gids: [sys.ngroups_max]u32 = undefined;
+
+/// `PWD=DIR`, the payload's PWD (step 7): DIR is shorter than PATH_MAX, or
+/// the chdir before it would have failed.
+var pwd_buf: ["PWD=".len + sys.path_max:0]u8 = undefined;
+
+/// Points the environment's `PWD=` slot at `PWD=dir`, written into `buf`,
+/// or leaves the environment as it is when it has no such slot, or `dir` is
+/// PATH_MAX or longer. bwrap always sets PWD, so the slot is there.
+pub fn setPwd(envp: [][*:0]const u8, dir: []const u8, buf: *["PWD=".len + sys.path_max:0]u8) void {
+    if (dir.len >= sys.path_max) return;
+    for (envp) |*e| {
+        if (!std.mem.startsWith(u8, std.mem.span(e.*), "PWD=")) continue;
+        @memcpy(buf[0.."PWD=".len], "PWD=");
+        @memcpy(buf["PWD=".len..][0..dir.len], dir);
+        buf["PWD=".len + dir.len] = 0;
+        e.* = buf[0 .. "PWD=".len + dir.len :0].ptr;
+        return;
+    }
+}
 
 /// s whole as a decimal number: no sign, no blanks, no more than max
 /// (flong-init.c:86-99). The C's strtoul, after its check that the first
@@ -205,7 +227,7 @@ pub fn tiniArgv(argv: [][*:0]const u8) [*:null]const ?[*:0]const u8 {
 /// flong-init.c:179-238. Ordering checkpoint 9 (DESIGN.md): one linear
 /// function, each step numbered as the header's list. `argv` is the
 /// kernel's, from the subcommand's word on; `envp` the kernel's environ.
-pub fn main(argv: [][*:0]const u8, envp: []const [*:0]const u8) noreturn {
+pub fn main(argv: [][*:0]const u8, envp: [][*:0]const u8) noreturn {
     msg.prog = "flong init";
     msg.mode = .whole;
 
@@ -252,11 +274,12 @@ pub fn main(argv: [][*:0]const u8, envp: []const [*:0]const u8) noreturn {
     const got = must(sys.read(gate, &byte), "waiting at the gate");
     if (got == 0) refuse("the gate closed without opening: not starting the payload", .{});
 
-    // 7. DIR.
+    // 7. DIR, and PWD with it.
     switch (sys.chdir(dir)) {
         .ok => {},
         .err => |e| fail(e, "changing to {s}", .{dir}),
     }
+    setPwd(envp, std.mem.span(dir), &pwd_buf);
     // 8. Every descriptor above stderr, then the trace and the exec.
     must(sys.closeRange(3, ~@as(u32, 0), 0), "closing inherited descriptors");
 
@@ -270,6 +293,19 @@ pub fn main(argv: [][*:0]const u8, envp: []const [*:0]const u8) noreturn {
 // ---- tests ----
 
 const testing = std.testing;
+
+test "setPwd points PWD's slot at DIR, and leaves an environment without one" {
+    var buf: ["PWD=".len + sys.path_max:0]u8 = undefined;
+    var env = [_][*:0]const u8{ "HOME=/home/alice", "PWD=/home/alice", "PWDX=1" };
+    setPwd(&env, "/srv/work", &buf);
+    try testing.expectEqualStrings("HOME=/home/alice", std.mem.span(env[0]));
+    try testing.expectEqualStrings("PWD=/srv/work", std.mem.span(env[1]));
+    try testing.expectEqualStrings("PWDX=1", std.mem.span(env[2]));
+    var none = [_][*:0]const u8{ "PWDX=1", "HOME=/h" };
+    setPwd(&none, "/srv/work", &buf);
+    try testing.expectEqualStrings("PWDX=1", std.mem.span(none[0]));
+    try testing.expectEqualStrings("HOME=/h", std.mem.span(none[1]));
+}
 
 test "decimal: digits only, within max" {
     try testing.expectEqual(@as(?u64, 3), decimal("3", 10));

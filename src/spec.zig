@@ -293,8 +293,119 @@ fn idmapCovers(m: []const IdMap, id: u64) bool {
 /// An environment variable's name, for --setenv (flong-spec.c:311-317),
 /// refused in the words of the argv spec's bwrap-arg.
 fn envName(v: []const u8) Error!void {
-    if (v.len == 0 or std.mem.indexOfScalar(u8, v, '=') != null)
-        return msg.refuse("spec: bwrap-arg: '{s}' is not a variable name", .{v});
+    if (!isEnvName(v)) return msg.refuse("spec: bwrap-arg: '{s}' is not a variable name", .{v});
+}
+
+// ---- the payload's environment ----
+//
+// Built from nothing, in three parts, none of which may set a name another
+// already sets (DESIGN.md, "The payload is exec'd, with an environment
+// computed on the host"):
+//
+//   fixed        what the launch sets in every session: `fixed_env`
+//   declared     the declaration's `environment`, what the container's
+//                /etc/set-environment would have set, which module.nix
+//                works out at evaluation; it may set PATH, which then
+//                replaces the fixed one, and nothing else of `fixed_env`
+//   the hook's   what `exec` printed, if the declaration has one
+//
+// A declared value is text in which `${NAME}` is a reference to one of
+// `expandable`, filled in at launch, and `$$` is one `$`: any other `$` is
+// refused by flong check, so the launch expands nothing it does not know.
+
+/// Every name the launch sets for the payload itself, whatever the
+/// declaration says: the declared environment may set PATH, and none of the
+/// others; the hook may set none of them. COLORTERM is in the list though a
+/// launch sets it only when the caller has it, so a declaration means the
+/// same whichever terminal it is launched from.
+pub const fixed_env = [_][]const u8{ "PATH", "HOME", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR", "TMPDIR", "FLONG_BINDS", "container", "TERM", "COLORTERM" };
+
+/// The fixed names a declared value may refer to as `${NAME}`: those whose
+/// value /etc/set-environment would have read from the launch's own, and
+/// which only the launch knows.
+pub const expandable = [_][]const u8{ "HOME", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR", "TMPDIR" };
+
+/// Whether `v` names a variable, as --setenv and execve take one: not
+/// empty, and no `=`, which would end the name early. The declaration's
+/// `environment` and the `exec` hook's names are judged by it too.
+pub fn isEnvName(v: []const u8) bool {
+    return v.len > 0 and std.mem.indexOfScalar(u8, v, '=') == null;
+}
+
+/// Whether `word` is one of `set`.
+pub fn isOneOf(set: []const []const u8, word: []const u8) bool {
+    for (set) |n| if (eql(n, word)) return true;
+    return false;
+}
+
+/// The first `$` of a declared value that is neither `$$` nor `${NAME}` of
+/// one of `expandable`, as the text from it to the end of what it
+/// introduces, or null when every one is: flong check's judgement of a
+/// value, which `expand` then never meets.
+pub fn badReference(value: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, value, i, '$')) |at| {
+        switch (reference(value, at)) {
+            .dollar => i = at + 2,
+            .name => |n| i = at + 3 + n.len,
+            .bad => |len| return value[at..][0..len],
+        }
+    }
+    return null;
+}
+
+const Reference = union(enum) {
+    /// `$$`
+    dollar,
+    /// `${NAME}`, NAME one of `expandable`
+    name: []const u8,
+    /// anything else: this many bytes from the `$`, up to its `}` when it
+    /// has one, else the name after it, or the one byte that is not one
+    bad: usize,
+};
+
+/// What the `$` at `value[at]` introduces.
+fn reference(value: []const u8, at: usize) Reference {
+    const rest = value[at + 1 ..];
+    if (rest.len > 0 and rest[0] == '$') return .dollar;
+    if (rest.len > 0 and rest[0] == '{') {
+        if (std.mem.indexOfScalar(u8, rest, '}')) |end| {
+            const n = rest[1..end];
+            if (isOneOf(&expandable, n)) return .{ .name = n };
+            return .{ .bad = end + 2 };
+        }
+    }
+    var n: usize = 0;
+    while (n < rest.len and (std.ascii.isAlphanumeric(rest[n]) or rest[n] == '_')) n += 1;
+    if (n == 0 and rest.len > 0) n = 1;
+    return .{ .bad = 1 + n };
+}
+
+/// A declared value with each `${NAME}` replaced by `values[i]`, NAME being
+/// `expandable[i]`, and each `$$` by `$`, in `gpa`; flong check has passed
+/// the value (`badReference`), so a `$` it would refuse is kept as it is.
+pub fn expand(gpa: Allocator, value: []const u8, values: *const [expandable.len][]const u8) Allocator.Error![:0]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, value, i, '$')) |at| {
+        try out.appendSlice(gpa, value[i..at]);
+        switch (reference(value, at)) {
+            .dollar => {
+                try out.append(gpa, '$');
+                i = at + 2;
+            },
+            .name => |n| {
+                for (expandable, values) |e, v| if (eql(e, n)) try out.appendSlice(gpa, v);
+                i = at + 3 + n.len;
+            },
+            .bad => {
+                try out.append(gpa, '$');
+                i = at + 1;
+            },
+        }
+    }
+    try out.appendSlice(gpa, value[i..]);
+    return out.toOwnedSliceSentinel(gpa, 0);
 }
 
 /// The checks across fields (flong-spec.c:680-706), `validate`'s tail: a
@@ -576,6 +687,37 @@ test "the extents' overlap and cover" {
     try testing.expect(idmapCovers(&m, 65536));
     try testing.expect(!idmapCovers(&m, 65537));
     try testing.expect(idmapCovers(&.{.{ .inside = id_max, .outside = 1, .count = 1 }}, id_max));
+}
+
+test "a declared value refers to the six the launch fills in, and $$ is one $" {
+    try testing.expectEqual(null, badReference(""));
+    try testing.expectEqual(null, badReference("/etc/profiles/per-user/${USER}/bin:${HOME}/.nix-profile/bin"));
+    try testing.expectEqual(null, badReference("a$$b$$"));
+    try testing.expectEqualStrings("$", badReference("a$").?);
+    try testing.expectEqualStrings("$HOME", badReference("$HOME/x").?);
+    try testing.expectEqualStrings("${PATH}", badReference("${HOME}:${PATH}").?);
+    try testing.expectEqualStrings("${HOME:-/x}", badReference("${HOME:-/x}/y").?);
+    try testing.expectEqualStrings("${", badReference("${HOME").?);
+    try testing.expectEqualStrings("$(", badReference("$(id)").?);
+    try testing.expectEqualStrings("${}", badReference("${}").?);
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const values = [expandable.len][]const u8{ "/home/alice", "alice", "alice", "/bin/bash", "/run/user/1000", "/tmp" };
+    try testing.expectEqualStrings("/etc/profiles/per-user/alice/bin:/home/alice/.nix-profile/bin", try expand(a, "/etc/profiles/per-user/${USER}/bin:${HOME}/.nix-profile/bin", &values));
+    try testing.expectEqualStrings("$x/tmp$", try expand(a, "$$x${TMPDIR}$$", &values));
+    try testing.expectEqualStrings("plain", try expand(a, "plain", &values));
+    try testing.expectEqualStrings("${LOGNAME}", try expand(a, "$${LOGNAME}", &values));
+}
+
+test "a variable's name is not empty and has no =" {
+    try testing.expect(isEnvName("PATH"));
+    try testing.expect(isEnvName("a b"));
+    try testing.expect(!isEnvName(""));
+    try testing.expect(!isEnvName("A=B"));
+    try testing.expect(isOneOf(&fixed_env, "COLORTERM"));
+    try testing.expect(!isOneOf(&fixed_env, "LANG"));
 }
 
 test "groupsArg joins with commas, or says -" {

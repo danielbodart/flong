@@ -87,6 +87,8 @@ pub fn validate(arena: Allocator, d: *const Declaration) Allocator.Error![]const
     var c: Checker = .{ .arena = arena, .d = d, .n = d.name };
     try c.reservedName();
     try c.walk(Declaration, d.*, "", false, .{});
+    try c.payload();
+    try c.environment();
     try c.sources();
     try c.depth();
     try c.devices();
@@ -158,6 +160,38 @@ const Checker = struct {
                 inline else => |x, tag| try c.walk(@TypeOf(x), x, path, in_list, decl_docs.metaOf(T, @tagName(tag))),
             },
             else => @compileError(path ++ ": nothing to check of " ++ @typeName(T)),
+        }
+    }
+
+    /// The payload is `command` or what `exec` prints, so a declaration
+    /// names exactly one of them.
+    fn payload(c: *Checker) Allocator.Error!void {
+        if (c.d.command != null and c.d.exec != null)
+            return c.say("flong.{s} has both `command` and `exec`. The payload is one or the other: `command` when it is known at evaluation, `exec` when only the launch can say it.", .{c.n});
+        if (c.d.command == null and c.d.exec == null)
+            return c.say("flong.{s} has neither `command` nor `exec`, so nothing names the payload.", .{c.n});
+    }
+
+    /// The container's environment (module.nix computes it from
+    /// /etc/set-environment's options): each name a variable's, set once,
+    /// none but PATH one the launch sets itself, and each value's `$`
+    /// either `$$` or a reference to a value the launch fills in
+    /// (spec.badReference), so nothing is left for a shell.
+    fn environment(c: *Checker) Allocator.Error!void {
+        const env = c.d.environment;
+        for (env, 0..) |v, i| {
+            if (!spec.isEnvName(v.name)) {
+                try c.say("flong.{s}.environment sets \"{s}\", which is not a variable's name: it is empty or holds a `=`.", .{ c.n, v.name });
+                continue;
+            }
+            if (!std.mem.eql(u8, v.name, "PATH") and spec.isOneOf(&spec.fixed_env, v.name))
+                try c.say("flong.{s}.environment sets {s}, which the launch sets for every session. Of the launch's own variables only PATH may be set here.", .{ c.n, v.name });
+            for (env[0..i]) |w| if (std.mem.eql(u8, w.name, v.name)) {
+                try c.say("flong.{s}.environment sets {s} twice.", .{ c.n, v.name });
+                break;
+            };
+            if (spec.badReference(v.value)) |bad|
+                try c.say("flong.{s}.environment sets {s} to a value holding `{s}`. A value may refer only to ${{HOME}}, ${{USER}}, ${{LOGNAME}}, ${{SHELL}}, ${{XDG_RUNTIME_DIR}} and ${{TMPDIR}}, which the launch fills in, and spells a `$` as `$$`: nothing runs a shell to expand anything else.", .{ c.n, v.name, bad });
         }
     }
 
@@ -717,7 +751,6 @@ const minimal =
     \\    .cgid = 100,
     \\    .steps8 = "0123abcd",
     \\    .name = "agent",
-    \\    .payload = "/nix/store/x-payload/bin/flong-payload-agent",
     \\
 ;
 
@@ -732,7 +765,7 @@ test "a declaration named as flong's own subcommand is refused" {
     defer arena_state.deinit();
     const a = arena_state.allocator();
     for (reserved) |r| {
-        const source = try std.mem.concatWithSentinel(a, u8, &.{ ".{ .user = \"u\", .command = .{\"x\"}, .container = \"c\", .closure = \"/c\", .cuid = 1, .cgid = 1, .steps8 = \"s\", .payload = \"/p\", .name = \"", r, "\" }" }, 0);
+        const source = try std.mem.concatWithSentinel(a, u8, &.{ ".{ .user = \"u\", .command = .{\"x\"}, .container = \"c\", .closure = \"/c\", .cuid = 1, .cgid = 1, .steps8 = \"s\", .name = \"", r, "\" }" }, 0);
         const d = try decl.parse(a, source, null);
         const got = try validate(a, &d);
         try testing.expectEqual(1, got.len);
@@ -812,6 +845,55 @@ test "the depth rule and the sources, looked up rather than compared pairwise" {
     const many = try validate(a, &d);
     try testing.expectEqual(1, many.len);
     try testing.expect(std.mem.startsWith(u8, many[0], "flong.agent masks /m0/a/b (in the writable bind of /s0), /m1/a/b"));
+}
+
+test "the payload is command or exec, exactly one" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const both = try refusalsOf(a, "    .exec = .{\"/nix/store/x-exec/bin/exec\"},\n");
+    try testing.expectEqual(1, both.len);
+    try testing.expect(std.mem.startsWith(u8, both[0], "flong.agent has both `command` and `exec`."));
+    const base = minimal[".{\n    .user = \"alice\",\n    .command = .{\"hello\"},\n".len..];
+    const head = ".{\n    .user = \"alice\",\n";
+    const neither = try decl.parse(a, try std.mem.concatWithSentinel(a, u8, &.{ head, base, "}" }, 0), null);
+    const n = try validate(a, &neither);
+    try testing.expectEqual(1, n.len);
+    try testing.expectEqualStrings("flong.agent has neither `command` nor `exec`, so nothing names the payload.", n[0]);
+    const exec = try decl.parse(a, try std.mem.concatWithSentinel(a, u8, &.{ head, "    .exec = .{\"/x\"},\n", base, "}" }, 0), null);
+    try testing.expectEqual(0, (try validate(a, &exec)).len);
+    const empty = try decl.parse(a, try std.mem.concatWithSentinel(a, u8, &.{ head, "    .exec = .{},\n", base, "}" }, 0), null);
+    const e = try validate(a, &empty);
+    try testing.expectEqual(1, e.len);
+    try testing.expectEqualStrings("flong.agent.exec is an empty command, which names no program to run.", e[0]);
+}
+
+test "the container's environment: names, the launch's own, and nothing for a shell" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const r = try refusalsOf(arena_state.allocator(),
+        \\    .environment = .{
+        \\        .{ .name = "PATH", .value = "/etc/profiles/per-user/${USER}/bin:${HOME}/.local/bin" },
+        \\        .{ .name = "PRICE", .value = "$$5" },
+        \\        .{ .name = "", .value = "x" },
+        \\        .{ .name = "A=B", .value = "x" },
+        \\        .{ .name = "HOME", .value = "/root" },
+        \\        .{ .name = "PRICE", .value = "6" },
+        \\        .{ .name = "NIX_PATH", .value = "${NIX_PATH}:x" },
+        \\        .{ .name = "SUB", .value = "$(id -u)" },
+        \\    },
+        \\
+    );
+    const want = [_][]const u8{
+        "flong.agent.environment sets \"\", which is not a variable's name",
+        "flong.agent.environment sets \"A=B\", which is not a variable's name",
+        "flong.agent.environment sets HOME, which the launch sets for every session.",
+        "flong.agent.environment sets PRICE twice.",
+        "flong.agent.environment sets NIX_PATH to a value holding `${NIX_PATH}`.",
+        "flong.agent.environment sets SUB to a value holding `$(`.",
+    };
+    try testing.expectEqual(want.len, r.len);
+    for (want, r) |w, got| try testing.expect(std.mem.startsWith(u8, got, w));
 }
 
 test "the ranges decl.zig declares" {

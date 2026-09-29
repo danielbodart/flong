@@ -243,7 +243,7 @@ pub fn main() noreturn {
     switch (dispatch(argv)) {
         .sub => |d| switch (d.sub) {
             .launch => launch.main(argv, d.at, envp),
-            .init => init.main(argv[d.at..], envp),
+            .init => init.main(argv[d.at..], sys.environSlots()),
             .sweeper => sweeper.main(argv[d.at..]),
             .check => check.main(argv[d.at..]),
             .list => list(argv[d.at..], envp),

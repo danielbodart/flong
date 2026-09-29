@@ -1201,6 +1201,7 @@ const Launcher = struct {
                 .{ .name = "sig", .module = m.sig },
                 .{ .name = "spec", .module = l.spec },
                 .{ .name = "mount", .module = m.mount },
+                .{ .name = "record", .module = l.record },
                 .{ .name = "decl", .module = d.decl },
                 .{ .name = "check", .module = chk },
                 .{ .name = "prologue", .module = w.prologue },

@@ -17,7 +17,6 @@ toZon.toZON toZon.enumPaths {
   cgid = 100;
   steps8 = "0123abcd";
   name = "box";
-  payload = "/nix/store/x-payload/bin/flong-payload-box";
   seccomp.tier = "parity";
   network.forwardPorts = toZon.tag "auto";
 }

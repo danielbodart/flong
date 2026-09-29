@@ -1,0 +1,11 @@
+// The payload printed at launch: no command.
+.{
+    .user = "u",
+    .exec = .{ "/nix/store/x-exec/bin/exec", "--tier", "a b" },
+    .container = "box",
+    .closure = "/nix/store/x-nixos-system-box",
+    .cuid = 1000,
+    .cgid = 100,
+    .steps8 = "0123abcd",
+    .name = "box",
+}

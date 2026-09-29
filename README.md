@@ -34,9 +34,10 @@ it exits. The **launcher** is `flong.<name>.launcher`, a package whose
 `flong launch <name> -- ARGS` does; the caller runs it directly, and it
 refuses root. `flong list` names every declaration and its file. The **workspace** is the host directory bind-mounted into the session at
 its own path and used as its working directory. The **payload** is the process
-`command` names. **Hooks** are the commands the launcher runs as the
-caller at fixed points: `workspace`, `binds`, `guard`, `seccompPolicy`,
-`postStart` and `postStop`.
+`command` names, or `exec` prints, exec'd with no shell in the session.
+**Hooks** are the commands the launcher runs as the caller at fixed points:
+`workspace`, `binds`, `guard`, `seccompPolicy`, `exec`, `postStart` and
+`postStop`.
 
 ## Examples
 
@@ -79,6 +80,19 @@ Declare the container with NixOS's own option, then name it in `flong`:
 `<launcher> build` runs `cargo build` in the directory it was started from,
 bind-mounted into the session, with a sibling `shared-crates` read-write if
 there is one and `/srv/reference` read-only.
+
+### A payload decided at launch
+
+`exec` in place of `command` prints the payload on the host, with what the
+hooks know, so the session itself runs one exec'd program and no script:
+
+```nix
+flong.sandbox.command = lib.mkForce null;
+flong.sandbox.exec = [ "${pkgs.writeShellScript "payload" ''
+  # NUL-ended fields: variables, an empty field, then the argument list.
+  printf '%s\0' "PROJECT=$(basename "$workspace")" "" cargo "$@"
+''}" ];
+```
 
 ### A session with a network
 
@@ -244,8 +258,8 @@ The launcher exits with the payload's status, or 128+n when a signal killed
 the payload. It exits 125 when the payload never ran: `flong launch` refused
 the spec it built, `postStart` failed, or the network could not be attached.
 It exits 1 when it refused before building the spec (the declaration, the
-caller, the workspace, the maps), or `workspace`, `binds`, `guard` or
-`seccompPolicy` failed, and 2 for a usage error or a name with no
+caller, the workspace, the maps), or `workspace`, `binds`, `guard`,
+`seccompPolicy` or `exec` failed, and 2 for a usage error or a name with no
 declaration. Its message says which. When its prepared root is swept from
 under it, it runs itself again, with the same arguments.
 
@@ -270,7 +284,8 @@ usage of every subcommand.
 |---|---|---|
 | `container` | `<name>` | The `containers.<name>` declaration to run. |
 | `user` | *required* | Account inside the container that everything in the session runs as. Its uid and its primary group's gid must be declared in the container's `config`; its home is read from the prepared root's `/etc/passwd`. It is mapped onto the caller whatever its uid. Both must be at most 65535. |
-| `command` | *required* | The payload's argument list, e.g. `[ "cargo" ]` or `[ (lib.getExe pkgs.hello) ]`. The launcher's arguments are appended, and it is exec'd as `user` in the workspace, with the container's `PATH` and variables from its `/etc/set-environment`. No element is read by a shell. |
+| `command` | `null` | The payload's argument list, e.g. `[ "cargo" ]` or `[ (lib.getExe pkgs.hello) ]`. The launcher's arguments are appended, and it is exec'd as `user` in the workspace, with nothing between, and with the container's `PATH` and the variables its `/etc/set-environment` sets, computed at evaluation. No element is read by a shell. A declaration has this or `exec`. |
+| `exec` | `null` | In place of `command`: a command run on the host after `seccompPolicy` that prints the payload's variables and argument list as NUL-ended fields, `NAME=VALUE`... then an empty field then the argument list. A name the session already sets, or output of any other shape, refuses the launch. |
 | `workspace` | `null` | A command printing the directory to bind-mount at its own path and `cd` into: `PATH`, read-write, or `PATH:ro`. `null` is the directory the launcher starts in. |
 | `binds` | `[ ]` | Commands printing more directories to bind-mount, each at its own path, one per line: `PATH`, read-only, or `PATH:rw`. Their outputs are concatenated. |
 | `guard` | `[ ]` | Commands checking that the launch is one the declaration means to make. Each must exit 0; the first that does not refuses. A check, not a gate; setting it warns. |
@@ -291,7 +306,7 @@ usage of every subcommand.
 | `seccomp.errno` | `"EPERM"` | What a known call outside the filter returns: `EPERM`, `EACCES` or `ENOSYS`. |
 | `seccomp.log` | `false` | Allows and logs what the filter would refuse, to learn a policy. Warns. |
 | `protect` | `[ ]` | Host paths no mount of a session may equal, lie inside or contain, such as a daemon's control socket directory. flong's own state, the user manager's sockets, `/proc` and `/sys/fs/cgroup` are always protected. |
-| `path` | `[ ]` | Packages on `PATH` for every hook. |
+| `path` | `[ ]` | Packages on `PATH` for every hook, `exec` included, not the payload. |
 | `launcher` | *read-only* | The declaration's command: a package whose `bin/<name>` is a link to `flong`. |
 
 `scopeConfig` is refused: a session has no scope unit, and `limits` holds what
@@ -309,13 +324,14 @@ Every hook runs as the caller. In launch order:
 | `binds` | after `workspace` | `"$@"`, `$workspace`, `$workspace_mode` (`ro` or `rw`) |
 | `guard` | before anything is made, in a subshell | `"$@"`, `$workspace`, `$workspace_mode`, `$binds` (one `PATH:ro` or `PATH:rw` per line) |
 | `seccompPolicy` | after `guard` | the above, and `$machine` |
+| `exec` | after `seccompPolicy`, in place of `command` | the same |
 | `postStart` | once the namespaces exist, before `network` and the payload | `$leader` (the session's pid 1 on the host), `$userns` and `$netns` (the session's user and network namespaces, as descriptors the launcher holds), `$machine`, `$uid`, `$gid`, `$home`, and the above |
 | `postStop` | after the session, or from the sweeper when the launcher was killed | `$machine` only |
 
-A non-zero exit from `workspace`, `binds`, `guard` or `seccompPolicy` refuses
-the launch, and the launcher exits 1; from `postStart` it ends the session
-before the payload runs, and the launcher exits 125; from `postStop` it is
-reported.
+A non-zero exit from `workspace`, `binds`, `guard`, `seccompPolicy` or
+`exec` refuses the launch, and the launcher exits 1; from `postStart` it ends
+the session before the payload runs, and the launcher exits 125; from
+`postStop` it is reported.
 
 `workspace` and `binds` print paths that are resolved with `realpath`, must be
 directories, and may not contain `:` or a newline. A trailing `:ro` or `:rw` is
@@ -329,7 +345,9 @@ hook that enters the mount namespace also enters the pid namespace, or
 cgroup and is killed with it.
 
 `postStop` must depend on `$machine` alone and succeed when what it releases is
-already gone.
+already gone. It runs once for every `$machine` `seccompPolicy` and `exec`
+saw, whether the session ran or the launch failed first, a signal included,
+so it releases whatever they staged too.
 
 ### Inside a session
 
@@ -361,8 +379,12 @@ already gone.
   tmpfs.
 - The environment is built from nothing: `PATH`, `HOME`, `USER`, `LOGNAME`,
   `SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`, `TERM`, `COLORTERM`, `FLONG_BINDS` and
-  `container=flong`, then the container's `/etc/set-environment`. The caller's
-  tokens and agent sockets stay outside.
+  `container=flong`, then what the container's `/etc/set-environment` sets,
+  worked out at evaluation (its `PATH` replacing the first), then what `exec`
+  printed. No shell runs to source anything: what the file says that only a
+  shell could compute (`environment.extraInit`'s commands, `$(...)`,
+  `${VAR:-default}`) fails the system's evaluation, naming the line. The
+  caller's tokens and agent sockets stay outside.
 - On a terminal the session has a pty of its own. `^]^]^]` kills it.
 - The hostname is the container's name. pid 1 is
   [tini](https://github.com/krallin/tini).
