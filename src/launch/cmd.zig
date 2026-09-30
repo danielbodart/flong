@@ -271,8 +271,10 @@ pub const ExecBad = union(enum) {
     /// an `env:` field with no `=` after its tag, whole
     not_a_variable: []const u8,
     /// a `file:` field whose MODE is not one to four octal digits of at
-    /// most 0777, or has no `:` after it, whole
+    /// most 0777, whole
     bad_mode: []const u8,
+    /// a `file:` field with no `:` after its MODE, so no PATH, whole
+    no_path: []const u8,
     /// a `file:` field that is the last field: the path it names
     no_content: []const u8,
     /// no `arg:` field
@@ -307,7 +309,7 @@ pub fn parseExec(gpa: Allocator, out: []const u8) Allocator.Error!union(enum) { 
             try argv.append(gpa, try gpa.dupeZ(u8, f[tag_arg.len..]));
         } else if (std.mem.startsWith(u8, f, tag_file)) {
             const v = f[tag_file.len..];
-            const colon = std.mem.indexOfScalar(u8, v, ':') orelse return .{ .bad = .{ .bad_mode = f } };
+            const colon = std.mem.indexOfScalar(u8, v, ':') orelse return .{ .bad = .{ .no_path = f } };
             const mode = fileMode(v[0..colon]) orelse return .{ .bad = .{ .bad_mode = f } };
             const path = v[colon + 1 ..];
             const content = fields.next() orelse return .{ .bad = .{ .no_content = path } };
@@ -423,9 +425,14 @@ test "parseExec: tagged fields, each ended by a NUL, in any order" {
     try testing.expectEqualStrings("ENV:A=1", (try parseExec(a, "ENV:A=1\x00arg:p\x00")).bad.untagged);
     try testing.expectEqualStrings("env:A", (try parseExec(a, "env:A\x00arg:p\x00")).bad.not_a_variable);
     try testing.expectEqualStrings("/h/f", (try parseExec(a, "arg:p\x00file:0600:/h/f\x00")).bad.no_content);
-    for ([_][]const u8{ "file:4755:/h/f", "file:1777:/h/f", "file:0800:/h/f", "file::/h/f", "file:00600:/h/f", "file:-600:/h/f", "file:600", "file:0x1f:/h/f", "file: 600:/h/f" }) |f| {
+    for ([_][]const u8{ "file:4755:/h/f", "file:1777:/h/f", "file:0800:/h/f", "file::/h/f", "file:00600:/h/f", "file:-600:/h/f", "file:0x1f:/h/f", "file: 600:/h/f" }) |f| {
         const out = try std.mem.concat(a, u8, &.{ f, "\x00content\x00arg:p\x00" });
         try testing.expectEqualStrings(f, (try parseExec(a, out)).bad.bad_mode);
+    }
+    // No `:` after the mode: the mode may be fine, the PATH is missing.
+    for ([_][]const u8{ "file:600", "file:", "file:0600/h/f" }) |f| {
+        const out = try std.mem.concat(a, u8, &.{ f, "\x00content\x00arg:p\x00" });
+        try testing.expectEqualStrings(f, (try parseExec(a, out)).bad.no_path);
     }
 }
 

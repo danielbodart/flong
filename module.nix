@@ -840,7 +840,7 @@ let
       inherit lib;
       examples = {
         command = lib.literalExpression ''[ (lib.getExe pkgs.hello) "--greeting=hello from a session" ]'';
-        exec = lib.literalExpression ''[ "''${pkgs.writeShellScript "agent" "printf '%s\\0' \"env:PROJECT=$(basename \"$workspace\")\" arg:''${lib.getExe pkgs.hello}; for a in \"$@\"; do printf 'arg:%s\\0' \"$a\"; done; printf '%s\\0' file:0600:/home/alice/.config/hello/token \"$(cat \"$XDG_RUNTIME_DIR/hello-token\")\""}" ]'';
+        exec = lib.literalExpression ''[ "''${pkgs.writeShellScript "agent" "printf '%s\\0' \"env:PROJECT=$(basename \"$workspace\")\" arg:''${lib.getExe pkgs.hello}; for a in \"$@\"; do printf 'arg:%s\\0' \"$a\"; done; token=$(cat \"$XDG_RUNTIME_DIR/hello-token\") || exit; printf '%s\\0' file:0600:/home/alice/.config/hello/token \"$token\""}" ]'';
         workspace = lib.literalExpression ''[ "''${pkgs.writeShellScript "repo-root" "git -C \"$PWD\" rev-parse --show-toplevel"}" ]'';
         binds = lib.literalExpression ''[ [ "''${pkgs.writeShellScript "shared-crates" "printf '%s:rw\\n' \"$workspace/../shared-crates\""}" ] ]'';
         postStart = lib.literalExpression ''[ [ "''${pkgs.writeShellScript "fence" "nsenter --user=\"$userns\" --net=\"$netns\" nft -f /etc/my-ruleset.nft"}" ] ]'';

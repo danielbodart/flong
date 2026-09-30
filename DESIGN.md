@@ -264,7 +264,10 @@ same 1 MiB, and flong init writes them (step 7 of
   and the file from the home, one component at a time, with `openat2`'s
   `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS` and `RESOLVE_NO_MAGICLINKS`, and
   the file with `O_NOFOLLOW` too, so a symbolic link anywhere, the file's
-  own name included, ends the launch; missing directories are made `0700`;
+  own name included, ends the launch; missing directories are made `0700`,
+  under a umask of `077` for the walk alone (init inherits the caller's,
+  and one that clears an owner bit would make a directory the walk cannot
+  enter), the caller's put back before the exec;
   the file is opened `O_CREAT|O_TRUNC|O_NONBLOCK`, refused unless it is a
   regular file, `fchmod`ed to its MODE (the umask and an existing file's
   own mode are both overridden), and written whole;
@@ -279,7 +282,21 @@ same 1 MiB, and flong init writes them (step 7 of
   refused for the same reason.
 
 MODE is permission bits alone: setuid, setgid and sticky mean nothing for a
-file its owner made in its own home, but a way to be surprised. Any failure
+file its owner made in its own home, but a way to be surprised.
+
+`exec` runs at step 5 of the launch and the home is read from the prepared
+root's `/etc/passwd` at step 9, so `exec` is not told the home: a PATH is
+written against the home the consumer already knows, `user`'s in the
+container's configuration, and one outside the home it turns out to be is
+refused then, `postStop` releasing what `exec` staged. Reading the identity
+before `exec` would move a step that needs the prepared root ahead of the
+hooks that decide whether to launch at all, for a value the consumer has.
+
+flong init runs under the session's syscall filter, which bwrap installs
+before exec'ing it, so seeding needs `openat2`, `mkdirat`, `fchmod`,
+`fstat`, `mmap` and `umask` allowed. Both tiers allow them; a `seccomp.deny`
+or `seccompPolicy` line that takes one away fails every launch that seeds a
+file, and an `ENOSYS` is said as the filter's. Any failure
 is flong init's, exit 125, "the session did not start", its message naming
 the file and whether a link or a mount stopped it; the launch's teardown
 then runs `postStop`, as for every failure after the record.

@@ -112,10 +112,23 @@ pub const Declaration = struct {
     /// regular file where the file goes. So the files land on the
     /// session's own root, which goes with it, and never on the host.
     ///
+    /// `exec` is not told the home: the launch reads it from the
+    /// container's `/etc/passwd` only after `exec` has run, so a command
+    /// that seeds files writes a home it already knows, `user`'s in the
+    /// container's configuration. A PATH outside the home it turns out to
+    /// be refuses the launch then, and `postStop` releases what `exec`
+    /// staged.
+    ///
+    /// `flong init` writes the files under the session's syscall filter,
+    /// which applies from its exec on: it calls `openat2`, `mkdirat`,
+    /// `fchmod`, `fstat`, `mmap` and `umask`, which both tiers allow, so a
+    /// `seccomp.deny` or a `seccompPolicy` line that takes one of them
+    /// away makes every launch that seeds a file fail to start.
+    ///
     /// A non-zero exit refuses the launch, and so does output that is not
     /// that shape: a field with no tag (an empty one among them), an
     /// `env:` field without a `=`, a MODE that is not one, a `file:` field
-    /// with no field after it, no `arg:` field, or an empty program. So do
+    /// with no `:` between its MODE and its PATH or no field after it, no `arg:` field, or an empty program. So do
     /// an empty name, a name printed twice, a name tini reads (`TINI_*`:
     /// tini is the session's init, and runs with the payload's
     /// environment), a name the session already sets -- the container's

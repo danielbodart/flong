@@ -263,7 +263,14 @@ pub fn tiniArgv(argv: [][*:0]const u8) [*:null]const ?[*:0]const u8 {
 // home that is itself on another mount than "/" is refused for the same
 // reason. A file already there is replaced in place: truncated, its mode
 // set, its content written; a directory, a FIFO or a device there is
-// refused. Missing directories are made 0700, the payload's.
+// refused. Missing directories are made 0700, the payload's, under a
+// umask of 077 for the walk: init inherits the caller's through the launcher
+// and bwrap, and one that clears an owner bit (0277) would make a directory
+// the walk cannot then enter. The caller's is put back before the exec, so
+// the payload has it as it would without files.
+//
+// Every call here is made under the session's syscall filter, which bwrap
+// installed before exec'ing init: an ENOSYS is said as the filter's.
 
 /// NAME_MAX: the longest component a path may have.
 const name_max = 255;
@@ -331,8 +338,16 @@ fn seedFailed(e: sys.E, home: []const u8, path: []const u8) noreturn {
     switch (e) {
         .LOOP => refuse("seeding {s}/{s}: a symbolic link is on its path, and nothing is followed", .{ home, path }),
         .XDEV => refuse("seeding {s}/{s}: its path crosses a mount, and a seeded file is written to the session's own root alone", .{ home, path }),
+        .NOSYS => refuse("seeding {s}/{s}: a call it needs is not allowed by the session's syscall filter (seccomp, seccompPolicy)", .{ home, path }),
+        // The open's answers for a directory, and for a FIFO with no reader
+        // or a socket (O_NONBLOCK), said as the fstat's refusal says the rest.
+        .ISDIR, .NXIO => notRegular(home, path),
         else => fail(e, "seeding {s}/{s}", .{ home, path }),
     }
+}
+
+fn notRegular(home: []const u8, path: []const u8) noreturn {
+    refuse("seeding {s}/{s}: something other than a regular file is there", .{ home, path });
 }
 
 /// Step 7: every file of FILES, in order, under the home it names.
@@ -343,12 +358,14 @@ fn seed(files: i32) void {
     var fields: Fields = .{ .data = must(sys.mmapRead(files, size), "mapping the files to seed") };
     const home = fields.next() orelse refuse("the files to seed do not end with a NUL", .{});
     if (home.len < 2 or home[0] != '/' or !walkable(home[1..])) refuse("the home to seed files in is not a clean absolute path: {s}", .{home});
+    const umask = sys.umask(0o077);
     const root = must(sys.openat(sys.AT.FDCWD, "/", dir_flags, 0), "opening / to seed files");
     const home_fd = switch (openBeneath(root, home[1..].ptr, dir_flags, 0)) {
         .ok => |h| h,
         .err => |e| switch (e) {
             .LOOP => refuse("seeding files in {s}: a symbolic link is on its path, and nothing is followed", .{home}),
             .XDEV => refuse("seeding files in {s}: it is on another mount than the session's root, and a seeded file is written to the session's own root alone", .{home}),
+            .NOSYS => refuse("seeding files in {s}: a call it needs is not allowed by the session's syscall filter (seccomp, seccompPolicy)", .{home}),
             else => fail(e, "opening {s} to seed files in", .{home}),
         },
     };
@@ -362,6 +379,7 @@ fn seed(files: i32) void {
         seedOne(home_fd, home, path, mode, content);
     }
     sys.close(home_fd);
+    _ = sys.umask(umask);
 }
 
 /// One file: its directories made 0700 where missing and walked into, the
@@ -403,7 +421,7 @@ fn seedOne(home_fd: sys.fd_t, home: []const u8, path: [:0]const u8, mode: u32, c
         .ok => |st| st,
         .err => |e| seedFailed(e, home, path),
     };
-    if (!sys.S.ISREG(st.mode)) refuse("seeding {s}/{s}: something other than a regular file is there", .{ home, path });
+    if (!sys.S.ISREG(st.mode)) notRegular(home, path);
     // The mode as it is asked for: O_CREAT's was under the umask, and a
     // file that was there kept its own.
     switch (sys.fchmod(f, mode)) {

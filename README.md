@@ -94,9 +94,17 @@ flong.sandbox.exec = [ "${pkgs.writeShellScript "payload" ''
   # file:MODE:PATH followed by the file's content.
   printf '%s\0' "env:PROJECT=$(basename "$workspace")" arg:cargo
   for a in "$@"; do printf 'arg:%s\0' "$a"; done
-  printf '%s\0' file:0600:/home/alice/.config/tool/token "$(tool-token)"
+  # A substitution failing inside printf's arguments ends nothing, errexit
+  # or not: take it into a variable first, so its failure refuses the launch
+  # rather than seed an empty token.
+  token=$(tool-token) || exit
+  printf '%s\0' file:0600:/home/alice/.config/tool/token "$token"
 ''}" ];
 ```
+
+`exec` runs before the launch reads the home from the container's
+`/etc/passwd`, and is not told it: it writes the home it already knows,
+`user`'s in the container's configuration.
 
 ### A session with a network
 

@@ -664,6 +664,7 @@ fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const 
             .untagged => |field| msg.refuse("exec: {s} printed \"{s}\", where each field is env:NAME=VALUE, arg:WORD, or file:MODE:PATH followed by the file's content", .{ x[0], field }),
             .not_a_variable => |field| msg.refuse("exec: {s} printed \"{s}\", which has no `=`: a variable is env:NAME=VALUE", .{ x[0], field }),
             .bad_mode => |field| msg.refuse("exec: {s} printed \"{s}\", whose mode is not one to four octal digits of at most 0777: a file is file:MODE:PATH, and its mode permission bits alone, never setuid, setgid or sticky", .{ x[0], field }),
+            .no_path => |field| msg.refuse("exec: {s} printed \"{s}\", which has no `:` after its mode: a file is file:MODE:PATH", .{ x[0], field }),
             .no_content => |path| msg.refuse("exec: {s} printed the file {s} with no field after it for its content", .{ x[0], path }),
             .no_argv => msg.refuse("exec: {s} printed no arg: field: the payload needs at least its program", .{x[0]}),
             .empty_program => msg.refuse("exec: {s} printed an empty program as the payload's", .{x[0]}),
@@ -686,8 +687,12 @@ fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const 
     }
     var paths: std.StringHashMapUnmanaged(void) = .empty;
     for (e.files) |f| {
-        if (spec.unclean(f.path, .absolute) != null)
-            return msg.refuse("exec: {s} printed the file \"{s}\", which is not an absolute path without an empty, '.' or '..' component", .{ x[0], f.path });
+        if (spec.unclean(f.path, .absolute)) |why| return switch (why) {
+            .not_absolute, .not_relative => msg.refuse("exec: {s} printed the file \"{s}\", which is not an absolute path", .{ x[0], f.path }),
+            .too_long => msg.refuse("exec: {s} printed a file whose path is PATH_MAX bytes or longer", .{x[0]}),
+            .component => msg.refuse("exec: {s} printed the file \"{s}\", which has an empty, '.' or '..' component", .{ x[0], f.path }),
+            .long_component => msg.refuse("exec: {s} printed the file \"{s}\", which has a component longer than NAME_MAX, 255 bytes", .{ x[0], f.path }),
+        };
         if ((paths.getOrPut(gpa, f.path) catch return oom()).found_existing)
             return msg.refuse("exec: {s} printed the file {s} twice", .{ x[0], f.path });
     }
@@ -713,15 +718,24 @@ fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const 
 fn homeFiles(gpa: Allocator, x: decl.Command, home: []const u8, files: []const cmd.File) Error![]const spec.File {
     const out = gpa.alloc(spec.File, files.len) catch return oom();
     for (out, files) |*o, f| {
-        if (!(f.path.len > home.len + 1 and std.mem.startsWith(u8, f.path, home) and f.path[home.len] == '/'))
+        const below = underHome(home, f.path) orelse
             return msg.refuse("exec: {s} printed the file {s}, which is not under the payload's home, {s}", .{ x[0], f.path, home });
         o.* = .{
             .mode = f.mode,
-            .path = gpa.dupeZ(u8, f.path[home.len + 1 ..]) catch return oom(),
+            .path = gpa.dupeZ(u8, below) catch return oom(),
             .content = f.content,
         };
     }
     return out;
+}
+
+/// `path` relative to `home` when it is below it, a component or more
+/// down: `/home/u/x` of `/home/u`, never `/home/u` itself, nor
+/// `/home/u2/x`, whose bytes merely start with the home's.
+fn underHome(home: []const u8, path: []const u8) ?[]const u8 {
+    if (path.len > home.len + 1 and std.mem.startsWith(u8, path, home) and path[home.len] == '/')
+        return path[home.len + 1 ..];
+    return null;
 }
 
 /// A port class of pasta's: "none", or each forward HOST:CONTAINER of
@@ -899,6 +913,13 @@ test "portList and hostPorts: pasta's port classes, none when empty" {
     try testing.expectEqualStrings("none", try portList(a, &.{}, .tcp));
     try testing.expectEqualStrings("none", try hostPorts(a, &.{}));
     try testing.expectEqualStrings("18123,19999", try hostPorts(a, &.{ 18123, 19999 }));
+}
+
+test "underHome: a component or more below the home, relative to it" {
+    try testing.expectEqualStrings("x", underHome("/home/u", "/home/u/x").?);
+    try testing.expectEqualStrings(".config/t/token", underHome("/home/u", "/home/u/.config/t/token").?);
+    for ([_][]const u8{ "/home/u", "/home/u/", "/home/u2/x", "/home/ux", "/home", "/srv/x", "/home/v/x" }) |p|
+        try testing.expectEqual(@as(?[]const u8, null), underHome("/home/u", p));
 }
 
 test "blank is [[:space:]] alone" {

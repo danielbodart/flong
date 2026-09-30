@@ -262,6 +262,9 @@ in
           # In the prepared root's home, for `exec` to seed a file over:
           # replaced, content and mode, where the payload finds it.
           "f /home/alice/seeded-over 0644 alice users - old-content-longer-than-the-new"
+          # And for it to find other than a regular file where a file goes.
+          "d /home/alice/a-directory 0700 alice users -"
+          "p /home/alice/a-fifo 0600 alice users -"
         ];
       };
     };
@@ -600,6 +603,11 @@ in
           # Each walk flong init refuses: through the prepared root's
           # symlink, into the declared bind, into the private $HOME/tmp.
           symlink) field "file:0600:/home/alice/escape/planted" planted arg:true ;;
+          # The symlink as the file's own name, the last component.
+          symlinklast) field "file:0600:/home/alice/escape" planted arg:true ;;
+          # A directory and a FIFO where the file goes.
+          directory) field "file:0600:/home/alice/a-directory" planted arg:true ;;
+          fifo) field "file:0600:/home/alice/a-fifo" planted arg:true ;;
           bind) field "file:0600:/home/alice/deep/er/keep/planted" planted arg:true ;;
           hometmp) field "file:0600:/home/alice/tmp/planted" planted arg:true ;;
           fixed) field "env:HOME=/root" arg:true ;;
@@ -619,6 +627,10 @@ in
           relative) field "file:0600:x" "" arg:true ;;
           dotdot) field "file:0600:/home/alice/../bob/x" "" arg:true ;;
           outside) field "file:0600:/srv/escape-target/x" "" arg:true ;;
+          # Its bytes start with the home's, and it is another directory.
+          sibling) field "file:0600:/home/alice2/x" "" arg:true ;;
+          nopath) field "file:0600" "" arg:true ;;
+          longname) field "file:0600:/home/alice/$(printf 'n%.0s' {1..256})" "" arg:true ;;
           home) field "file:0600:/home/alice" "" arg:true ;;
           filetwice) field "file:0600:/home/alice/x" "" "file:0600:/home/alice/x" "" arg:true ;;
           inside) field "file:0600:/home/alice/x/y" "" "file:0600:/home/alice/x" "" arg:true ;;
@@ -963,7 +975,6 @@ in
           # Each refused, 1, saying why under the declaration's name.
           program = machine.succeed("grep -o '/nix/store/[a-z0-9]*-flong-test-exec' /etc/flong/execd.zon | head -1").strip()
           tags = "where each field is env:NAME=VALUE, arg:WORD, or file:MODE:PATH followed by the file's content"
-          unclean = "which is not an absolute path without an empty, '.' or '..' component"
           refusals = [
               ("fixed", "sets HOME, which the launch sets for every session"),
               ("pwd", "sets PWD, which the launch sets for every session"),
@@ -980,9 +991,12 @@ in
               ("emptyprogram", "printed an empty program as the payload's"),
               ("badmode", 'printed "file:4755:/home/alice/x", whose mode is not one to four octal digits of at most 0777'),
               ("nocontent", "printed the file /home/alice/x with no field after it for its content"),
-              ("relative", f'printed the file "x", {unclean}'),
-              ("dotdot", f'printed the file "/home/alice/../bob/x", {unclean}'),
+              ("nopath", 'printed "file:0600", which has no `:` after its mode: a file is file:MODE:PATH'),
+              ("relative", 'printed the file "x", which is not an absolute path'),
+              ("dotdot", "printed the file \"/home/alice/../bob/x\", which has an empty, '.' or '..' component"),
+              ("longname", 'printed the file "/home/alice/' + "n" * 256 + '", which has a component longer than NAME_MAX, 255 bytes'),
               ("outside", "printed the file /srv/escape-target/x, which is not under the payload's home, /home/alice"),
+              ("sibling", "printed the file /home/alice2/x, which is not under the payload's home, /home/alice"),
               ("home", "printed the file /home/alice, which is not under the payload's home, /home/alice"),
               ("filetwice", "printed the file /home/alice/x twice"),
               ("inside", "printed the file /home/alice/x/y inside the file /home/alice/x"),
@@ -1032,14 +1046,20 @@ in
               ("symlink", "flong init: seeding /home/alice/escape/planted: a symbolic link is on its path, and nothing is followed"),
               ("bind", "flong init: seeding /home/alice/deep/er/keep/planted: its path crosses a mount, and a seeded file is written to the session's own root alone"),
               ("hometmp", "flong init: seeding /home/alice/tmp/planted: its path crosses a mount, and a seeded file is written to the session's own root alone"),
+              ("symlinklast", "flong init: seeding /home/alice/escape: a symbolic link is on its path, and nothing is followed"),
+              ("directory", "flong init: seeding /home/alice/a-directory: something other than a regular file is there"),
+              ("fifo", "flong init: seeding /home/alice/a-fifo: something other than a regular file is there"),
           ]:
               out = machine.succeed(by_caller(f"${execd} {mode} 2>&1; echo rc=$?"))
               assert out.endswith("\nrc=125\n") and said in out, (mode, out)
           machine.fail("test -e /srv/escape-target/planted")
           machine.fail("test -e /srv/keep/planted")
+          # The link's target is as it was: a directory, never truncated or
+          # replaced by a file.
+          machine.succeed("test -d /srv/escape-target && test ! -L /srv/escape-target")
           # postStop, once for each, from the teardown.
           machines = machine.succeed("cat /tmp/execd-machines").split()
-          assert len(machines) == 4 and len(set(machines)) == 4, machines
+          assert len(machines) == 7 and len(set(machines)) == 7, machines
           assert sorted(machine.succeed("cat /tmp/execd-released").split()) == sorted(machines)
           machine.fail("ls /tmp/execd-staged-*")
           machine.succeed(NO_SESSIONS)
