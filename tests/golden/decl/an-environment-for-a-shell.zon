@@ -10,6 +10,8 @@
     .environment = .{
         .{ .name = "HOME", .value = "/root" },
         .{ .name = "TERM", .value = "xterm" },
+        .{ .name = "PWD", .value = "/srv" },
+        .{ .name = "TINI_SUBREAPER", .value = "1" },
         .{ .name = "NIX_PATH", .value = "${NIX_PATH}:/x" },
         .{ .name = "WHO", .value = "$(id -un)" },
         .{ .name = "BARE", .value = "$HOME/x" },

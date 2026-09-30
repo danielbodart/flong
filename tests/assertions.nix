@@ -189,13 +189,9 @@ let
         (configWith { flong.box.command = lib.mkForce [ ]; }).flong.box.command
         true)).success
         || throw "assertions: an empty command was accepted")
-      # The payload is `command` or `exec`, one and only one.
-      (refused "both command and exec"
-        { flong.box.exec = [ "/bin/exec" ]; }
-        "sets both `command` and `exec`")
-      (refused "neither command nor exec"
-        { flong.box.command = lib.mkForce null; }
-        "sets neither `command` nor `exec`")
+      # The payload is `command` or `exec`, one and only one: flong check's
+      # rule, in the file's build (assertions-decl below). Here, `exec`
+      # alone evaluates.
       (accepted "exec in place of command"
         { flong.box.command = lib.mkForce null; flong.box.exec = [ "/bin/exec" "--tier" ]; })
       (untyped { flong.box.exec = [ ]; } [ "flong" "box" "exec" ]
@@ -211,9 +207,6 @@ let
       (refused "a line of extraInit that is not an export"
         { containers.box.config.environment.extraInit = "alias ll='ls -l'"; }
         "`alias ll='ls -l'` is not an `export NAME=VALUE` flong can read without a shell")
-      (refused "a variable the launch sets"
-        { containers.box.config.environment.variables.TMPDIR = "/var/tmp"; }
-        "sets TMPDIR, which the launch sets for every session")
       (refused "a variable bash sets for itself"
         { containers.box.config.environment.variables.HERE = "$PWD"; }
         "refers to $PWD, which bash sets for itself")
@@ -229,24 +222,44 @@ let
             extraInit = "export ALSO=\"$MINE/y\"";
           };
         })
-      # What the file becomes: the launch's references kept, an earlier
-      # line's value put in, an unset name nothing, `$` spelt `$$`.
+      # What the file becomes, the declaration's `environment` read as the
+      # value the file was rendered from: the launch's references kept, an
+      # earlier line's value put in, an unset name nothing, a name set again
+      # its last value (MINE) while a line that read it before keeps the
+      # value it read (ALSO), each name once, and the lines that set
+      # nothing -- terminfo's `export TERM=$TERM`, nix-channel's block --
+      # no entry, and nothing in NIX_PATH.
       ((let
-          text = (declFile {
+          entries = (declFile {
             containers.box.config.environment = {
               variables.MINE = "$HOME/x:\${USER}";
               variables.UNSET = "a\${NOBODY_SETS_THIS}b";
               homeBinInPath = true;
-              extraInit = "export ALSO=\"$MINE/y\"";
+              extraInit = ''
+                export ALSO="$MINE/y"
+                export MINE="z:$MINE"
+              '';
             };
-          }).text;
+          }).declaration.environment;
+          env = lib.listToAttrs (map (e: lib.nameValuePair e.name e.value) entries);
+          got = lib.getAttrs [ "MINE" "ALSO" "UNSET" "PATH" ] env;
+          want = {
+            MINE = "z:\${HOME}/x:\${USER}";
+            ALSO = "\${HOME}/x:\${USER}/y";
+            UNSET = "ab";
+            PATH = lib.concatStringsSep ":" [
+              "\${HOME}/bin" "/run/wrappers/bin" "\${HOME}/.nix-profile/bin" "/nix/profile/bin"
+              "\${HOME}/.local/state/nix/profile/bin" "/etc/profiles/per-user/\${USER}/bin"
+              "/nix/var/nix/profiles/default/bin" "/run/current-system/sw/bin"
+            ];
+          };
         in
-        lib.all (v: lib.hasInfix v text) [
-          ''.value = "''${HOME}/x:''${USER}",''
-          ''.value = "ab",''
-          ''.value = "''${HOME}/x:''${USER}/y",''
-          ''.value = "''${HOME}/bin:/run/wrappers/bin:''${HOME}/.nix-profile/bin:''
-        ]) || throw "assertions: the container's environment was not computed as the file would set it")
+        (got == want
+          || throw "assertions: the container's environment was computed as ${builtins.toJSON got}, not ${builtins.toJSON want}")
+        && (builtins.length entries == builtins.length (lib.attrNames env)
+          || throw "assertions: the container's environment sets a name twice: ${builtins.toJSON entries}")
+        && (! env ? TERM && ! lib.hasInfix ".nix-defexpr" (env.NIX_PATH or "")
+          || throw "assertions: a line that sets nothing made an entry: ${builtins.toJSON entries}")))
       # Every hook is a list of commands, and `workspace` one command or
       # null: a shell string, the type they had, does not evaluate, and
       # neither does an empty command.
@@ -316,6 +329,10 @@ let
     containers.box.allowedDevices = [ { node = "/dev/null"; modifier = "r"; } ];
     flong.box.masks = [ "/state" ];
     flong.box.seccomp = { tier = null; log = true; };
+    # Rules module.nix leaves to flong check, whole: a payload that is both
+    # `command` and `exec`, and a container variable the launch sets.
+    flong.box.exec = [ "/bin/exec" ];
+    containers.box.config.environment.variables.TMPDIR = "/var/tmp";
   };
   decl =
     assert flongFailures refusedDecl == [ ]
@@ -332,6 +349,8 @@ let
         grep -q '^flong check: .*: flong.box drives containers.box, whose allowedDevices has /dev/null r\.' "$log"
         grep -q '^flong check: .*: flong.box drives containers.box, and mounts something at /state twice:' "$log"
         grep -q '^flong check: .*: flong.box sets seccomp.tier = null and seccomp.log,' "$log"
+        grep -q '^flong check: .*: flong.box has both `command` and `exec`\.' "$log"
+        grep -q '^flong check: .*: flong.box.environment sets TMPDIR, which the launch sets for every session\.' "$log"
         [ "$(cat $refused/testBuildFailure.exit)" = 1 ]
         grep -q '^\.{' $baseline
         touch $out

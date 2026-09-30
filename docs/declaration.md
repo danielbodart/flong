@@ -103,18 +103,25 @@ are not appended again. A program without a `/` is looked up on
 the payload's `PATH`, as `command`'s is.
 
 A non-zero exit refuses the launch, and so does output that is not
-that shape, a name that is empty or holds a `=`, a name printed
-twice, and a name the session already sets: the container's
-`environment`, or one of the launch's own (`PATH`, `HOME`, `USER`,
-`LOGNAME`, `SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`, `FLONG_BINDS`,
-`container`, `TERM`, `COLORTERM`). Nothing is overridden silently.
+that shape, an empty name (each field is split at its first `=`),
+a name printed twice, a name tini reads (`TINI_*`: tini is the
+session's init, and runs with the payload's environment), and a
+name the session already sets: the container's `environment`, or
+one of the launch's own (`PATH`, `HOME`, `USER`, `LOGNAME`,
+`SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`, `FLONG_BINDS`, `container`,
+`TERM`, `COLORTERM`, `PWD`). Nothing is overridden silently. The
+loader's names, `LD_*` and `GLIBC_TUNABLES`, are allowed, and reach
+tini as well as the payload: both run as `user` inside the session,
+with no capability.
 
 Once it has run, as once `seccompPolicy` has, `postStop` runs for
-the session's `$machine` however the launch ends, even when it
-fails before the session starts, so whatever it staged for
-`$machine` is released. It runs again when the launcher
+the session's `$machine` once, whichever way the launcher ends it:
+a refusal, even before the session starts, or a terminating signal
+(`SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`), so whatever it staged
+for `$machine` is released. It runs again when the launcher
 relaunches itself, under a new `$machine`, the old one released
-first.
+first. A launcher killed outright (`SIGKILL`, the OOM killer)
+before its session's record exists leaves nothing to run it from.
 
 ### `workspace`
 
@@ -774,7 +781,8 @@ In a value, `${NAME}` is filled in at launch with the session's
 value of NAME, one of `HOME`, `USER`, `LOGNAME`, `SHELL`,
 `XDG_RUNTIME_DIR` and `TMPDIR`, and `$$` is one `$`; any other `$`
 is refused. It may set `PATH`, which replaces the launch's own,
-and none of the launch's other names. Under NixOS, module.nix
+none of the launch's other names, and no `TINI_*`, which tini, the
+session's init, would read. Under NixOS, module.nix
 computes it, and refuses at evaluation a container whose file says
 what cannot be computed without a shell.
 

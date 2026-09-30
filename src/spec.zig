@@ -317,8 +317,28 @@ fn envName(v: []const u8) Error!void {
 /// declaration says: the declared environment may set PATH, and none of the
 /// others; the hook may set none of them. COLORTERM is in the list though a
 /// launch sets it only when the caller has it, so a declaration means the
-/// same whichever terminal it is launched from.
-pub const fixed_env = [_][]const u8{ "PATH", "HOME", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR", "TMPDIR", "FLONG_BINDS", "container", "TERM", "COLORTERM" };
+/// same whichever terminal it is launched from. PWD is bwrap's and then
+/// flong init's, the workspace (init.setPwd), set after the environment
+/// is, so a value for it would be replaced without a word. module.nix
+/// reads this line and `expandable`'s as they are written here, one line
+/// each (its launchVariables).
+pub const fixed_env = [_][]const u8{ "PATH", "HOME", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR", "TMPDIR", "FLONG_BINDS", "container", "TERM", "COLORTERM", "PWD" };
+
+/// The prefix of the names tini reads (TINI_SUBREAPER,
+/// TINI_KILL_PROCESS_GROUP, TINI_VERBOSITY): tini is the session's pid 1,
+/// the launch's, and runs with the payload's environment, so neither the
+/// declared environment nor the hook may set one and change how the
+/// session's init reaps, signals or speaks. The loader's names (LD_*,
+/// GLIBC_TUNABLES) reach tini too, which is dynamically linked, and are
+/// allowed: tini runs as the payload, with no capability, inside the
+/// session, and a payload that wants LD_PRELOAD has it for itself either
+/// way.
+pub const init_prefix = "TINI_";
+
+/// Whether `name` is one tini reads (`init_prefix`).
+pub fn isInitName(v: []const u8) bool {
+    return std.mem.startsWith(u8, v, init_prefix);
+}
 
 /// The fixed names a declared value may refer to as `${NAME}`: those whose
 /// value /etc/set-environment would have read from the launch's own, and
@@ -718,6 +738,10 @@ test "a variable's name is not empty and has no =" {
     try testing.expect(!isEnvName("A=B"));
     try testing.expect(isOneOf(&fixed_env, "COLORTERM"));
     try testing.expect(!isOneOf(&fixed_env, "LANG"));
+    try testing.expect(isOneOf(&fixed_env, "PWD"));
+    try testing.expect(isInitName("TINI_SUBREAPER"));
+    try testing.expect(!isInitName("TINI"));
+    try testing.expect(!isInitName("LD_PRELOAD"));
 }
 
 test "groupsArg joins with commas, or says -" {

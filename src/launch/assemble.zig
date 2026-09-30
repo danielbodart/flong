@@ -41,7 +41,21 @@
 //! signals the launch reads from its signalfd are blocked, and the
 //! signalfd opened, at step 5 rather than after the prologue, so a
 //! terminating signal during the commands or the prepare ends a wait and
-//! is released from, where it would have killed the launcher outright.
+//! is released from, where it would have killed the launcher outright. A
+//! terminating signal still queued when a relaunch releases the name ends
+//! the launch there, 128+n, rather than relaunching (`Early.beforeRelaunch`):
+//! the relaunch would restore the mask with the signal already taken, and
+//! run every command again as if the caller had not asked it to stop.
+//! What the launcher cannot catch -- a SIGKILL, the OOM killer, a crash --
+//! before the record exists leaves nothing that knows the name, and what
+//! the commands staged for it stays (PLAN.md).
+//!
+//! The name is `<container>-<pid>-<16 hex digits of getrandom>`: the pid
+//! keeps it apart from every other live launcher's, and 64 random bits
+//! from every ended session's whose record a sweep has yet to release,
+//! pid reused or not. A launch never meets its own name held, so the
+//! record's refusal of a taken name is not a case `Early` has to tell
+//! apart: whatever fails before the record runs postStop for the name.
 //!
 //! What the wrapper exported, the commands, the cache tool, flong-seccomp
 //! and the launch see in their environment, each from the step that set
@@ -178,6 +192,18 @@ pub const Early = struct {
             error.Aborted => return,
         };
     }
+
+    /// runPostStop before a relaunch, which names the session anew and
+    /// runs every command again: error.Aborted, the launch's status 128+n
+    /// (sig.abort_signal), when a terminating signal was queued, or
+    /// arrived while postStop ran. runPostStop takes it off the signalfd so
+    /// postStop's waits run, and the relaunch would restore the mask with
+    /// nothing pending: the caller's ^C would be lost, and the launch go on
+    /// under a new name.
+    pub fn beforeRelaunch(e: *Early) error{Aborted}!void {
+        e.runPostStop();
+        if (sig.abort_signal != 0) return error.Aborted;
+    }
 };
 
 /// The wrapper's order (the table above), for the declaration `d`, whose
@@ -230,8 +256,9 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
     const old_mask = try sig.block();
     sig.ignorePipe();
     try sig.openSignalfd();
-    const machine = std.fmt.allocPrintSentinel(gpa, "{s}-{d}-{d}", .{ d.container, sys.getpid(), randomWord() }, 0) catch return oom();
-    var early: Early = .{ .post_stop = postStopCommands(gpa, d) catch return oom(), .machine = machine };
+    const machine = std.fmt.allocPrintSentinel(gpa, "{s}-{d}-{x:0>16}", .{ d.container, sys.getpid(), try randomWord() }, 0) catch return oom();
+    const post_stop = postStopCommands(gpa, d) catch return oom();
+    var early: Early = .{ .post_stop = post_stop, .machine = machine };
     errdefer early.runPostStop();
     try env.set("machine", machine);
     var tier_bpf: []const u8 = d.seccompTierFilter orelse "";
@@ -276,7 +303,7 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
         .warm => null,
         .cold => |cfd| cfd,
         .swept => {
-            early.runPostStop();
+            try early.beforeRelaunch();
             return prologue.relaunchSelf(gpa, p.argv, old_mask, @ptrCast(p.environ.ptr));
         },
     };
@@ -286,7 +313,7 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
     const files = switch (try identity.open(gpa, paths.prepared)) {
         .files => |f| f,
         .swept => {
-            early.runPostStop();
+            try early.beforeRelaunch();
             return prologue.relaunchSelf(gpa, p.argv, old_mask, @ptrCast(p.environ.ptr));
         },
     };
@@ -318,6 +345,7 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
             .ws = ws,
             .b = b,
             .machine = machine,
+            .post_stop = post_stop,
             .tier_bpf = tier_bpf,
             .umap = umap.slice(),
             .gmap = gmap.slice(),
@@ -345,6 +373,9 @@ const Found = struct {
     ws: workspace.Workspace,
     b: binds.Binds,
     machine: [:0]const u8,
+    /// postStop's commands, as `Early` holds them: the one list the
+    /// record and the launch's own `Early` then hold too
+    post_stop: []const spec.Command,
     tier_bpf: []const u8,
     umap: []const subid.Extent,
     gmap: []const subid.Extent,
@@ -374,7 +405,6 @@ fn specOf(gpa: Allocator, d: *const Declaration, p: Process, f: Found) Error!spe
     var seccomp: std.ArrayList([:0]const u8) = .empty;
     var limits: std.ArrayList(spec.Limit) = .empty;
     var post_start: std.ArrayList(spec.Command) = .empty;
-    var post_stop: std.ArrayList(spec.Command) = .empty;
     var pasta_args: std.ArrayList([:0]const u8) = .empty;
     var env: std.ArrayList(spec.Var) = .empty;
     return specAlloc(gpa, d, p, f, .{
@@ -383,7 +413,6 @@ fn specOf(gpa: Allocator, d: *const Declaration, p: Process, f: Found) Error!spe
         .seccomp = &seccomp,
         .limits = &limits,
         .post_start = &post_start,
-        .post_stop = &post_stop,
         .pasta_args = &pasta_args,
         .env = &env,
     }) catch |err| switch (err) {
@@ -401,7 +430,6 @@ const Lists = struct {
     seccomp: *std.ArrayList([:0]const u8),
     limits: *std.ArrayList(spec.Limit),
     post_start: *std.ArrayList(spec.Command),
-    post_stop: *std.ArrayList(spec.Command),
     pasta_args: *std.ArrayList([:0]const u8),
     env: *std.ArrayList(spec.Var),
 };
@@ -479,8 +507,9 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
     if (lim.oomGroup) try l.limits.append(gpa, .{ .file = "memory.oom.group", .value = "1" });
 
     // postStart's commands, each through the declaration's program, with
-    // the launcher's arguments after it; postStop's, through its own
-    // (:413-421; module.nix's post-stop tokens).
+    // the launcher's arguments after it (:413-421). postStop's, through
+    // its own, are the list step 5 made for `Early` (`f.post_stop`), so
+    // what the record holds is what a launch that failed before it ran.
     for (d.postStart) |c| {
         var w: std.ArrayList([:0]const u8) = .empty;
         if (d.postStartProgram) |prog| try w.append(gpa, try z.of(gpa, prog));
@@ -488,7 +517,6 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
         for (p.args) |a| try w.append(gpa, std.mem.span(a));
         try l.post_start.append(gpa, w.items);
     }
-    try l.post_stop.appendSlice(gpa, try postStopCommands(gpa, d));
 
     // The network: pasta's ports (portList, hostPorts) and
     // --no-map-gw, then the resolver, read once (:423-461).
@@ -576,7 +604,7 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
         .holder_start = &holder_start,
         .limits = l.limits.items,
         .post_start = l.post_start.items,
-        .post_stop = l.post_stop.items,
+        .post_stop = f.post_stop,
         .network = d.network != null,
         .pasta_args = l.pasta_args.items,
         // Fixed ports are bound on the host, so teardown waits for pasta
@@ -607,10 +635,14 @@ fn postStopCommands(gpa: Allocator, d: *const Declaration) Allocator.Error![]con
 /// The declaration's `exec`, run as the other commands are, with the
 /// launcher's arguments after its own, its stdout captured as theirs is
 /// (at most cmd.output_max) and read as its protocol (cmd.parseExec). Its
-/// failure, output of another shape, a name that is no variable's, one
-/// printed twice and one the session already sets -- the launch's own
-/// (spec.fixed_env) or the container's (`environment`) -- are each
+/// failure, output of another shape, an empty name (each field is split
+/// at its first `=`), one printed twice, one tini reads
+/// (spec.init_prefix) and one the session already sets -- the launch's
+/// own (spec.fixed_env) or the container's (`environment`) -- are each
 /// refused, saying so: nothing it prints overrides anything silently.
+/// The names are held in a set as they are judged, so a caller whose
+/// arguments the hook echoes as variables, a MiB of them, costs a pass
+/// over them rather than a comparison of each with every earlier one.
 fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const [*:0]const u8, envp: cmd.Envp) Error!cmd.Exec {
     const o = try cmd.capture(gpa, x, args, envp, cmd.output_max);
     if (o.status != 0) return msg.refuse("exec: {s} failed (status {d}); the payload does not run", .{ x[0], o.status });
@@ -624,14 +656,19 @@ fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const 
             .empty_program => msg.refuse("exec: {s} printed an empty program as the payload's", .{x[0]}),
         },
     };
-    for (e.env, 0..) |v, i| {
+    var declared: std.StringHashMapUnmanaged(void) = .empty;
+    for (d.environment) |w| declared.put(gpa, w.name, {}) catch return oom();
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    for (e.env) |v| {
         if (!spec.isEnvName(v.name))
             return msg.refuse("exec: {s} printed a variable with an empty name", .{x[0]});
         if (spec.isOneOf(&spec.fixed_env, v.name))
             return msg.refuse("exec: {s} sets {s}, which the launch sets for every session", .{ x[0], v.name });
-        for (d.environment) |w| if (std.mem.eql(u8, w.name, v.name))
+        if (spec.isInitName(v.name))
+            return msg.refuse("exec: {s} sets {s}, which tini, the session's init, reads", .{ x[0], v.name });
+        if (declared.contains(v.name))
             return msg.refuse("exec: {s} sets {s}, which the container's environment already sets", .{ x[0], v.name });
-        for (e.env[0..i]) |w| if (std.mem.eql(u8, w.name, v.name))
+        if ((seen.getOrPut(gpa, v.name) catch return oom()).found_existing)
             return msg.refuse("exec: {s} sets {s} twice", .{ x[0], v.name });
     }
     return e;
@@ -737,16 +774,17 @@ fn blank(s: []const u8) bool {
     return true;
 }
 
-/// $RANDOM's range, 0 to 32767, from the kernel's pool; the clock's
-/// microseconds when it will not say.
-fn randomWord() u16 {
-    var buf: [2]u8 = undefined;
+/// The session name's last part: 64 bits from the kernel's pool, so no
+/// two names meet (the header). The wrapper's was bash's $RANDOM, 15 bits,
+/// which a reused pid met once in 32768 launches, with the ended session's
+/// record still there to find; and a launch that cannot have its bits is
+/// refused rather than named from the clock, which would make that case
+/// ordinary again.
+fn randomWord() Error!u64 {
+    var buf: [8]u8 = undefined;
     switch (sys.getrandom(&buf)) {
-        .ok => return std.mem.readInt(u16, &buf, .little) & 0x7fff,
-        .err => {
-            const t = sys.clockRealtime();
-            return @intCast(@divTrunc(@as(i64, t.nsec), 1000) & 0x7fff);
-        },
+        .ok => return std.mem.readInt(u64, &buf, .little),
+        .err => |e| return msg.fail(e, "getrandom, for the session's name", .{}),
     }
 }
 
@@ -884,4 +922,33 @@ test "idmaps: a negative result of fl_map's arithmetic, refused as the argv spec
     try testing.expectEqualStrings("flong launch: spec: uidmap is not a decimal number: '-9223372036854774809'\n", try said(&b, idmaps, .{ a, "uidmap", &negative }));
     const letters = [_]subid.Extent{.{ .{ .text = "0" }, .{ .text = "x" }, .{ .text = "1" } }};
     try testing.expectEqualStrings("flong launch: spec: gidmap is not a decimal number: 'x'\n", try said(&b, idmaps, .{ a, "gidmap", &letters }));
+}
+
+test "Early.beforeRelaunch: a terminating signal queued ends the launch after postStop, in place of the relaunch" {
+    const old = try sig.block();
+    defer sig.setMask(old);
+    try sig.openSignalfd();
+    defer {
+        sig.fd.?.close();
+        sig.fd = null;
+        sig.abort_signal = 0;
+    }
+    // Nothing queued: postStop runs, and the relaunch goes ahead.
+    var quiet: Early = .{ .post_stop = &.{}, .machine = "box-1-0000000000000000" };
+    try quiet.beforeRelaunch();
+    try testing.expect(quiet.done);
+    try testing.expectEqual(@as(u8, 0), sig.abort_signal);
+
+    // A SIGINT behind a SIGWINCH: taken off the signalfd, so postStop's
+    // waits run, and kept as the launch's status, where a relaunch would
+    // restore the mask with nothing pending and go on under a new name.
+    _ = sys.kill(sys.getpid(), sys.SIGWINCH);
+    _ = sys.kill(sys.getpid(), sys.SIGINT);
+    var early: Early = .{ .post_stop = &.{}, .machine = "box-1-0000000000000001" };
+    try testing.expectError(error.Aborted, early.beforeRelaunch());
+    try testing.expect(early.done);
+    try testing.expectEqual(@as(u8, sys.SIGINT), sig.abort_signal);
+    try testing.expectEqual(false, try sig.take(0));
+    // Once: the teardown's errdefer finds it done.
+    early.runPostStop();
 }

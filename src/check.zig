@@ -174,9 +174,11 @@ const Checker = struct {
 
     /// The container's environment (module.nix computes it from
     /// /etc/set-environment's options): each name a variable's, set once,
-    /// none but PATH one the launch sets itself, and each value's `$`
-    /// either `$$` or a reference to a value the launch fills in
-    /// (spec.badReference), so nothing is left for a shell.
+    /// none but PATH one the launch sets itself, none one tini reads
+    /// (spec.init_prefix), and each value's `$` either `$$` or a reference
+    /// to a value the launch fills in (spec.badReference), so nothing is
+    /// left for a shell. This is the one refusal of a launch variable's
+    /// line: module.nix computes the entry and leaves the judging here.
     fn environment(c: *Checker) Allocator.Error!void {
         const env = c.d.environment;
         for (env, 0..) |v, i| {
@@ -186,6 +188,8 @@ const Checker = struct {
             }
             if (!std.mem.eql(u8, v.name, "PATH") and spec.isOneOf(&spec.fixed_env, v.name))
                 try c.say("flong.{s}.environment sets {s}, which the launch sets for every session. Of the launch's own variables only PATH may be set here.", .{ c.n, v.name });
+            if (spec.isInitName(v.name))
+                try c.say("flong.{s}.environment sets {s}, which tini, the session's init, reads: the payload's environment is tini's too, and how the session's init behaves is the launch's, not the container's.", .{ c.n, v.name });
             for (env[0..i]) |w| if (std.mem.eql(u8, w.name, v.name)) {
                 try c.say("flong.{s}.environment sets {s} twice.", .{ c.n, v.name });
                 break;

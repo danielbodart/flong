@@ -50,18 +50,32 @@ let
   #
   # Everything else is REFUSED, with the line: another command, a
   # conditional, a backtick, a backslash, a quote inside the value, `$(`,
-  # `${NAME:-...}` or any other `$`, a reference to a variable bash sets
+  # `${NAME:-...}` or any other `$`, and a reference to a variable bash sets
   # itself ($PWD, $UID, $SHLVL...) or to one only the launch knows and
-  # flong does not expand (TERM, COLORTERM, FLONG_BINDS), and a line setting
-  # one of the launch's own variables other than PATH. So a surprise in the
-  # container's configuration fails the system's evaluation, with the line
-  # that caused it, rather than showing up as a wrong value in a session.
+  # flong does not expand (TERM, COLORTERM, FLONG_BINDS). So a surprise in
+  # the container's configuration fails the system's evaluation, with the
+  # line that caused it, rather than showing up as a wrong value in a
+  # session. A line setting one of the launch's own variables other than
+  # PATH, or one tini reads, is computed like any other: flong check refuses
+  # the entry, by name, in the declaration's build (src/check.zig's
+  # environment), which is the one place that rule is held.
 
-  # The launch's own variables (src/spec.zig's fixed_env), the ones of them
-  # a value may refer to (expandable), and bash's own, which it sets for
-  # itself and no computation here can know.
-  launchVariables = [ "PATH" "HOME" "USER" "LOGNAME" "SHELL" "XDG_RUNTIME_DIR" "TMPDIR" "FLONG_BINDS" "container" "TERM" "COLORTERM" ];
-  expandableVariables = [ "HOME" "USER" "LOGNAME" "SHELL" "XDG_RUNTIME_DIR" "TMPDIR" ];
+  # The launch's own variables (src/spec.zig's fixed_env) and the ones of
+  # them a value may refer to (expandable), read from the lines that
+  # declare them, so the launch and this computation cannot disagree about
+  # which names are whose; and bash's own, which it sets for itself and no
+  # computation here can know.
+  specList = name:
+    let
+      prefix = "pub const ${name} = [_][]const u8{ ";
+      line = lib.findFirst (lib.hasPrefix prefix) null
+        (lib.splitString "\n" (builtins.readFile ./src/spec.zig));
+    in
+    if line == null || ! lib.hasSuffix " };" line
+    then throw "module.nix: src/spec.zig no longer declares ${name} on one line, as `${prefix}\"A\", \"B\" };`"
+    else map builtins.fromJSON (lib.splitString ", " (lib.removeSuffix " };" (lib.removePrefix prefix line)));
+  launchVariables = specList "fixed_env";
+  expandableVariables = specList "expandable";
   bashVariables = "BASH(_[A-Z]+|OPTS|PID)?|UID|EUID|PPID|PWD|OLDPWD|HOSTNAME|HOSTTYPE|MACHTYPE|OSTYPE|SHLVL|SHELLOPTS|RANDOM|SRANDOM|SECONDS|EPOCHSECONDS|EPOCHREALTIME|LINENO|IFS|PS[0-4]|OPT(IND|ARG|ERR)|GROUPS|DIRSTACK|FUNCNAME|PIPESTATUS|HIST[A-Z]*|COMP_[A-Z]+|COLUMNS|LINES|MAILCHECK|_";
 
   # nix-channel.nix's lines, as extraInit holds them.
@@ -104,10 +118,13 @@ let
     '';
 
   # What /etc/set-environment would set, read as the header says: `entries`,
-  # each `{ name; value; }` in the order first set, its value in flong's
-  # words (`${NAME}` for the launch's, `$$` for a `$`); and `refusals`, one
-  # line each, empty when there is none. `closure` is the container's
-  # system, whose sw/bin is the launch's PATH.
+  # each `{ name; value; }`, by name, its value in flong's words (`${NAME}`
+  # for the launch's); and `refusals`, one line each, empty when there is
+  # none. `closure` is the container's system, whose sw/bin is the launch's
+  # PATH. A value holds no `$` of its own: a literal with one is refused
+  # (badIn), and what a reference resolves to is an earlier value, a
+  # reference, the closure or `flong`. So nothing here spells one as `$$`,
+  # though the format has it for a declaration written by hand.
   environmentOf = e: closure:
     let
       text = setEnvironmentText e (lib.replaceStrings [ channelLines ] [ "" ] e.extraInit);
@@ -135,8 +152,8 @@ let
         else if lib.elem r expandableVariables then { ok = [ { ref = r; } ]; }
         else if r == "PATH" then { ok = [ "${closure}/sw/bin" ]; }
         else if r == "container" then { ok = [ "flong" ]; }
-        else if lib.elem r launchVariables then { bad = "refers to \$${r}, which only the launch knows"; }
         else if builtins.match bashVariables r != null then { bad = "refers to \$${r}, which bash sets for itself"; }
+        else if lib.elem r launchVariables then { bad = "refers to \$${r}, which only the launch knows"; }
         else { ok = [ ]; };
 
       step = st: line:
@@ -154,19 +171,15 @@ let
         if skip line then st
         else if m == null then refuse "is not an `export NAME=VALUE` flong can read without a shell"
         else if ps == [ { ref = n; } ] then st
-        else if n != "PATH" && lib.elem n launchVariables then refuse "sets ${n}, which the launch sets for every session"
         else if badLiteral != [ ] then refuse "holds `${lib.head badLiteral}`, which only a shell could read"
         else if badRef != [ ] then refuse (lib.head badRef).bad
-        else st // {
-          set = st.set // { ${n} = lib.concatMap (x: x.ok) resolved; };
-          order = st.order ++ lib.optional (! st.set ? ${n}) n;
-        };
+        else st // { set = st.set // { ${n} = lib.concatMap (x: x.ok) resolved; }; };
 
-      final = lib.foldl' step { set = { }; order = [ ]; refusals = [ ]; } lines;
-      render = map (p: if lib.isString p then lib.replaceStrings [ "$" ] [ "$$" ] p else "\${${p.ref}}");
+      final = lib.foldl' step { set = { }; refusals = [ ]; } lines;
+      render = map (p: if lib.isString p then p else "\${${p.ref}}");
     in
     {
-      entries = map (n: { name = n; value = lib.concatStrings (render final.set.${n}); }) final.order;
+      entries = map (n: { name = n; value = lib.concatStrings (render final.set.${n}); }) (lib.attrNames final.set);
       inherit (final) refusals;
     };
 
@@ -474,10 +487,16 @@ let
 
   # The rendered file, /etc/flong/<name>.zon.
   declFileOf = name: c:
-    let s = (declarationOf name c).setEnvironment; in
+    let
+      s = (declarationOf name c).setEnvironment;
+      value = declValueOf name c;
+    in
     pkgs.writeTextFile {
       name = "flong-${name}.zon";
-      text = toZon.toZON toZon.enumPaths (declValueOf name c);
+      text = toZon.toZON toZon.enumPaths value;
+      # The value rendered, for tests/assertions.nix to read a computed
+      # field (`environment`) as Nix rather than as the file's text.
+      passthru.declaration = value;
       # flong check judges the file as the launch will read it, so a
       # declaration flong refuses fails the build, with its line and column
       # or the refusal's own words (src/check.zig). And the container's
@@ -676,18 +695,6 @@ let
           declare users.users.${c.user}.uid and the gid of its group in the
           container's configuration.
         '';
-      }
-      {
-        assertion = (c.command == null) != (c.exec == null);
-        message =
-          if c.command != null then ''
-            flong.${n} sets both `command` and `exec`. The payload is one or
-            the other: `command` when it is known at evaluation, `exec` when
-            only the launch can say it.
-          '' else ''
-            flong.${n} sets neither `command` nor `exec`, so nothing names
-            the payload.
-          '';
       }
       {
         assertion = d.environment.refusals == [ ];

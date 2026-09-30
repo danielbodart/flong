@@ -142,9 +142,9 @@ const Launch = struct {
     gate_opened: bool = false,
     /// postStop's commands for the session's name while no record holds
     /// them: run by the teardown of a launch that failed before its record
-    /// was made, and done once the record holds them, or once another
-    /// session is found holding the name, whose postStop is not this
-    /// launch's (record.create's `taken`)
+    /// was made, and done once the record holds them. The name is no other
+    /// session's (assemble.zig's header), so a record refused is this
+    /// launch's failure, and its postStop this launch's to run.
     early: assemble.Early,
 };
 
@@ -281,14 +281,16 @@ fn launch(start: sys.timespec, arena: Allocator, d: *const decl.Declaration, arg
     // relaunch this binary with the process's argv, having run postStop
     // for this session's name, since the relaunch names another. A
     // terminating signal ends the wait for a cache being swept, and the
-    // launch then exits the way teardown would say (:895-907).
+    // launch then exits the way teardown would say (:895-907); so does one
+    // queued by the time the cache is found swept, in place of the
+    // relaunch (assemble.Early.beforeRelaunch).
     const cache = switch (prologue.cacheLock(s.cache) catch |err| refuseEarly(&early, switch (err) {
         error.Aborted => 128 + sig.abort_signal,
         error.Reported => not_run,
     })) {
         .locked => |h| h,
         .swept => {
-            early.runPostStop();
+            early.beforeRelaunch() catch proc.exit(128 + sig.abort_signal);
             proc.exit(prologue.relaunchSwept(arena, s.cache, argv, old_mask, @ptrCast(envp.ptr)));
         },
     };
@@ -355,11 +357,7 @@ fn run(l: *Launch) sig.Error!u8 {
     // 9. The record, locked, naming the cgroup the session will have
     // (:724-730).
     const cg_path = try cgroup.sessionPath(holder, s.container, s.machine);
-    var taken = false;
-    l.rec = record.create(l.state.sessions, holder, s.machine, s.post_stop, cg_path.slice(), &taken) catch |err| {
-        if (taken) l.early.done = true;
-        return err;
-    };
+    l.rec = try record.create(l.state.sessions, holder, s.machine, s.post_stop, cg_path.slice());
     l.early.done = true;
     msg.trace("recorded");
 

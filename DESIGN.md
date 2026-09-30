@@ -30,7 +30,8 @@ wrapper it replaced did (`src/launch/assemble.zig`):
    which must exist and be the caller's.
 2. `workspace`, then `binds`, then `guard`, each as the caller.
 3. Block the launch's signals and read them from a signalfd. Name the
-   session `<container>-<launcher pid>-<random>`, then run `seccompPolicy`,
+   session `<container>-<launcher pid>-<64 random bits, in hex>`, a name
+   no other session has had, then run `seccompPolicy`,
    as the caller, and compile what it prints; then `exec`, when the
    declaration has it, and read the payload it prints. From here, a
    prologue or launch that fails before the session's record exists runs
@@ -146,7 +147,9 @@ as bash would run it, with what the session's environment holds before it:
   name an earlier line set is that line's value. One to a variable only the
   launch knows the value of, `$HOME`, `$USER`, `$LOGNAME`, `$SHELL`,
   `$XDG_RUNTIME_DIR` or `$TMPDIR`, stays a reference, `${NAME}`, which
-  `flong launch` fills in (`spec.expand`), with `$$` for a `$`. One to
+  `flong launch` fills in (`spec.expand`). A literal `$` never reaches a
+  value (it is refused, below), so module.nix never writes the format's
+  `$$`, which is there for a declaration written by hand. One to
   `PATH` before any line sets it is the launch's own, `<closure>/sw/bin`,
   and to `container` is `flong`. A name nothing sets is unset, since the
   environment is built from nothing, and expands to nothing as bash expanded
@@ -160,16 +163,21 @@ as bash would run it, with what the session's environment holds before it:
   command, a conditional, a backtick, a backslash, a quote in a value,
   `$(`, `${NAME:-...}`, a reference to a variable bash sets for itself
   (`$PWD`, `$UID`, `$SHLVL`) or to one only the launch knows and flong does
-  not expand (`$TERM`, `$COLORTERM`, `$FLONG_BINDS`), and a line setting a
-  variable of the launch's own other than `PATH`. A surprise in the
+  not expand (`$TERM`, `$COLORTERM`, `$FLONG_BINDS`). A surprise in the
   container's configuration fails `nixos-rebuild` with its line, rather
-  than showing up as a wrong value in a session.
+  than showing up as a wrong value in a session. A line setting a variable
+  of the launch's own other than `PATH` is computed like any other, and
+  `flong check` refuses the entry by name, the one place that rule is held.
+
+module.nix reads which names are the launch's own and which it fills in
+from `src/spec.zig`'s `fixed_env` and `expandable` lines themselves, so the
+evaluation and the launch cannot disagree about them.
 
 The declaration's build compares nixpkgs's file with the text module.nix
 read, byte for byte, so a nixpkgs that writes the file differently fails the
 build rather than drifting from it; and `flong check` holds the computed
 list to its own rules (a name set once, none of the launch's but `PATH`,
-every `$` a `$$` or a reference it fills in). `checks.basic`'s
+none tini reads, every `$` a `$$` or a reference it fills in). `checks.basic`'s
 environment subtest holds a session's payload's environment to what a bash
 in the same session makes of the container's file, started with the same
 launch variables: equal, but for the three bash sets for itself (`SHLVL`,
@@ -180,15 +188,22 @@ the caller's tokens and agent sockets never reach it. It gets `PATH` (the
 container's, or the closure's `sw/bin` when the container sets none),
 `HOME`, `USER`, `LOGNAME`, `SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`,
 `FLONG_BINDS`, `container=flong`, `TERM` and, when the caller has it,
-`COLORTERM`; then the container's `environment`; then what `exec` printed.
-No name is set twice: `flong check` refuses a container variable of the
-launch's own but `PATH`, and the launch refuses an `exec` variable that
-either sets. Its hostname is the container's name.
+`COLORTERM`; then the container's `environment`; then what `exec` printed;
+and `PWD`, the workspace, from flong init. No name is set twice, and none
+is replaced without a word: `flong check` refuses a container variable of
+the launch's own but `PATH`, and the launch refuses an `exec` variable
+that either sets. Neither may set a `TINI_*`: tini, the session's pid 1,
+runs with the payload's environment and reads those, and how the
+session's init reaps and signals is the launch's. The loader's names
+(`LD_*`, `GLIBC_TUNABLES`) are allowed, and reach tini as well as the
+payload; tini runs as the payload's user, in the session, with no
+capability, so they give nothing the payload would not have. Its hostname
+is the container's name.
 
 ### `exec`: a payload only the launch can decide
 
 `exec` is one command, in place of `command` (a declaration has exactly
-one of them, which `flong check` and a module assertion both hold), run on
+one of them, which `flong check` holds, in the declaration's build), run on
 the host as the caller after `seccompPolicy`, with the same environment
 (`$workspace`, `$workspace_mode`, `$binds`, `$machine`, `path` on `PATH`)
 and the launcher's arguments after its own. Its stdout, at most 1 MiB as
@@ -197,10 +212,12 @@ adds to the payload's environment, one empty field, then the payload's
 whole argument list, at least its program. It is how a consumer decides at
 launch what runs and with what, on the host, where a wrapper script in the
 session used to: the session then runs one exec'd program and nothing
-else. A non-zero exit, output of another shape, a name that is empty, one
-printed twice, and one the launch or the container already sets are each
-a refusal, 1, said under the declaration's name; nothing it prints
-overrides anything silently.
+else. A non-zero exit, output of another shape, a name that is empty (a
+field is split at its first `=`), one printed twice, a `TINI_*`, and one
+the launch or the container already sets, `PWD` among them, are each a
+refusal, 1, said under the declaration's name; nothing it prints
+overrides anything silently. The names are judged through a set, so a
+MiB of them costs one pass.
 
 ## Sessions are overlays on a prepared root
 
@@ -411,21 +428,35 @@ launches of one checkout at once would each apply the other's approval. See
 [Seccomp](#seccomp). **`exec` runs after it**, with the same, and prints
 the payload ([`exec`](#exec-a-payload-only-the-launch-can-decide)).
 
-**What those two stage, `postStop` releases, however the launch ends.**
-From the moment the session is named, before `seccompPolicy`, every way a
-launch can end runs `postStop` for `$machine` exactly once: the session's
-teardown or the sweep, from its record, once the record exists; before
-that, the launch itself (`assemble.Early`), whether the prologue refuses,
-the spec is refused, the cache is swept and flong relaunches under a new
-name, or the launch fails before its record (the holder cannot start, say).
-The prologue blocks the launch's signals and opens its signalfd just before
-it names the session, so a terminating signal while `seccompPolicy` or
-`exec` runs, or the root is prepared, ends that wait as an event, kills the
-command and runs `postStop`, where it once killed the launcher with
-whatever had been staged left behind. A record-less launch that finds its
-name held by another live session does not run `postStop`: that session's
-is not its to run. A SIGKILL before the record exists leaves nothing to run
-it from.
+**What those two stage, `postStop` releases, whichever way the launcher
+ends the launch.** From the moment the session is named, before
+`seccompPolicy`, every end the launcher sees runs `postStop` for
+`$machine` exactly once: the session's teardown or the sweep, from its
+record, once the record exists; before that, the launch itself
+(`assemble.Early`), whether the prologue refuses, the spec is refused, the
+cache is swept and flong relaunches under a new name, or the launch fails
+before its record (the holder cannot start, say). The prologue blocks the
+launch's signals and opens its signalfd just before it names the session,
+so a terminating signal while `seccompPolicy` or `exec` runs, or the root
+is prepared, ends that wait as an event, kills the command and runs
+`postStop`, where it once killed the launcher with whatever had been
+staged left behind. One that is queued, unread, when the cache is found
+swept ends the launch there, 128+n, after `postStop`, rather than being
+taken off the signalfd and lost to a relaunch that would run every
+command again.
+
+The name is `<container>-<launcher pid>-<64 random bits>`, so no two
+sessions have one: the pid tells it from every live launcher's, the bits
+from every ended session's record a sweep has yet to release. So a launch
+that fails before its record never finds its name another's, and runs
+`postStop` for it whatever the failure; with the wrapper's 15 bits of
+`$RANDOM` a reused pid met an ended session's name once in 32768, and
+what `seccompPolicy` and `exec` staged overwrote that session's before
+the record's refusal could say so.
+
+What the launcher cannot see end it -- a SIGKILL, the OOM killer, a crash
+-- before the record exists leaves nothing that knows the name, and what
+was staged for it stays (PLAN.md).
 
 Every hook runs under `set -euo pipefail` with `path` on `PATH`, and every
 one but `postStop` sees the launcher's arguments in `"$@"`. `postStop` runs

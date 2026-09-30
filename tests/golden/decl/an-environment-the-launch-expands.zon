@@ -1,6 +1,7 @@
 // What module.nix computes from a container's /etc/set-environment:
-// references to the six the launch fills in, a $ spelt $$, and PATH,
-// which replaces the launch's own.
+// references to the six the launch fills in, and PATH, which replaces the
+// launch's own. And a $ spelt $$, which module.nix never writes (no value
+// it computes holds a $ of its own) but a declaration written by hand may.
 .{
     .user = "u",
     .command = .{"true"},

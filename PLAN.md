@@ -89,8 +89,9 @@ toolchain survives.
   the launch and the sweeper put the declaration's `commandPath` on `PATH`
   themselves.
 - **A SIGKILL before the record.** From the moment the prologue names the
-  session, `postStop` runs for it however the launch ends, but a SIGKILL
-  before the record exists leaves nothing that knows the name: the sweep
+  session, `postStop` runs for it however the launcher ends the launch,
+  but a SIGKILL, the OOM killer or a crash before the record exists leaves
+  nothing that knows the name: the sweep
   finds records only. What `seccompPolicy` or `exec` staged for that
   `$machine` stays until something else releases it. A record written as
   the session is named, before the hooks, would close it, at the cost of a

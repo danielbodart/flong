@@ -403,10 +403,8 @@ fn encode(commands: []const []const [:0]const u8, out: *[path_max]u8) union(enum
 /// the sweep does), and links the name then. error.Aborted when a
 /// terminating signal ended that wait.
 /// `post_stop` is postStop's commands, in order (spec.Spec's), each at
-/// least a word; none, no poststop=. `taken`, when given, is set when the
-/// refusal is a name another session holds, whose postStop is not this
-/// launch's to run.
-pub fn create(sessions: fdt.Held(.dir), h: *const cgroup.Holder, machine: [:0]const u8, post_stop: []const []const [:0]const u8, cgroup_path: []const u8, taken: ?*bool) sig.Error!Record {
+/// least a word; none, no poststop=.
+pub fn create(sessions: fdt.Held(.dir), h: *const cgroup.Holder, machine: [:0]const u8, post_stop: []const []const [:0]const u8, cgroup_path: []const u8) sig.Error!Record {
     // 1. The text. A newline in a value would be a line of its own
     // choosing (:333-341), and a separator in a word a command or a word of
     // its own.
@@ -457,16 +455,10 @@ pub fn create(sessions: fdt.Held(.dir), h: *const cgroup.Holder, machine: [:0]co
             // refuses.
             switch (sweepOne(sessions, machine, h, .wait_ended) catch |e| break :steps e) {
                 .released, .gone => continue,
-                .running => {
-                    if (taken) |t| t.* = true;
-                    break :steps msg.refuse("a session named {s} is already running", .{machine});
-                },
+                .running => break :steps msg.refuse("a session named {s} is already running", .{machine}),
                 // A record the sweep left, a malformed one under the name
                 // included (quirk 5, kept).
-                .left => {
-                    if (taken) |t| t.* = true;
-                    break :steps msg.refuse("a session named {s} has ended but cannot be released yet", .{machine});
-                },
+                .left => break :steps msg.refuse("a session named {s} has ended but cannot be released yet", .{machine}),
             }
         }
     };

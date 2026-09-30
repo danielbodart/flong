@@ -3,7 +3,8 @@
 # the caller's binds in both modes, the declaration's file and socket binds,
 # the command as an argument list and the environment it is exec'd with,
 # `exec`, the identity, the caller's hooks and their teardown, postStop after
-# a launch that fails before its session, the network, its DNS and the ports it does and does not reach, the
+# a launch that fails before its session or relaunches when its cache is
+# swept, the network, its DNS and the ports it does and does not reach, the
 # session cleanup and the sweep that reclaims what a killed session left.
 #
 # Every launch is made by a lingering alice through her own user manager, on a
@@ -585,6 +586,8 @@ in
             field "EXEC_WORKSPACE=$workspace" "EXEC_MODE=$workspace_mode" "EXEC_EMPTY=" "EXEC_EQUALS=a=b"
             field "" bash -c 'printf "%s|" "$EXEC_WORKSPACE" "$EXEC_MODE" "$EXEC_EMPTY" "$EXEC_EQUALS" "$PWD" "$LANG"; printf "[%s]" "$@"; echo' payload "$@" ;;
           fixed) field "HOME=/root" "" true ;;
+          pwd) field "PWD=/elsewhere" "" true ;;
+          tini) field "TINI_KILL_PROCESS_GROUP=1" "" true ;;
           declared) field "LANG=C" "" true ;;
           twice) field "A=1" "A=2" "" true ;;
           noname) field "=1" "" true ;;
@@ -935,6 +938,8 @@ in
           program = machine.succeed("grep -o '/nix/store/[a-z0-9]*-flong-test-exec' /etc/flong/execd.zon | head -1").strip()
           for mode, said in [
               ("fixed", "sets HOME, which the launch sets for every session"),
+              ("pwd", "sets PWD, which the launch sets for every session"),
+              ("tini", "sets TINI_KILL_PROCESS_GROUP, which tini, the session's init, reads"),
               ("declared", "sets LANG, which the container's environment already sets"),
               ("twice", "sets A twice"),
               ("noname", "printed a variable with an empty name"),
@@ -952,7 +957,7 @@ in
           # that ran, ran postStop exactly once for its $machine, which
           # released what exec and seccompPolicy staged for it.
           machines = machine.succeed("cat /tmp/execd-machines").split()
-          assert len(machines) == 11 and len(set(machines)) == 11, machines
+          assert len(machines) == 13 and len(set(machines)) == 13, machines
           assert machine.succeed("cat /tmp/execd-policy").split() == machines
           released = machine.succeed("cat /tmp/execd-released").split()
           assert sorted(released) == sorted(machines), (machines, released)
@@ -995,6 +1000,51 @@ in
           # And the holder starts again on the next launch.
           machine.succeed(by_caller("${execd} ok"))
           assert len(machine.succeed("cat /tmp/execd-released").split()) == 2
+
+      @test("postStop runs once for each name of a launch that relaunches when its cache is swept")
+      def _():
+          machine.succeed(NO_SESSIONS)
+          # A warm launch first, so the one below finds the cache prepared
+          # and first waits for it at the launch's own cache lock.
+          machine.succeed(by_caller("${execd} ok"))
+          machine.succeed("rm -f /tmp/execd-*")
+          cache = machine.succeed(
+              f"ls -d {STATE}/demo-????????-????????-1000.100.100000.100000.100").strip()
+          # Held exclusively, as a sweep holds a cache it is removing, until
+          # the test says; then renamed into the trash, as the sweep renames
+          # it, and let go.
+          trash = f"{STATE}/.trash.execd-swept"
+          machine.succeed(
+              f"flock -x {cache} sh -c 'touch /tmp/execd-locked; "
+              "while [ ! -e /tmp/execd-unlock ]; do sleep 0.1; done; "
+              f"mv {cache} {trash}' >/dev/null 2>&1 &")
+          machine.wait_until_succeeds("test -e /tmp/execd-locked")
+          machine.succeed(by_caller("${execd} ok 2>/tmp/execd-swept-err; echo rc=$? >/tmp/execd-swept-rc") + " >/dev/null 2>&1 &")
+          # exec has run and staged for the first name; the launch is
+          # waiting at the cache lock, behind the holder: a blocked flock on
+          # the cache's inode, taken by the launch's lock helper, a child of
+          # its own, so by inode rather than pid.
+          machine.wait_until_succeeds("test -s /tmp/execd-machines")
+          first = machine.succeed("cat /tmp/execd-machines").strip()
+          ino = machine.succeed(f"stat -c %i {cache}").strip()
+          machine.wait_until_succeeds(f"grep -E -- '-> FLOCK +ADVISORY +[A-Z]+ +[0-9]+ +[0-9a-f]+:[0-9a-f]+:{ino} ' /proc/locks")
+          machine.succeed("touch /tmp/execd-unlock")
+          # Found swept: postStop for the first name, then a relaunch that
+          # names the session anew, runs exec again, prepares the root cold,
+          # collects the trash and runs the payload; its postStop is the
+          # second name's.
+          machine.wait_until_succeeds("test -e /tmp/execd-swept-rc", timeout=300)
+          assert machine.succeed("cat /tmp/execd-swept-rc").strip() == "rc=0"
+          said = machine.succeed("cat /tmp/execd-swept-err")
+          assert f"the cache {cache} was swept before this launch locked it; relaunching" in said, said
+          machines = machine.succeed("cat /tmp/execd-machines").split()
+          assert len(machines) == 2 and machines[0] == first and machines[1] != first, machines
+          assert machine.succeed("cat /tmp/execd-policy").split() == machines
+          assert machine.succeed("cat /tmp/execd-released").split() == machines
+          machine.fail("ls /tmp/execd-staged-*")
+          machine.succeed(NO_SESSIONS)
+          machine.fail(f"test -e {trash}")
+          machine.succeed(f"test -d {cache}/prepared")
 
       @test("a clean launch writes nothing to stderr", part="a")
       def _():

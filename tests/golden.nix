@@ -212,9 +212,11 @@ let
     # what the launch expands and what it refuses to leave for a shell,
     # were added when the payload lost its wrapper (both-command-and-exec,
     # neither-command-nor-exec, an-exec-in-place-of-command, an-empty-exec,
-    # an-environment-*). These are now the only
-    # cases of those refusals: module.nix no longer asserts them
-    # (tests/assertions.nix). Each case NAME's declaration is NAME.zon,
+    # an-environment-*). flong check alone holds those rules: module.nix
+    # asserts neither the payload's nor an entry's name, and refuses only
+    # the /etc/set-environment lines it cannot compute without a shell
+    # (tests/assertions.nix, whose assertions-decl holds that the rest
+    # surface in the file's build). Each case NAME's declaration is NAME.zon,
     # GOLDEN the store directory holding them.
     decl = {
       program = "${launcher}/bin/flong";
