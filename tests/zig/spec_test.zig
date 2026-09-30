@@ -155,6 +155,7 @@ fn expectArgv(s: spec.Spec, relay: bool, want: []const []const u8) !void {
         .resolv = if (s.resolv_conf != null) @as(?Named, .{ .name = "@RESOLV@" }) else null,
         .gate_r = Named{ .name = "@GATE@" },
         .ready_w = Named{ .name = "@READY@" },
+        .files = if (s.files.len > 0) @as(?Named, .{ .name = "@FILES@" }) else null,
     }, relay, "/nix/store/test-only-flong");
 
     for (want, 0..) |w, i| {
@@ -189,7 +190,7 @@ const middle = [_][]const u8{
     "/run/user/1000",      "--perms",                         "1777",          "--tmpfs",
     "/tmp",                "--ro-bind",                       "/sys",          "/.hostsys",
 };
-const init_plain = [_][]const u8{ "--", "/nix/store/test-only-flong", "init", "@GATE@", "@READY@", "100,27", "-", "-", "/home/u/w" };
+const init_plain = [_][]const u8{ "--", "/nix/store/test-only-flong", "init", "@GATE@", "@READY@", "-", "100,27", "-", "-", "/home/u/w" };
 const tail_command = [_][]const u8{ "--", "sh", "-c", "exec \"$@\"", "--" };
 
 fn cat(comptime parts: []const []const []const u8) []const []const u8 {
@@ -207,7 +208,7 @@ test "bwrapArgv: relay, a session of its own and flong init's ctty" {
         &head,
         &.{"--new-session"},
         &middle,
-        &.{ "--", "/nix/store/test-only-flong", "init", "@GATE@", "@READY@", "100,27", "ctty", "-", "/home/u/w" },
+        &.{ "--", "/nix/store/test-only-flong", "init", "@GATE@", "@READY@", "-", "100,27", "ctty", "-", "/home/u/w" },
         &tail_command,
     }));
 }
@@ -259,7 +260,30 @@ test "bwrapArgv: trace, and no groups" {
     try expectArgv(s, false, comptime cat(&.{
         &head,
         &middle,
-        &.{ "--", "/nix/store/test-only-flong", "init", "@GATE@", "@READY@", "-", "-", "trace", "/home/u/w", "--", "true" },
+        &.{ "--", "/nix/store/test-only-flong", "init", "@GATE@", "@READY@", "-", "-", "-", "trace", "/home/u/w", "--", "true" },
+    }));
+}
+
+test "bwrapArgv: files to seed, flong init's FILES a memfd in place of -" {
+    var s = base();
+    s.files = &.{.{ .mode = 0o600, .path = ".claude/.credentials.json", .content = "{}" }};
+    try expectArgv(s, false, comptime cat(&.{
+        &head,
+        &middle,
+        &.{ "--", "/nix/store/test-only-flong", "init", "@GATE@", "@READY@", "@FILES@", "100,27", "-", "-", "/home/u/w" },
+        &tail_command,
+    }));
+}
+
+test "filesData: the home, then each file's mode in octal, path and content, every field NUL-ended" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try testing.expectEqualStrings("/home/u\x00", try spec.filesData(a, "/home/u", &.{}));
+    try testing.expectEqualStrings("/home/u\x00600\x00.c/x\x00{}\x00" ++ "0\x00e\x00\x00" ++ "777\x00f\x00a\nb\x00", try spec.filesData(a, "/home/u", &.{
+        .{ .mode = 0o600, .path = ".c/x", .content = "{}" },
+        .{ .mode = 0, .path = "e", .content = "" },
+        .{ .mode = 0o777, .path = "f", .content = "a\nb" },
     }));
 }
 
@@ -439,6 +463,12 @@ const cases = [_]Case{
     case("bwrap-arg-setenv-empty", set("env", @as(?[]const spec.Var, &.{.{ .name = "", .value = "v" }})), "spec: bwrap-arg: '' is not a variable name"),
     case("bwrap-arg-unsetenv-equals", set("env", @as(?[]const spec.Var, &.{.{ .name = "A=B", .value = "v" }})), "spec: bwrap-arg: 'A=B' is not a variable name"),
     case("bwrap-arg-hostname-empty", set("hostname", @as(?[:0]const u8, "")), "spec: bwrap-arg --hostname is empty"),
+    // The files flong init seeds, relative to the home.
+    case("file-absolute", set("files", @as([]const spec.File, &.{.{ .mode = 0o600, .path = "/home/u/x", .content = "" }})), "spec: file is not a relative path: '/home/u/x'"),
+    case("file-dotdot", set("files", @as([]const spec.File, &.{.{ .mode = 0o600, .path = "../x", .content = "" }})), "spec: file has an empty, '.' or '..' component: '../x'"),
+    case("file-empty", set("files", @as([]const spec.File, &.{.{ .mode = 0o600, .path = "", .content = "" }})), "spec: file has an empty, '.' or '..' component: ''"),
+    case("file-setuid", set("files", @as([]const spec.File, &.{.{ .mode = 0o4755, .path = "x", .content = "" }})), "spec: file x's mode 4755 is more than the permission bits"),
+    case("file-nul", set("files", @as([]const spec.File, &.{.{ .mode = 0o600, .path = "x", .content = "a\x00b" }})), "spec: file x's content holds a NUL"),
     // A field's refusal before any across fields (pass2-before-cross), and
     // the fields in validate's order (pass2-in-order).
     case("pass2-before-cross", struct {
@@ -516,6 +546,7 @@ test "validate: every field set, each at an edge that passes (accepted-all)" {
     s.env = &.{ .{ .name = "A", .value = "" }, .{ .name = "-", .value = "=" } };
     s.hostname = "h";
     s.resolv_conf = "";
+    s.files = &.{ .{ .mode = 0, .path = "x", .content = "" }, .{ .mode = 0o777, .path = "a/" ++ name_max ++ "/c", .content = "\xff\n" } };
     s.trace = true;
     try expectPasses(&s);
 }

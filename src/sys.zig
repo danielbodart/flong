@@ -195,6 +195,23 @@ pub fn fstat(fd: fd_t) Result(Stat) {
     };
 }
 
+/// fchmod(2): the mode of the file `fd` is open on, which no path names
+/// again.
+pub fn fchmod(fd: fd_t, mode: mode_t) Result(void) {
+    return result(void, linux.fchmod(fd, mode));
+}
+
+/// mmap(2) of the first `len` bytes of `fd`, read-only and MAP_PRIVATE:
+/// flong init reads its FILES memfd so, with no allocator (init.zig,
+/// `seed`). The mapping lasts until the exec.
+pub fn mmapRead(fd: fd_t, len: usize) Result([]const u8) {
+    const rc = linux.mmap(null, len, linux.PROT.READ, .{ .TYPE = .PRIVATE }, fd, 0);
+    return switch (E.init(rc)) {
+        .SUCCESS => .{ .ok = @as([*]const u8, @ptrFromInt(rc))[0..len] },
+        else => |e| .{ .err = e },
+    };
+}
+
 /// fchmodat(2), which follows a final symlink (the kernel takes no flags).
 pub fn fchmodat(dir: fd_t, path: [*:0]const u8, mode: mode_t) Result(void) {
     return result(void, linux.fchmodat(dir, path, mode, 0));
@@ -415,7 +432,9 @@ pub const RESOLVE = struct {
 
 /// openat2(2), as flong-mount.c:49-53 makes it: `how` passed whole, its
 /// size the struct's. Not retried: the C does not, and no open here is of
-/// a FIFO. fd.zig is its only caller, and adds O_CLOEXEC.
+/// a FIFO. fd.zig calls it, and adds O_CLOEXEC; so does flong init, which
+/// has no descriptor table, to seed the payload's files (init.zig), with
+/// O_NONBLOCK where a FIFO could be met.
 pub fn openat2(dir: fd_t, path: [*:0]const u8, how: *const OpenHow) Result(fd_t) {
     return result(fd_t, linux.syscall4(.openat2, @bitCast(@as(isize, dir)), @intFromPtr(path), @intFromPtr(how), @sizeOf(OpenHow)));
 }

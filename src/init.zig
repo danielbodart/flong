@@ -6,13 +6,14 @@
 //! (--as-pid-1), so it runs before anything of the payload's and is the
 //! gate; bwrap's own --block-fd is fail-open, this one is fail-closed.
 //!
-//!   flong init GATE READY GROUPS TTY TRACE DIR -- COMMAND...
+//!   flong init GATE READY FILES GROUPS TTY TRACE DIR -- COMMAND...
 //!
-//! GATE and READY are descriptor numbers, GROUPS is comma-separated gids or
-//! "-", TTY is "ctty" or "-", TRACE is "trace" or "-", DIR is absolute. The
-//! protocol is argv, not the environment, so the wrapper's --clearenv cannot
-//! drop it and nothing has to be unset before the payload sees its
-//! environment. In order (ordering checkpoint 9, DESIGN.md) it:
+//! GATE and READY are descriptor numbers, FILES one or "-", GROUPS is
+//! comma-separated gids or "-", TTY is "ctty" or "-", TRACE is "trace" or
+//! "-", DIR is absolute. The protocol is argv, not the environment, so the
+//! wrapper's --clearenv cannot drop it and nothing has to be unset before
+//! the payload sees its environment. In order (ordering checkpoint 9,
+//! DESIGN.md) it:
 //!
 //! 1. calls setgroups. bwrap never does, so without this the caller's host
 //!    groups (wheel, docker, kvm) would stay effective. bwrap gives it
@@ -29,19 +30,25 @@
 //! 6. reads one byte from GATE. EOF means the launcher failed or died before
 //!    the helper, the hooks and pasta had all succeeded: exit 125, the payload
 //!    never runs.
-//! 7. changes to DIR. The workspace is a helper mount made after bwrap built
+//! 7. with FILES, seeds the files `exec` printed into the payload's home
+//!    (`seed`): as the payload's user, since the capabilities went at step
+//!    2, and after the gate, since the mount helper's binds into the home
+//!    are there only then. Nothing of the session runs yet, so nothing can
+//!    race a path it walks.
+//! 8. changes to DIR. The workspace is a helper mount made after bwrap built
 //!    the root, so this has to follow the gate; bwrap's --chdir would name the
 //!    directory underneath it. PWD is then DIR: bwrap set it to where it
 //!    left its own working directory, and the payload is exec'd with no
 //!    shell to set it again, so a program that trusts $PWD, as a shell's
 //!    `pwd` does, would be told the wrong directory.
-//! 8. closes every descriptor above stderr (bwrap leaks its namespace fds),
-//!    and execs tini -g -- COMMAND.
+//! 9. closes every descriptor above stderr (bwrap leaks its namespace fds),
+//!    FILES among them, and execs tini -g -- COMMAND.
 //!
 //! Every failure before the exec exits 125, the code the launcher reports as
 //! "the session did not start", its message printed whole in one writev
 //! (quirk 22). No libc, no allocator, no descriptor table: the groups go in
-//! a static array and tini's argv is the kernel's own (DESIGN.md,
+//! a static array, the files are read from FILES mapped, and tini's argv is
+//! the kernel's own (DESIGN.md,
 //! "Conventions"). Static, single-threaded and with no stack size, the start
 //! code makes no syscall before main, nor does src/main.zig's dispatch, and
 //! RLIMIT_STACK is left as it came (quirk 20; DESIGN.md, "What the port
@@ -103,6 +110,12 @@ fn fdArg(s: [*:0]const u8, which: []const u8) i32 {
     const v = decimal(std.mem.span(s), std.math.maxInt(i32)) orelse 0;
     if (v < 3) refuse("{s} descriptor is not a number above 2: {s}", .{ which, s });
     return @intCast(v);
+}
+
+/// FILES: "-", none, or a descriptor argument as `fdArg` reads one.
+fn filesArg(s: [*:0]const u8) ?i32 {
+    if (std.mem.eql(u8, std.mem.span(s), "-")) return null;
+    return fdArg(s, "files");
 }
 
 const Groups = union(enum) {
@@ -193,11 +206,13 @@ fn resetSignals() void {
 }
 
 /// The words of flong init's argv, from the subcommand's word on
-/// (flong-init.c:185-193): each slot's pointer, read before `tiniArgv`
-/// writes over TRACE, DIR and "--". Nothing but the shape is checked.
+/// (flong-init.c:185-193, with FILES after READY): each slot's pointer,
+/// read before `tiniArgv` writes over TRACE, DIR and "--". Nothing but the
+/// shape is checked.
 pub const Words = struct {
     gate: [*:0]const u8,
     ready: [*:0]const u8,
+    files: [*:0]const u8,
     groups: [*:0]const u8,
     tty: [*:0]const u8,
     trace: [*:0]const u8,
@@ -206,22 +221,209 @@ pub const Words = struct {
 
 /// argv as src/main.zig hands it over: the word "init" in slot 0, so the
 /// kernel's slots from `flong init` are these plus one. Null when the
-/// shape is wrong: no "--" in slot 7, or no command after it.
+/// shape is wrong: no "--" in slot 8, or no command after it.
 pub fn words(argv: []const [*:0]const u8) ?Words {
-    if (argv.len < 9 or !std.mem.eql(u8, std.mem.span(argv[7]), "--")) return null;
-    return .{ .gate = argv[1], .ready = argv[2], .groups = argv[3], .tty = argv[4], .trace = argv[5], .dir = argv[6] };
+    if (argv.len < 10 or !std.mem.eql(u8, std.mem.span(argv[8]), "--")) return null;
+    return .{ .gate = argv[1], .ready = argv[2], .files = argv[3], .groups = argv[4], .tty = argv[5], .trace = argv[6], .dir = argv[7] };
 }
 
 /// tini's argv, in the kernel's own slots (flong-init.c:222-237): COMMAND
-/// is slot 8 onward, and tini's three words go in slots 5-7, whose TRACE,
-/// DIR and "--" `words` has read, so &argv[5] is tini's argv as it stands,
+/// is slot 9 onward, and tini's three words go in slots 6-8, whose TRACE,
+/// DIR and "--" `words` has read, so &argv[6] is tini's argv as it stands,
 /// the kernel's NULL after COMMAND ending it. Under `flong init` those are
-/// the kernel's slots 6-8.
+/// the kernel's slots 7-9.
 pub fn tiniArgv(argv: [][*:0]const u8) [*:null]const ?[*:0]const u8 {
-    argv[5] = "tini";
-    argv[6] = "-g";
-    argv[7] = "--";
-    return @ptrCast(argv[5..].ptr);
+    argv[6] = "tini";
+    argv[7] = "-g";
+    argv[8] = "--";
+    return @ptrCast(argv[6..].ptr);
+}
+
+// ---- the files (step 7) ----
+//
+// FILES is a memfd the launcher wrote (spec.filesData): the payload's home,
+// then for each file its mode in octal, its path relative to the home and
+// its content, every field ended by a NUL. The launcher has judged all of
+// it (launch/assemble.zig's execOf and homeFiles, spec.validate); what is
+// checked again here is what a walk would go wrong on, and a refusal is a
+// launcher bug, said and exited 125 as any other.
+//
+// Nothing is followed and nothing crosses a mount. The home is opened from
+// "/" and each file's directories from the home, one component at a time,
+// with openat2's RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS, RESOLVE_NO_MAGICLINKS
+// and RESOLVE_NO_XDEV, and the file itself with those and O_NOFOLLOW, so a
+// symbolic link anywhere on the way, the last component's included, ends the
+// launch, and so does a mount point. RESOLVE_NO_XDEV, because the one
+// filesystem a seeded file belongs on is the session's root overlay, whose
+// upper layer is the session's own and goes with it: a mount on the way is
+// a bind of the caller's or the declaration's -- the workspace, a writable
+// host directory -- where a write would land on the host, outside anything
+// the declaration says flong writes, or a tmpfs ($home/tmp) that a
+// rule with an exception for it would have to tell apart from a bind. A
+// home that is itself on another mount than "/" is refused for the same
+// reason. A file already there is replaced in place: truncated, its mode
+// set, its content written; a directory, a FIFO or a device there is
+// refused. Missing directories are made 0700, the payload's.
+
+/// NAME_MAX: the longest component a path may have.
+const name_max = 255;
+
+/// One component of a file's path, ended by a NUL for openat2 and mkdirat.
+var component: [name_max:0]u8 = undefined;
+
+/// What every open of the walk resolves with.
+const beneath = sys.RESOLVE.BENEATH | sys.RESOLVE.NO_SYMLINKS | sys.RESOLVE.NO_MAGICLINKS | sys.RESOLVE.NO_XDEV;
+
+/// openat2 of `path` under `dir` with `beneath`.
+fn openBeneath(dir: sys.fd_t, path: [*:0]const u8, flags: sys.O, mode: sys.mode_t) sys.Result(sys.fd_t) {
+    const how: sys.OpenHow = .{ .flags = @as(u32, @bitCast(flags)), .mode = mode, .resolve = beneath };
+    return sys.openat2(dir, path, &how);
+}
+
+/// A directory to walk from: O_PATH, followed by nothing.
+const dir_flags: sys.O = .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true };
+
+/// The NUL-ended fields of FILES, in order.
+pub const Fields = struct {
+    data: []const u8,
+    pos: usize = 0,
+
+    /// The next field, or null at the end or where no NUL ends it.
+    pub fn next(f: *Fields) ?[:0]const u8 {
+        const end = std.mem.indexOfScalarPos(u8, f.data, f.pos, 0) orelse return null;
+        const field = f.data[f.pos..end :0];
+        f.pos = end + 1;
+        return field;
+    }
+
+    /// Whether every byte has been read as a field.
+    pub fn done(f: *const Fields) bool {
+        return f.pos == f.data.len;
+    }
+};
+
+/// A file's mode as the launcher writes it: octal digits, at most 0777.
+pub fn octalMode(s: []const u8) ?u32 {
+    if (s.len == 0 or s.len > 3) return null;
+    var n: u32 = 0;
+    for (s) |c| {
+        if (c < '0' or c > '7') return null;
+        n = n * 8 + (c - '0');
+    }
+    return n;
+}
+
+/// Whether `path` is relative, not empty, and has no empty, '.' or '..'
+/// component, nor one longer than NAME_MAX: what the walk can take one
+/// component at a time.
+pub fn walkable(path: []const u8) bool {
+    if (path.len == 0) return false;
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |c| {
+        if (c.len == 0 or c.len > name_max or std.mem.eql(u8, c, ".") or std.mem.eql(u8, c, "..")) return false;
+    }
+    return true;
+}
+
+/// A seeding call's failure: a link and a mount said as the rule they
+/// break, anything else with its errno.
+fn seedFailed(e: sys.E, home: []const u8, path: []const u8) noreturn {
+    switch (e) {
+        .LOOP => refuse("seeding {s}/{s}: a symbolic link is on its path, and nothing is followed", .{ home, path }),
+        .XDEV => refuse("seeding {s}/{s}: its path crosses a mount, and a seeded file is written to the session's own root alone", .{ home, path }),
+        else => fail(e, "seeding {s}/{s}", .{ home, path }),
+    }
+}
+
+/// Step 7: every file of FILES, in order, under the home it names.
+fn seed(files: i32) void {
+    const st = must(sys.fstat(files), "reading the files to seed");
+    const size: usize = @intCast(st.size);
+    if (size == 0) refuse("the files to seed are empty", .{});
+    var fields: Fields = .{ .data = must(sys.mmapRead(files, size), "mapping the files to seed") };
+    const home = fields.next() orelse refuse("the files to seed do not end with a NUL", .{});
+    if (home.len < 2 or home[0] != '/' or !walkable(home[1..])) refuse("the home to seed files in is not a clean absolute path: {s}", .{home});
+    const root = must(sys.openat(sys.AT.FDCWD, "/", dir_flags, 0), "opening / to seed files");
+    const home_fd = switch (openBeneath(root, home[1..].ptr, dir_flags, 0)) {
+        .ok => |h| h,
+        .err => |e| switch (e) {
+            .LOOP => refuse("seeding files in {s}: a symbolic link is on its path, and nothing is followed", .{home}),
+            .XDEV => refuse("seeding files in {s}: it is on another mount than the session's root, and a seeded file is written to the session's own root alone", .{home}),
+            else => fail(e, "opening {s} to seed files in", .{home}),
+        },
+    };
+    sys.close(root);
+    while (!fields.done()) {
+        const mode_text = fields.next() orelse refuse("the files to seed do not end with a NUL", .{});
+        const path = fields.next() orelse refuse("the files to seed end with a file that has no path", .{});
+        const content = fields.next() orelse refuse("the file to seed {s}/{s} has no content", .{ home, path });
+        const mode = octalMode(mode_text) orelse refuse("the file to seed {s}/{s} has a mode that is not permission bits: {s}", .{ home, path, mode_text });
+        if (!walkable(path)) refuse("the file to seed {s}/{s} is not a clean path below the home", .{ home, path });
+        seedOne(home_fd, home, path, mode, content);
+    }
+    sys.close(home_fd);
+}
+
+/// One file: its directories made 0700 where missing and walked into, the
+/// file opened for writing, made or truncated, then its mode and its
+/// content. `path` is `walkable`.
+fn seedOne(home_fd: sys.fd_t, home: []const u8, path: [:0]const u8, mode: u32, content: []const u8) void {
+    var dir = home_fd;
+    var rest: [:0]const u8 = path;
+    while (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+        const name = rest[0..slash];
+        @memcpy(component[0..name.len], name);
+        component[name.len] = 0;
+        const c: [*:0]const u8 = component[0..name.len :0].ptr;
+        // A name already there, a link included, is EEXIST, and the open
+        // then judges it.
+        switch (sys.mkdirat(dir, c, 0o700)) {
+            .ok => {},
+            .err => |e| if (e != .EXIST) seedFailed(e, home, path),
+        }
+        const next = switch (openBeneath(dir, c, dir_flags, 0)) {
+            .ok => |n| n,
+            .err => |e| seedFailed(e, home, path),
+        };
+        if (dir != home_fd) sys.close(dir);
+        dir = next;
+        rest = rest[slash + 1 ..];
+    }
+    // O_NONBLOCK, so a FIFO with no reader is ENXIO rather than a wait no
+    // one ends; the fstat then refuses what is not a regular file before a
+    // byte is written.
+    const flags: sys.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true };
+    const opened = openBeneath(dir, rest.ptr, flags, mode);
+    if (dir != home_fd) sys.close(dir);
+    const f = switch (opened) {
+        .ok => |f| f,
+        .err => |e| seedFailed(e, home, path),
+    };
+    const st = switch (sys.fstat(f)) {
+        .ok => |st| st,
+        .err => |e| seedFailed(e, home, path),
+    };
+    if (!sys.S.ISREG(st.mode)) refuse("seeding {s}/{s}: something other than a regular file is there", .{ home, path });
+    // The mode as it is asked for: O_CREAT's was under the umask, and a
+    // file that was there kept its own.
+    switch (sys.fchmod(f, mode)) {
+        .ok => {},
+        .err => |e| seedFailed(e, home, path),
+    }
+    var done: usize = 0;
+    while (done < content.len) {
+        switch (sys.write(f, content[done..])) {
+            .ok => |n| {
+                if (n == 0) seedFailed(.IO, home, path);
+                done += n;
+            },
+            .err => |e| seedFailed(e, home, path),
+        }
+    }
+    switch (sys.closeChecked(f)) {
+        .ok => {},
+        .err => |e| seedFailed(e, home, path),
+    }
 }
 
 /// flong-init.c:179-238. Ordering checkpoint 9 (DESIGN.md): one linear
@@ -233,10 +435,12 @@ pub fn main(argv: [][*:0]const u8, envp: [][*:0]const u8) noreturn {
 
     // The argv, in the C's order; nothing is called until all of it holds.
     const w = words(argv) orelse
-        refuse("usage: flong init GATE READY GROUPS TTY TRACE DIR -- COMMAND...", .{});
+        refuse("usage: flong init GATE READY FILES GROUPS TTY TRACE DIR -- COMMAND...", .{});
     const gate = fdArg(w.gate, "gate");
     const ready = fdArg(w.ready, "ready");
     if (gate == ready) refuse("the gate and ready descriptors are the same", .{});
+    const files = filesArg(w.files);
+    if (files) |f| if (f == gate or f == ready) refuse("the files descriptor is the gate's or ready's", .{});
     const groups: ?[]const u32 = switch (groupsArg(std.mem.span(w.groups), &gids)) {
         .none => null,
         .some => |n| gids[0..n],
@@ -274,13 +478,16 @@ pub fn main(argv: [][*:0]const u8, envp: [][*:0]const u8) noreturn {
     const got = must(sys.read(gate, &byte), "waiting at the gate");
     if (got == 0) refuse("the gate closed without opening: not starting the payload", .{});
 
-    // 7. DIR, and PWD with it.
+    // 7. The files, as the payload's user.
+    if (files) |f| seed(f);
+
+    // 8. DIR, and PWD with it.
     switch (sys.chdir(dir)) {
         .ok => {},
         .err => |e| fail(e, "changing to {s}", .{dir}),
     }
     setPwd(envp, std.mem.span(dir), &pwd_buf);
-    // 8. Every descriptor above stderr, then the trace and the exec.
+    // 9. Every descriptor above stderr, then the trace and the exec.
     must(sys.closeRange(3, ~@as(u32, 0), 0), "closing inherited descriptors");
 
     const exec_argv = tiniArgv(argv);

@@ -87,32 +87,56 @@ neither.
 - default: `null`
 - ordered
 
-A command printing the payload's argument list, and variables to
-add to its environment, for a payload that only the launch can
-decide: run on the host as the caller, in place of `command`,
-after `seccompPolicy`, with the launcher's arguments after its
-own and the environment `seccompPolicy` has -- `$workspace`,
-`$workspace_mode`, `$binds` and `$machine` -- and `path` on
-`PATH`.
+A command printing the payload's argument list, variables to add
+to its environment and files to seed into its home, for a payload
+that only the launch can decide: run on the host as the caller, in
+place of `command`, after `seccompPolicy`, with the launcher's
+arguments after its own and the environment `seccompPolicy` has --
+`$workspace`, `$workspace_mode`, `$binds` and `$machine` -- and
+`path` on `PATH`.
 
 Its stdout, at most 1 MiB, is fields each ended by a NUL byte, as
-`printf '%s\0'` prints them: `NAME=VALUE` for each variable, then
-one empty field, then the payload's argument list, at least its
-program. The list is the payload's whole: the launcher's arguments
-are not appended again. A program without a `/` is looked up on
-the payload's `PATH`, as `command`'s is.
+`printf '%s\0'` prints them, in any order, each starting with its
+tag:
+
+- `env:NAME=VALUE`, a variable, split at the first `=`;
+- `arg:WORD`, the next word of the payload's argument list, which
+  may be empty (`arg:`); the first is its program;
+- `file:MODE:PATH`, followed by exactly one more field, untagged,
+  which is the file's content, every byte of it but a NUL.
+
+The argument list is the payload's whole: the launcher's arguments
+are not appended again. A program without a `/` is looked up on the
+payload's `PATH`, as `command`'s is.
+
+A file is written into the session's home before the payload
+starts, by `flong init` inside the sandbox, as `user`, so it is the
+payload's own, and a file already there is replaced. MODE is one to
+four octal digits of at most `0777`, the permission bits alone:
+setuid, setgid and sticky are refused. PATH is absolute, under the
+payload's home (never the home itself), and has no empty, `.` or
+`..` component. Missing directories on the way are made, mode
+`0700`. Nothing on the way is followed and nothing is crossed: a
+symbolic link on the path, the file's own name included, or a
+mount -- a bind into the home, `$HOME/tmp` -- ends the launch as
+the session's failure to start, and so does anything other than a
+regular file where the file goes. So the files land on the
+session's own root, which goes with it, and never on the host.
 
 A non-zero exit refuses the launch, and so does output that is not
-that shape, an empty name (each field is split at its first `=`),
-a name printed twice, a name tini reads (`TINI_*`: tini is the
-session's init, and runs with the payload's environment), and a
-name the session already sets: the container's `environment`, or
-one of the launch's own (`PATH`, `HOME`, `USER`, `LOGNAME`,
-`SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`, `FLONG_BINDS`, `container`,
-`TERM`, `COLORTERM`, `PWD`). Nothing is overridden silently. The
-loader's names, `LD_*` and `GLIBC_TUNABLES`, are allowed, and reach
-tini as well as the payload: both run as `user` inside the session,
-with no capability.
+that shape: a field with no tag (an empty one among them), an
+`env:` field without a `=`, a MODE that is not one, a `file:` field
+with no field after it, no `arg:` field, or an empty program. So do
+an empty name, a name printed twice, a name tini reads (`TINI_*`:
+tini is the session's init, and runs with the payload's
+environment), a name the session already sets -- the container's
+`environment`, or one of the launch's own (`PATH`, `HOME`, `USER`,
+`LOGNAME`, `SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`, `FLONG_BINDS`,
+`container`, `TERM`, `COLORTERM`, `PWD`) -- and a file's path that
+is not as above, printed twice, or inside another file's. Nothing
+is overridden silently. The loader's names, `LD_*` and
+`GLIBC_TUNABLES`, are allowed, and reach tini as well as the
+payload: both run as `user` inside the session, with no capability.
 
 Once it has run, as once `seccompPolicy` has, `postStop` runs for
 the session's `$machine` once, whichever way the launcher ends it:

@@ -206,18 +206,83 @@ is the container's name.
 one of them, which `flong check` holds, in the declaration's build), run on
 the host as the caller after `seccompPolicy`, with the same environment
 (`$workspace`, `$workspace_mode`, `$binds`, `$machine`, `path` on `PATH`)
-and the launcher's arguments after its own. Its stdout, at most 1 MiB as
-every command's, is NUL-ended fields: `NAME=VALUE` for each variable it
-adds to the payload's environment, one empty field, then the payload's
-whole argument list, at least its program. It is how a consumer decides at
-launch what runs and with what, on the host, where a wrapper script in the
-session used to: the session then runs one exec'd program and nothing
-else. A non-zero exit, output of another shape, a name that is empty (a
-field is split at its first `=`), one printed twice, a `TINI_*`, and one
-the launch or the container already sets, `PWD` among them, are each a
-refusal, 1, said under the declaration's name; nothing it prints
-overrides anything silently. The names are judged through a set, so a
-MiB of them costs one pass.
+and the launcher's arguments after its own. It is how a consumer decides at
+launch what runs, with what, and with which files in its home, on the host,
+where a wrapper script in the session used to: the session then runs one
+exec'd program and nothing else.
+
+Its stdout, at most 1 MiB as every command's, is NUL-ended fields, in any
+order, each starting with a tag (`cmd.parseExec`):
+
+- `env:NAME=VALUE`, a variable added to the payload's environment, split
+  at the first `=`;
+- `arg:WORD`, the next word of the payload's whole argument list, the
+  first its program;
+- `file:MODE:PATH`, then exactly one field more, untagged, the file's
+  content: any bytes but a NUL.
+
+Every field is tagged so that no field means something by its position or
+by being empty: an empty argument is `arg:`, and the protocol this
+replaced, variables up to an empty field and the argument list after it,
+could say an empty word only after the separator and made a stray empty
+field a separator. A content field is the one exception, and it is
+untagged because it is data whose every byte is the file's; the `file:`
+field before it says it is coming, so a content that looks like a tag is
+content.
+
+A non-zero exit, output of another shape (a field with no tag, an `env:`
+field without a `=`, a MODE that is not one to four octal digits of at
+most `0777`, a `file:` field that is the last, no `arg:`, an empty
+program), a name that is empty, printed twice, a `TINI_*`, or one the
+launch or the container already sets, `PWD` among them, and a PATH that is
+not absolute and clean, printed twice or inside another file's, are each a
+refusal, 1, said under the declaration's name, at step 5; a PATH not under
+the payload's home, which step 9 reads from the prepared root, is refused
+there. Nothing it prints overrides anything silently. The names and paths
+are judged through sets, so a MiB of them costs one pass.
+
+#### Seeded files
+
+A file `exec` prints is written into the session's home, not bound from
+the host: the home is the session's root overlay, and a program such as
+Claude Code replaces its `~/.claude/.credentials.json` and `~/.claude.json`
+by renaming a new file over them, which a bind of a host file refuses
+(`EBUSY`) or, bound as a directory, would carry back to the host. So the
+launch carries each file's mode, path relative to the home and content in
+a memfd, as the resolver's file is carried (`spec.filesData`), within the
+same 1 MiB, and flong init writes them (step 7 of
+[the gate](#the-gate)):
+
+- **inside the sandbox, as the payload's user**: after `setgroups` and the
+  capability drop, so every file and directory it makes is the payload's,
+  and no privilege is held while a path is walked;
+- **after the gate**: the mount helper's binds into the home, the
+  workspace's included, are made before the gate opens, so what the walk
+  meets is what the payload will; and nothing of the session runs yet, so
+  nothing can move a path under the walk;
+- **following nothing**: the home is opened from `/`, and every directory
+  and the file from the home, one component at a time, with `openat2`'s
+  `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS` and `RESOLVE_NO_MAGICLINKS`, and
+  the file with `O_NOFOLLOW` too, so a symbolic link anywhere, the file's
+  own name included, ends the launch; missing directories are made `0700`;
+  the file is opened `O_CREAT|O_TRUNC|O_NONBLOCK`, refused unless it is a
+  regular file, `fchmod`ed to its MODE (the umask and an existing file's
+  own mode are both overridden), and written whole;
+- **crossing no mount**: `RESOLVE_NO_XDEV` too. The one filesystem a seeded
+  file belongs on is the root overlay, whose upper layer is the session's
+  own and goes with it. A mount on the way is one of three: a bind of the
+  caller's (the workspace, a writable host directory), where the write would
+  land on the host, outside anything the declaration says flong writes; a
+  bind the declaration makes, the same; or a tmpfs (`$HOME/tmp`), which is
+  harmless, but telling it apart from a bind is a rule with an exception
+  for no case anyone has. A home that is itself on another mount than `/` is
+  refused for the same reason.
+
+MODE is permission bits alone: setuid, setgid and sticky mean nothing for a
+file its owner made in its own home, but a way to be surprised. Any failure
+is flong init's, exit 125, "the session did not start", its message naming
+the file and whether a link or a mount stopped it; the launch's teardown
+then runs `postStop`, as for every failure after the record.
 
 ## Sessions are overlays on a prepared root
 
@@ -738,12 +803,16 @@ environment; the argv is gone at the exec of tini. In order, it:
 5. reads one byte from the gate pipe, and **on EOF exits 125**: the payload
    never runs if the launcher fails, is killed or is signalled first (a
    failing hook and a SIGKILL mid-hook were both measured);
-6. changes to the workspace, which is a helper mount made after bwrap built
+6. with a FILES memfd, writes the files `exec` printed into the home, as
+   the payload's user, following no link and crossing no mount
+   ([Seeded files](#seeded-files));
+7. changes to the workspace, which is a helper mount made after bwrap built
    the root, so bwrap's `--chdir` would name the directory underneath it,
    and points `PWD` there;
-7. closes every descriptor above stderr (bwrap leaks its namespace
-   descriptors), and execs `tini -g -- payload`; `PWD` is the workspace,
-   where bwrap left it naming its own working directory.
+8. closes every descriptor above stderr (bwrap leaks its namespace
+   descriptors, and FILES is done with), and execs `tini -g -- payload`;
+   `PWD` is the workspace, where bwrap left it naming its own working
+   directory.
 
 Any failure before the exec exits 125. tini then stays pid 1, reaping
 orphans and forwarding signals to the payload's group (`-g`).
@@ -2023,7 +2092,7 @@ ports.
 | `src/mount.zig` | the mount helper, a fork body of `flong launch`'s: sources, the walker, masks, overlays, `/sys`, `/run` read-only; checkpoint 7 |
 | `src/launch.zig` | `flong launch`: `main` (its words), the declaration loaded and judged, `launch` (the prologue), `run` and `teardown`, the order of a launch; checkpoints 1, 2, 3, 5 and 6 |
 | `src/launch/` | the launch's pieces, each tested alone: `assemble.zig` (the prologue's work in the wrapper's order, building the spec) and its pieces `caller.zig`, `workspace.zig`, `cmd.zig`, `binds.zig`, `refuse.zig`, `depth.zig`, `subid.zig`, `prepare.zig`, `identity.zig`, `groups.zig`, `hometmp.zig` and `resolv.zig`; `lookup.zig` (a name's declaration); `prologue.zig` (the cache lock, the relaunch, the close of what was inherited, the protected paths), `bwrap.zig` (its spawn), `childpid.zig` (`--info-fd`), `hook.zig` (`postStart`), `pasta.zig` |
-| `src/init.zig` | `flong init`: groups, capabilities, the controlling tty, the ready byte, the gate, chdir, exec tini; no allocator; checkpoint 9 |
+| `src/init.zig` | `flong init`: groups, capabilities, the controlling tty, the ready byte, the gate, the seeded files, chdir, exec tini; no allocator; checkpoint 9 |
 | `src/sweeper.zig` | `flong sweeper`: the state directory, its holder, then the watch; no allocator |
 | `src/seccomp/` | `flong-seccomp`: `main.zig` the root, `compile.zig` the policy compiler, `expand.zig`, `render.zig`, `project.zig` the subcommands, `scmp.zig` libseccomp's externs |
 | `src/fixtures/` | the tests' programs: `bpfdump`, `syscall-probe`, `swapper`, `ioctl-probe` |
@@ -2169,7 +2238,7 @@ sweeper reads a new launcher's records.
 | 6 | teardown: finish the terminal, close the gate, kill, reap (short-circuiting), wait the sandbox and hooks leaves, `postStop`, pasta only with `pasta-wait`, remove or close | `teardown` | basic's teardown subtests |
 | 7 | the mount helper: umask, sort, duplicates; the namespaces through the leader's pidfd, as the caller; `setns(U1)`, then root; its own mount namespace and the sources; the ready byte; the session's mount namespace, its root, then its network and cgroup namespaces before sysfs and cgroup2; `/.hostsys` detached; the mounts in sorted order; `/run` read-only last | `mount.run` | the mount subtests, the walker |
 | 8 | the watchdog forks before raw mode, only when stdin is a terminal, keeping its pipe, the leader and 0–2 | `tty.zig` | the watchdog subtest |
-| 9 | flong init: groups, the bounding set, the ambient set, capabilities, the controlling tty, INT and QUIT default and an empty mask, the ready byte then close, the gate byte, chdir, close all but 0–2, the trace, exec | `init.zig` | the init golden cases, basic's groups and capabilities |
+| 9 | flong init: groups, the bounding set, the ambient set, capabilities, the controlling tty, INT and QUIT default and an empty mask, the ready byte then close, the gate byte, the seeded files, chdir, close all but 0–2, the trace, exec | `init.zig` | the init golden cases, basic's groups and capabilities and its seeded files |
 | 10 | records: `O_TMPFILE`, `LOCK_EX\|LOCK_NB`, one write, linked through `/proc/self/fd` with the uncounted EEXIST loop; `leader=` at the offset; unlink before close | `record.zig` | the record-bytes subtest, the writer test |
 | 11 | the sweeper adds its inotify watch before the first sweep | `record.watch` | `checks.native`'s watch subtest |
 
@@ -2310,6 +2379,7 @@ is how the tests quote them. A list is empty when the launch has none.
 | `resolv_conf` | a networked session's `/etc/resolv.conf`, whole, which bwrap binds read-only from a memfd |
 | `env` (`bwrap-arg`) | the payload's environment, built from nothing: the launch's own, the container's `environment` expanded, `exec`'s; `--clearenv`, then a `--setenv` for each, its name non-empty and without `=` |
 | `hostname` (`bwrap-arg --hostname`) | bwrap's `--hostname`, not empty |
+| `files` | the files `exec` printed, for flong init to seed into the home: each a path relative to `home`, clean, a mode of at most `0777`, and a content without a NUL; carried in a memfd flong init is given as FILES, and none gives it `-` |
 | `trace` | stage timestamps on stderr, `T <µs> <stage>` |
 | `command` | the payload, run as `tini -g -- COMMAND…`, tini finding a program without a `/` on the payload's `PATH`: the declaration's `command` and the launcher's arguments, or what `exec` printed; not empty |
 
@@ -2343,7 +2413,7 @@ bwrap --userns <U1> --userns2 <U2> [--assert-userns-disabled]
   --perms 0644 --ro-bind-data <memfd> /etc/resolv.conf  (resolv_conf only)
   --clearenv --setenv VAR VALUE ...                  (env)
   --hostname NAME                                    (hostname)
-  -- flong init <gate-fd> <ready-fd> <groups> <ctty|-> <trace|-> <dir> -- <COMMAND...>
+  -- flong init <gate-fd> <ready-fd> <files-fd|-> <groups> <ctty|-> <trace|-> <dir> -- <COMMAND...>
 ```
 
 ### The launch, in order

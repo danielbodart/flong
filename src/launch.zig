@@ -407,6 +407,8 @@ fn run(l: *Launch) sig.Error!u8 {
     ends.u2.close();
     // 6. The resolver's memfd.
     if (ends.resolv) |h| h.close();
+    // 7. The files' memfd.
+    if (ends.files) |h| h.close();
     _ = try spawned;
     const bw = l.bwrap.?;
 

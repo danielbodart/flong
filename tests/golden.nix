@@ -129,9 +129,13 @@ let
     };
 
     # Recorded from the C of 2026-09-23 (launcher/flong-init.c, deleted in
-    # phase 3 b): every refusal of its argv (:86-148, 179-193) in the order
-    # it checks them, each field's edge (0-2, INT_MAX, (gid_t)-1, ULONG_MAX
-    # and past it, signs, blanks, empty fields), GROUPS counted against
+    # phase 3 b), each given a FILES word of "-" after READY once the
+    # launch seeded files into the home: every refusal of its argv
+    # (:86-148, 179-193) in the order it checks them, FILES's own
+    # (files-*: "-" or a descriptor above 2, neither the gate's nor
+    # ready's, checked before GROUPS), each field's edge (0-2, INT_MAX,
+    # (gid_t)-1, ULONG_MAX and past it, signs, blanks, empty fields),
+    # GROUPS counted against
     # NGROUPS_MAX before any gid is parsed, and a refused word over 1 KiB,
     # printed whole (quirk 22). accepted-* pass every argv check and
     # stop at the first call, setgroups, with EPERM: a Nix builder never

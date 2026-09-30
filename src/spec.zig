@@ -43,6 +43,19 @@ pub const Command = []const [:0]const u8;
 /// One variable of the payload's environment (Spec.env).
 pub const Var = struct { name: [:0]const u8, value: [:0]const u8 };
 
+/// One file flong init seeds into the payload's home before tini runs
+/// (Spec.files): what `exec` printed, its path made relative to the home.
+pub const File = struct {
+    /// permission bits, at most 0777
+    mode: u32,
+    /// relative to the payload's home, clean: no empty, '.' or '..'
+    /// component
+    path: [:0]const u8,
+    /// its bytes, none of them a NUL, which the files' memfd ends each
+    /// field with
+    content: []const u8,
+};
+
 /// struct fl_spec (flong-spec.h:58-113). A list is empty when the launch
 /// has none of it.
 pub const Spec = struct {
@@ -116,6 +129,12 @@ pub const Spec = struct {
     /// read-only, mode 0644, from a memfd the spawn writes it into
     /// (launch/bwrap.zig). null: none
     resolv_conf: ?[]const u8 = null,
+
+    /// Files flong init writes into `home` after the gate, as the
+    /// payload's user, before it execs tini, from a memfd the spawn
+    /// writes them into (launch/bwrap.zig, `filesData`). Empty: none, and
+    /// flong init is given no memfd
+    files: []const File = &.{},
 
     trace: bool = false,
     /// what tini runs; never empty. A null follows its last word, as
@@ -497,8 +516,30 @@ pub fn validate(s: *const Spec) Error!void {
     }
     if (s.env) |env| for (env) |v| try envName(v.name);
     if (s.hostname) |h| if (h.len == 0) return msg.refuse("spec: bwrap-arg --hostname is empty", .{});
+    for (s.files) |f| try fileValue(f);
     if (s.command.len == 0) return msg.refuse("spec: the command after '--' is empty", .{});
     try across(s);
+}
+
+/// A file to seed: its path clean and relative to the home, its mode
+/// permission bits, and no NUL in its content, which would end its field
+/// in the memfd flong init reads early.
+fn fileValue(f: File) Error!void {
+    try clean("file", f.path, .relative);
+    if (f.mode > 0o777) return msg.refuse("spec: file {s}'s mode {o} is more than the permission bits", .{ f.path, f.mode });
+    if (std.mem.indexOfScalar(u8, f.content, 0) != null) return msg.refuse("spec: file {s}'s content holds a NUL", .{f.path});
+}
+
+/// What flong init reads from its FILES memfd (init.zig, `seed`): the
+/// payload's home, then each file's mode in octal, its path relative to
+/// the home and its content, each field ended by a NUL, into `out`. No
+/// field holds a NUL: `validate` has refused a content with one, and a
+/// path is clean.
+pub fn filesData(gpa: Allocator, home: []const u8, files: []const File) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.print(gpa, "{s}\x00", .{home});
+    for (files) |f| try out.print(gpa, "{o}\x00{s}\x00{s}\x00", .{ f.mode, f.path, f.content });
+    return out.items;
 }
 
 /// An id, at most id_max.
@@ -570,7 +611,8 @@ fn mountValue(m: *const mount.Mount) Error!void {
 /// through `passFd`, which keeps it in bwrap at that number: `fds` holds
 /// U1, U2, the info pipe's write end, the seccomp files (a slice, in the
 /// spec's order), the resolver's memfd (null without a resolv_conf), the
-/// gate's read end and the ready pipe's write end.
+/// gate's read end, the ready pipe's write end and the files' memfd (null
+/// without files), which flong init is given as FILES, or "-".
 /// `relay` is the terminal's (tty.zig), `self` the flong binary's path,
 /// which bwrap runs with the word "init". The words made here (numbers,
 /// joined paths) are `gpa`'s.
@@ -650,6 +692,7 @@ pub fn bwrapArgv(gpa: Allocator, sp: anytype, s: *const Spec, fds: anytype, rela
     try sp.arg("init");
     try sp.passFd(fds.gate_r);
     try sp.passFd(fds.ready_w);
+    if (fds.files) |h| try sp.passFd(h) else try sp.arg("-");
     try sp.arg(try groupsArg(gpa, s.groups));
     try sp.arg(if (relay) "ctty" else "-");
     try sp.arg(if (s.trace) "trace" else "-");

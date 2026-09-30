@@ -2,7 +2,7 @@
 //! `flong launch DECL.zon`'s prologue (DESIGN.md, "Data is data; shell
 //! is for what only launch knows"): the workspace, binds, guard,
 //! seccompPolicy and exec commands, and what exec prints read as its
-//! protocol (`parseExec`).
+//! protocol of tagged fields (`parseExec`).
 //!
 //! The wrapper ran each snippet as `"$BASH" -euo pipefail -c "$1" flong
 //! "${launcher_args[@]}"` (rootless-wrapper.bash:46-50). A command is an
@@ -233,47 +233,104 @@ pub fn substitute(out: []u8) []const u8 {
 }
 
 /// What the `exec` command printed, read (`parseExec`): the variables it
-/// adds to the payload's environment, in order, and the payload's argv.
+/// adds to the payload's environment, in order, the payload's argv, and
+/// the files to seed into its home.
 pub const Exec = struct {
     env: []const Var,
     argv: []const [:0]const u8,
+    files: []const File,
 };
+
+/// A file `exec` asks for in the payload's home: `file:MODE:PATH`, then
+/// its content. Whether the path is one a session may be given one at is
+/// the caller's to judge.
+pub const File = struct {
+    /// permission bits, at most 0777
+    mode: u32,
+    /// as printed: absolute, the caller judges the rest
+    path: []const u8,
+    /// every byte of the field after it; a NUL cannot be one
+    content: []const u8,
+};
+
+/// The tags a field of `exec`'s output starts with (`parseExec`).
+pub const tag_env = "env:";
+pub const tag_arg = "arg:";
+pub const tag_file = "file:";
+
+/// The most octal digits a file's MODE is written with: `0600` at most,
+/// so no value past 07777 is spelt and none past 0777 taken.
+const mode_digits = 4;
 
 /// Why `exec`'s output is not its shape.
 pub const ExecBad = union(enum) {
     /// the last field has no NUL after it
     unterminated,
-    /// no empty field ends the variables
-    no_separator,
-    /// a field before the empty one has no `=`
+    /// a field that starts with none of the tags, whole
+    untagged: []const u8,
+    /// an `env:` field with no `=` after its tag, whole
     not_a_variable: []const u8,
-    /// nothing after the empty field
+    /// a `file:` field whose MODE is not one to four octal digits of at
+    /// most 0777, or has no `:` after it, whole
+    bad_mode: []const u8,
+    /// a `file:` field that is the last field: the path it names
+    no_content: []const u8,
+    /// no `arg:` field
     no_argv,
-    /// the payload's program is the empty string
+    /// the first `arg:` field is empty
     empty_program,
 };
 
 /// `exec`'s stdout read as its protocol (decl.zig's `exec`): fields each
-/// ended by a NUL, `NAME=VALUE` until the first empty one, the payload's
-/// argv after it. Each variable is split at its first `=`, so a name never
-/// holds one; whether the name is one the payload may be given is the
-/// caller's to judge. The strings are `gpa`'s.
+/// ended by a NUL, in any order, each starting with its tag. `env:NAME=VALUE`
+/// is a variable, split at the first `=` after the tag, so a name never
+/// holds one; `arg:WORD` is the next word of the payload's argv, which may
+/// be empty; `file:MODE:PATH` asks for a file, and the one field after it,
+/// untagged, is the file's content, whatever it holds. Nothing else is a
+/// field, so an empty argv word is `arg:` and never the empty field. Whether
+/// a name or a path is one the payload may be given is the caller's to
+/// judge. The lists are `gpa`'s, their strings slices of `out`'s but for
+/// the argv's, which are copied to carry their NUL.
 pub fn parseExec(gpa: Allocator, out: []const u8) Allocator.Error!union(enum) { ok: Exec, bad: ExecBad } {
-    if (out.len == 0 or out[out.len - 1] != 0) return .{ .bad = .unterminated };
+    if (out.len == 0) return .{ .bad = .no_argv };
+    if (out[out.len - 1] != 0) return .{ .bad = .unterminated };
     var fields = std.mem.splitScalar(u8, out[0 .. out.len - 1], 0);
     var env: std.ArrayList(Var) = .empty;
-    while (true) {
-        const f = fields.next() orelse return .{ .bad = .no_separator };
-        if (f.len == 0) break;
-        const eq = std.mem.indexOfScalar(u8, f, '=') orelse return .{ .bad = .{ .not_a_variable = f } };
-        try env.append(gpa, .{ .name = f[0..eq], .value = f[eq + 1 ..] });
-    }
-    // The separator was the last field: `rest` is null, not empty.
-    if (fields.index == null) return .{ .bad = .no_argv };
     var argv: std.ArrayList([:0]const u8) = .empty;
-    while (fields.next()) |w| try argv.append(gpa, try gpa.dupeZ(u8, w));
+    var files: std.ArrayList(File) = .empty;
+    while (fields.next()) |f| {
+        if (std.mem.startsWith(u8, f, tag_env)) {
+            const v = f[tag_env.len..];
+            const eq = std.mem.indexOfScalar(u8, v, '=') orelse return .{ .bad = .{ .not_a_variable = f } };
+            try env.append(gpa, .{ .name = v[0..eq], .value = v[eq + 1 ..] });
+        } else if (std.mem.startsWith(u8, f, tag_arg)) {
+            try argv.append(gpa, try gpa.dupeZ(u8, f[tag_arg.len..]));
+        } else if (std.mem.startsWith(u8, f, tag_file)) {
+            const v = f[tag_file.len..];
+            const colon = std.mem.indexOfScalar(u8, v, ':') orelse return .{ .bad = .{ .bad_mode = f } };
+            const mode = fileMode(v[0..colon]) orelse return .{ .bad = .{ .bad_mode = f } };
+            const path = v[colon + 1 ..];
+            const content = fields.next() orelse return .{ .bad = .{ .no_content = path } };
+            try files.append(gpa, .{ .mode = mode, .path = path, .content = content });
+        } else return .{ .bad = .{ .untagged = f } };
+    }
+    if (argv.items.len == 0) return .{ .bad = .no_argv };
     if (argv.items[0].len == 0) return .{ .bad = .empty_program };
-    return .{ .ok = .{ .env = env.items, .argv = argv.items } };
+    return .{ .ok = .{ .env = env.items, .argv = argv.items, .files = files.items } };
+}
+
+/// A file's MODE: one to four octal digits, at most 0777, the permission
+/// bits alone. setuid, setgid and sticky are refused, not dropped: the
+/// payload's user makes the file, and none of the three means anything
+/// for a file it owns in its own home but a way to be surprised.
+pub fn fileMode(s: []const u8) ?u32 {
+    if (s.len == 0 or s.len > mode_digits) return null;
+    var n: u32 = 0;
+    for (s) |c| {
+        if (c < '0' or c > '7') return null;
+        n = n * 8 + (c - '0');
+    }
+    return if (n > 0o777) null else n;
 }
 
 fn oom() msg.Error {
@@ -318,37 +375,68 @@ test "getenv takes the first entry of a name" {
     try testing.expectEqual(null, getenv(&env, "noequals"));
 }
 
-test "parseExec: variables, the empty field, the argv; each field ended by a NUL" {
+test "parseExec: tagged fields, each ended by a NUL, in any order" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    const full = (try parseExec(a, "A=1\x00B=x=y\x00EMPTY=\x00\x00prog\x00\x00last arg\x00")).ok;
+    const full = (try parseExec(a, "env:A=1\x00arg:prog\x00env:B=x=y\x00arg:\x00file:0600:/h/.c/x.json\x00{\"k\": 1}\n\x00env:EMPTY=\x00arg:last arg\x00file:644:/h/empty\x00\x00")).ok;
     try testing.expectEqual(3, full.env.len);
     try testing.expectEqualStrings("A", full.env[0].name);
     try testing.expectEqualStrings("1", full.env[0].value);
     try testing.expectEqualStrings("B", full.env[1].name);
     try testing.expectEqualStrings("x=y", full.env[1].value);
+    try testing.expectEqualStrings("EMPTY", full.env[2].name);
     try testing.expectEqualStrings("", full.env[2].value);
+    // An empty word is `arg:`, kept where it stands.
     try testing.expectEqual(3, full.argv.len);
     try testing.expectEqualStrings("prog", full.argv[0]);
     try testing.expectEqualStrings("", full.argv[1]);
     try testing.expectEqualStrings("last arg", full.argv[2]);
+    try testing.expectEqual(2, full.files.len);
+    try testing.expectEqual(@as(u32, 0o600), full.files[0].mode);
+    try testing.expectEqualStrings("/h/.c/x.json", full.files[0].path);
+    try testing.expectEqualStrings("{\"k\": 1}\n", full.files[0].content);
+    try testing.expectEqual(@as(u32, 0o644), full.files[1].mode);
+    try testing.expectEqualStrings("", full.files[1].content);
 
-    // No variables at all: the output starts with the empty field.
-    const bare = (try parseExec(a, "\x00/bin/true\x00")).ok;
-    try testing.expectEqual(0, bare.env.len);
-    try testing.expectEqualStrings("/bin/true", bare.argv[0]);
+    // The content is the next field whatever it holds: a tag, or a field
+    // that looks like one, is content there.
+    const tagged = (try parseExec(a, "file:0:/h/f\x00arg:not-an-arg\x00arg:p\x00")).ok;
+    try testing.expectEqualStrings("arg:not-an-arg", tagged.files[0].content);
+    try testing.expectEqual(@as(u32, 0), tagged.files[0].mode);
+    try testing.expectEqual(1, tagged.argv.len);
+    // A path holds what it holds, a `:` included: the caller judges it.
+    try testing.expectEqualStrings("rel:a", (try parseExec(a, "file:600:rel:a\x00c\x00arg:p\x00")).ok.files[0].path);
     // A name that is empty is the caller's to refuse.
-    try testing.expectEqualStrings("", (try parseExec(a, "=v\x00\x00p\x00")).ok.env[0].name);
+    try testing.expectEqualStrings("", (try parseExec(a, "env:=v\x00arg:p\x00")).ok.env[0].name);
 
-    try testing.expectEqual(ExecBad.unterminated, (try parseExec(a, "")).bad);
-    try testing.expectEqual(ExecBad.unterminated, (try parseExec(a, "\x00prog")).bad);
-    try testing.expectEqual(ExecBad.no_separator, (try parseExec(a, "A=1\x00")).bad);
-    try testing.expectEqual(ExecBad.no_argv, (try parseExec(a, "A=1\x00\x00")).bad);
-    try testing.expectEqual(ExecBad.no_argv, (try parseExec(a, "\x00")).bad);
-    try testing.expectEqual(ExecBad.empty_program, (try parseExec(a, "\x00\x00x\x00")).bad);
-    try testing.expectEqualStrings("prog", (try parseExec(a, "prog\x00\x00")).bad.not_a_variable);
+    try testing.expectEqual(ExecBad.no_argv, (try parseExec(a, "")).bad);
+    try testing.expectEqual(ExecBad.unterminated, (try parseExec(a, "arg:prog")).bad);
+    try testing.expectEqual(ExecBad.unterminated, (try parseExec(a, "arg:p\x00arg:x")).bad);
+    try testing.expectEqual(ExecBad.no_argv, (try parseExec(a, "env:A=1\x00")).bad);
+    try testing.expectEqual(ExecBad.no_argv, (try parseExec(a, "file:600:/h/f\x00arg:p\x00")).bad);
+    try testing.expectEqual(ExecBad.empty_program, (try parseExec(a, "arg:\x00arg:x\x00")).bad);
+    // The old shape: an empty field, and a bare word, have no tag.
+    try testing.expectEqualStrings("", (try parseExec(a, "env:A=1\x00\x00arg:p\x00")).bad.untagged);
+    try testing.expectEqualStrings("prog", (try parseExec(a, "prog\x00")).bad.untagged);
+    try testing.expectEqualStrings("ENV:A=1", (try parseExec(a, "ENV:A=1\x00arg:p\x00")).bad.untagged);
+    try testing.expectEqualStrings("env:A", (try parseExec(a, "env:A\x00arg:p\x00")).bad.not_a_variable);
+    try testing.expectEqualStrings("/h/f", (try parseExec(a, "arg:p\x00file:0600:/h/f\x00")).bad.no_content);
+    for ([_][]const u8{ "file:4755:/h/f", "file:1777:/h/f", "file:0800:/h/f", "file::/h/f", "file:00600:/h/f", "file:-600:/h/f", "file:600", "file:0x1f:/h/f", "file: 600:/h/f" }) |f| {
+        const out = try std.mem.concat(a, u8, &.{ f, "\x00content\x00arg:p\x00" });
+        try testing.expectEqualStrings(f, (try parseExec(a, out)).bad.bad_mode);
+    }
+}
+
+test "fileMode: one to four octal digits, the permission bits alone" {
+    try testing.expectEqual(@as(?u32, 0o600), fileMode("600"));
+    try testing.expectEqual(@as(?u32, 0o600), fileMode("0600"));
+    try testing.expectEqual(@as(?u32, 0o777), fileMode("0777"));
+    try testing.expectEqual(@as(?u32, 0), fileMode("0"));
+    try testing.expectEqual(@as(?u32, 0o7), fileMode("7"));
+    for ([_][]const u8{ "", "1000", "4755", "2755", "1777", "7777", "00600", "8", "60a", "+600" }) |s|
+        try testing.expectEqual(@as(?u32, null), fileMode(s));
 }
 
 test "substitute drops NULs and the trailing newlines, as $(...) does" {

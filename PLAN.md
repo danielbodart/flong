@@ -169,9 +169,13 @@ asserted rather than assumed:
   same session makes of the container's `/etc/set-environment` from the same
   launch variables, but for the three bash sets for itself. What only a
   shell could compute is refused at evaluation, naming its line.
-- `exec`'s variables and argument list reach the payload, and each malformed
-  output, a name set twice or already set, and a failing `exec` refuse the
-  launch. `postStop` runs once for every `$machine` `seccompPolicy` and
+- `exec`'s variables and argument list reach the payload, an empty word
+  among them, and each malformed output, a name set twice or already set, and
+  a failing `exec` refuse the launch. Its files are in the home before the
+  payload starts, the user's, in a nested new directory, with their modes, one
+  already there replaced; a path outside the home is refused, and one through
+  a symlink in the prepared root or into a bind ends the launch, writing
+  nothing on the host. `postStop` runs once for every `$machine` `seccompPolicy` and
   `exec` saw: after a refusal, a signal during `exec`, and a failure before
   the record.
 - The declaration binds single files and a socket at paths of its choosing,

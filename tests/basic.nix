@@ -259,6 +259,9 @@ in
           # launcher's side is the host's.
           "d /home/alice 0700 alice users -"
           "L+ /home/alice/escape - - - - /srv/escape-target"
+          # In the prepared root's home, for `exec` to seed a file over:
+          # replaced, content and mode, where the payload finds it.
+          "f /home/alice/seeded-over 0644 alice users - old-content-longer-than-the-new"
         ];
       };
     };
@@ -562,13 +565,14 @@ in
     };
 
     # `exec`: the payload decided at launch, by a command on the host that
-    # prints its variables and its argument list. What it is asked to print
-    # is its first argument, so one declaration covers the payload it gives
-    # and each shape of output the launch refuses. Each run stages a file
-    # for its $machine, as a consumer stages a policy's approval, and
-    # postStop releases it and says so, once per $machine: a launch that
-    # fails after exec has run, before or after its record, still runs it.
-    # seccompPolicy stages too, and prints nothing, which compiles nothing.
+    # prints its variables, its argument list and files for its home, each
+    # field tagged. What it is asked to print is its first argument, so one
+    # declaration covers the payload it gives and each shape of output the
+    # launch refuses. Each run stages a file for its $machine, as a
+    # consumer stages a policy's approval, and postStop releases it and
+    # says so, once per $machine: a launch that fails after exec has run,
+    # before or after its record, still runs it. seccompPolicy stages too,
+    # and prints nothing, which compiles nothing.
     flong.execd = {
       container = "demo";
       user = "alice";
@@ -580,24 +584,46 @@ in
         echo "$machine" >> /tmp/execd-machines
         touch "/tmp/execd-staged-$machine"
         field() { printf '%s\0' "$@"; }
+        args() { for a in "$@"; do printf 'arg:%s\0' "$a"; done; }
         case "''${1:-}" in
           ok)
             shift
-            field "EXEC_WORKSPACE=$workspace" "EXEC_MODE=$workspace_mode" "EXEC_EMPTY=" "EXEC_EQUALS=a=b"
-            field "" bash -c 'printf "%s|" "$EXEC_WORKSPACE" "$EXEC_MODE" "$EXEC_EMPTY" "$EXEC_EQUALS" "$PWD" "$LANG"; printf "[%s]" "$@"; echo' payload "$@" ;;
-          fixed) field "HOME=/root" "" true ;;
-          pwd) field "PWD=/elsewhere" "" true ;;
-          tini) field "TINI_KILL_PROCESS_GROUP=1" "" true ;;
-          declared) field "LANG=C" "" true ;;
-          twice) field "A=1" "A=2" "" true ;;
-          noname) field "=1" "" true ;;
-          novar) field "just-a-word" "" true ;;
-          unterminated) field "A=1" ""; printf true ;;
-          noseparator) field "A=1" ;;
-          noargv) field "A=1" "" ;;
-          emptyprogram) field "" "" ;;
+            field "env:EXEC_WORKSPACE=$workspace" "env:EXEC_MODE=$workspace_mode" "env:EXEC_EMPTY=" "env:EXEC_EQUALS=a=b"
+            args bash -c 'printf "%s|" "$EXEC_WORKSPACE" "$EXEC_MODE" "$EXEC_EMPTY" "$EXEC_EQUALS" "$PWD" "$LANG"; printf "[%s]" "$@"; echo' payload "$@" ;;
+          files)
+            # A file in a nested new directory, whose content looks like a
+            # tag and holds a newline; one the prepared root has, replaced;
+            # an empty one; and the payload's argument list among them.
+            field "file:0600:/home/alice/.seeded/deep/er/token.json" $'arg:{"token": 1}\nsecond line\n'
+            args bash -c 'cd && stat -c "%a %U %n" .seeded .seeded/deep .seeded/deep/er .seeded/deep/er/token.json seeded-over empty && cat .seeded/deep/er/token.json seeded-over && stat -c %s empty'
+            field "file:640:/home/alice/seeded-over" $'new\n' "file:0:/home/alice/empty" "" ;;
+          # Each walk flong init refuses: through the prepared root's
+          # symlink, into the declared bind, into the private $HOME/tmp.
+          symlink) field "file:0600:/home/alice/escape/planted" planted arg:true ;;
+          bind) field "file:0600:/home/alice/deep/er/keep/planted" planted arg:true ;;
+          hometmp) field "file:0600:/home/alice/tmp/planted" planted arg:true ;;
+          fixed) field "env:HOME=/root" arg:true ;;
+          pwd) field "env:PWD=/elsewhere" arg:true ;;
+          tini) field "env:TINI_KILL_PROCESS_GROUP=1" arg:true ;;
+          declared) field "env:LANG=C" arg:true ;;
+          twice) field "env:A=1" "env:A=2" arg:true ;;
+          noname) field "env:=1" arg:true ;;
+          novar) field "env:just-a-word" arg:true ;;
+          untagged) field "just-a-word" arg:true ;;
+          separator) field "env:A=1" "" arg:true ;;
+          unterminated) field arg:true; printf arg:x ;;
+          noargv) field "env:A=1" ;;
+          emptyprogram) field "arg:" "arg:x" ;;
+          badmode) field "file:4755:/home/alice/x" "" arg:true ;;
+          nocontent) field arg:true "file:0600:/home/alice/x" ;;
+          relative) field "file:0600:x" "" arg:true ;;
+          dotdot) field "file:0600:/home/alice/../bob/x" "" arg:true ;;
+          outside) field "file:0600:/srv/escape-target/x" "" arg:true ;;
+          home) field "file:0600:/home/alice" "" arg:true ;;
+          filetwice) field "file:0600:/home/alice/x" "" "file:0600:/home/alice/x" "" arg:true ;;
+          inside) field "file:0600:/home/alice/x/y" "" "file:0600:/home/alice/x" "" arg:true ;;
           fail) echo "exec refuses this launch" >&2; exit 3 ;;
-          slow) sleep 60; field "" true ;;
+          slow) sleep 60; field arg:true ;;
         esac
       '') ];
       postStop = hook "execd-poststop" ''
@@ -930,26 +956,39 @@ in
           machine.succeed("rm -f /tmp/execd-*")
           # Its variables reach the payload beside the container's, its
           # argument list is the payload's whole, the launcher's arguments
-          # arriving only as exec put them there, and the payload starts in
-          # the workspace, PWD with it.
+          # arriving only as exec put them there, an empty one as `arg:`,
+          # and the payload starts in the workspace, PWD with it.
           out = machine.succeed(by_caller("${execd} ok 'a b' '$HOME' \"\""))
           assert out == "/srv/work|rw||a=b|/srv/work|en_US.UTF-8|[a b][$HOME][]\n", out
           # Each refused, 1, saying why under the declaration's name.
           program = machine.succeed("grep -o '/nix/store/[a-z0-9]*-flong-test-exec' /etc/flong/execd.zon | head -1").strip()
-          for mode, said in [
+          tags = "where each field is env:NAME=VALUE, arg:WORD, or file:MODE:PATH followed by the file's content"
+          unclean = "which is not an absolute path without an empty, '.' or '..' component"
+          refusals = [
               ("fixed", "sets HOME, which the launch sets for every session"),
               ("pwd", "sets PWD, which the launch sets for every session"),
               ("tini", "sets TINI_KILL_PROCESS_GROUP, which tini, the session's init, reads"),
               ("declared", "sets LANG, which the container's environment already sets"),
               ("twice", "sets A twice"),
               ("noname", "printed a variable with an empty name"),
-              ("novar", 'printed "just-a-word" before the empty field, where each field is a variable, NAME=VALUE'),
+              ("novar", 'printed "env:just-a-word", which has no `=`: a variable is env:NAME=VALUE'),
+              ("untagged", f'printed "just-a-word", {tags}'),
+              # The empty field that once ended the variables is no field.
+              ("separator", f'printed "", {tags}'),
               ("unterminated", "printed a field without the NUL that ends it"),
-              ("noseparator", "printed no empty field to end the variables and begin the payload's argument list"),
-              ("noargv", "printed no argument list after the empty field: the payload needs at least its program"),
+              ("noargv", "printed no arg: field: the payload needs at least its program"),
               ("emptyprogram", "printed an empty program as the payload's"),
+              ("badmode", 'printed "file:4755:/home/alice/x", whose mode is not one to four octal digits of at most 0777'),
+              ("nocontent", "printed the file /home/alice/x with no field after it for its content"),
+              ("relative", f'printed the file "x", {unclean}'),
+              ("dotdot", f'printed the file "/home/alice/../bob/x", {unclean}'),
+              ("outside", "printed the file /srv/escape-target/x, which is not under the payload's home, /home/alice"),
+              ("home", "printed the file /home/alice, which is not under the payload's home, /home/alice"),
+              ("filetwice", "printed the file /home/alice/x twice"),
+              ("inside", "printed the file /home/alice/x/y inside the file /home/alice/x"),
               ("fail", "failed (status 3); the payload does not run"),
-          ]:
+          ]
+          for mode, said in refusals:
               out = machine.succeed(by_caller(f"${execd} {mode} 2>&1; echo rc=$?"))
               assert out.endswith("\nrc=1\n"), (mode, out)
               assert out.startswith(f"execd: exec: {program} {said}") or f"\nexecd: exec: {program} {said}" in out, (mode, out)
@@ -957,10 +996,51 @@ in
           # that ran, ran postStop exactly once for its $machine, which
           # released what exec and seccompPolicy staged for it.
           machines = machine.succeed("cat /tmp/execd-machines").split()
-          assert len(machines) == 13 and len(set(machines)) == 13, machines
+          n = len(refusals) + 1
+          assert len(machines) == n and len(set(machines)) == n, machines
           assert machine.succeed("cat /tmp/execd-policy").split() == machines
           released = machine.succeed("cat /tmp/execd-released").split()
           assert sorted(released) == sorted(machines), (machines, released)
+          machine.fail("ls /tmp/execd-staged-*")
+          machine.succeed(NO_SESSIONS)
+
+      @test("exec: files seeded into the home, the payload's, and each walk flong init refuses")
+      def _():
+          machine.succeed("rm -f /tmp/execd-*")
+          # A nested new directory's file, its directories made 0700, one
+          # the prepared root has replaced, content and mode, and an empty
+          # one; all the payload's user's, before the payload starts.
+          out = machine.succeed(by_caller("${execd} files"))
+          assert out == (
+              "700 alice .seeded\n"
+              "700 alice .seeded/deep\n"
+              "700 alice .seeded/deep/er\n"
+              "600 alice .seeded/deep/er/token.json\n"
+              "640 alice seeded-over\n"
+              "0 alice empty\n"
+              'arg:{"token": 1}\nsecond line\n'
+              "new\n"
+              "0\n"), out
+          # The next session's home is the prepared root's again.
+          out = machine.succeed(by_caller("${launcher} 'cat ~/seeded-over; ls -A ~'"))
+          assert out.startswith("old-content-longer-than-the-new") and ".seeded" not in out, out
+          # A symlink in the prepared root on the path, the declared bind
+          # into the home, and the private $HOME/tmp: flong init refuses
+          # each, the session does not start, 125, and nothing is written,
+          # the host's side of the link and of the bind included.
+          for mode, said in [
+              ("symlink", "flong init: seeding /home/alice/escape/planted: a symbolic link is on its path, and nothing is followed"),
+              ("bind", "flong init: seeding /home/alice/deep/er/keep/planted: its path crosses a mount, and a seeded file is written to the session's own root alone"),
+              ("hometmp", "flong init: seeding /home/alice/tmp/planted: its path crosses a mount, and a seeded file is written to the session's own root alone"),
+          ]:
+              out = machine.succeed(by_caller(f"${execd} {mode} 2>&1; echo rc=$?"))
+              assert out.endswith("\nrc=125\n") and said in out, (mode, out)
+          machine.fail("test -e /srv/escape-target/planted")
+          machine.fail("test -e /srv/keep/planted")
+          # postStop, once for each, from the teardown.
+          machines = machine.succeed("cat /tmp/execd-machines").split()
+          assert len(machines) == 4 and len(set(machines)) == 4, machines
+          assert sorted(machine.succeed("cat /tmp/execd-released").split()) == sorted(machines)
           machine.fail("ls /tmp/execd-staged-*")
           machine.succeed(NO_SESSIONS)
 

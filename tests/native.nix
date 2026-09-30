@@ -422,12 +422,12 @@ in
         # What golden's init set cannot reach (tests/golden.nix): as root of
         # a namespace newuidmap made, setgroups and the capability drop
         # succeed, as in the launcher's U1 (src/init.zig:210-213). GATE is 4,
-        # reading GATE_FILE; READY is 5, writing to /dev/null; no groups,
-        # terminal or trace. Prints stderr and the status as the last line.
+        # reading GATE_FILE; READY is 5, writing to /dev/null; no files,
+        # groups, terminal or trace. Prints stderr and the status as the last line.
         def init_run(gate_file, dir):
             return machine.succeed(as_alice(
                 "unshare --user --map-auto --map-root-user -- "
-                f"${launcher}/bin/flong init 4 5 - - - {shlex.quote(dir)} -- true "
+                f"${launcher}/bin/flong init 4 5 - - - - {shlex.quote(dir)} -- true "
                 f"4<{gate_file} 5>/dev/null 2>&1; echo rc=$?"))
 
         machine.succeed("printf g > /tmp/init-gate && chmod 644 /tmp/init-gate")

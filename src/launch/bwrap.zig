@@ -1,10 +1,10 @@
 //! launch/bwrap.zig: bwrap's spawn, step 12 of a launch (DESIGN.md, "The
 //! launch, in order"; launcher/flong-launch.c:334-410 of 5f1f08e,
 //! spawn_bwrap). The seccomp programs are opened, the info, ready and gate
-//! pipes made, the resolver's file written into a memfd, and bwrap spawned
-//! from spec.bwrapArgv, every descriptor it is given named in its argv by
-//! Spawn.passFd: U1, U2, info, the seccomp programs, the resolver's memfd,
-//! gate and ready.
+//! pipes made, the resolver's file and the files to seed written into a
+//! memfd each, and bwrap spawned from spec.bwrapArgv, every descriptor it
+//! is given named in its argv by Spawn.passFd: U1, U2, info, the seccomp
+//! programs, the resolver's memfd, gate, ready and the files' memfd.
 //!
 //! One module per piece, where the port's plan had flong-launch as one
 //! root module: launch.zig's helpers are split by concern into src/launch/,
@@ -25,6 +25,7 @@
 //!     for (ends.seccomp) |h| h.close();
 //!     ends.u2.close();
 //!     if (ends.resolv) |h| h.close();
+//!     if (ends.files) |h| h.close();
 //!
 //! A copy the launcher kept of a write end would hide bwrap's death from
 //! the info and ready readers, and one of the gate's read end would never
@@ -61,6 +62,9 @@ pub const ChildEnds = struct {
     u2: fd.Fd(.userns),
     /// the memfd holding the spec's resolv_conf, once it is written
     resolv: ?fd.File = null,
+    /// the memfd holding the spec's files for flong init, once it is
+    /// written
+    files: ?fd.File = null,
 };
 
 /// bwrap, and the launcher's ends of the three pipes (flong-launch.c:
@@ -80,8 +84,8 @@ pub const Spawned = struct {
 /// spawns bwrap with spec.bwrapArgv's argv in `cgroup` (the sandbox leaf),
 /// with `stdio` as its 0-2 (the terminal's, tty_stdio) and this process's
 /// environment (:379-391). It inherits U1 (`outer`, any userns handle), U2,
-/// its ends of the three pipes, the seccomp descriptors and the resolver's
-/// memfd, and nothing else (:364-377). `relay` is a relayed pty's: a session of
+/// its ends of the three pipes, the seccomp descriptors, the resolver's
+/// memfd and the files' memfd, and nothing else (:364-377). `relay` is a relayed pty's: a session of
 /// its own, flong init's ctty.
 ///
 /// On a failure it has said why (`open seccomp program P: <text>`,
@@ -117,6 +121,17 @@ pub fn spawn(
         ends.resolv = f;
         const n = try msg.check(f.pwrite(text, 0), "write the session's resolv.conf", .{});
         if (n != text.len) return msg.fail(.IO, "write the session's resolv.conf", .{});
+    }
+
+    // The files flong init seeds into the home, in a memfd it maps: bwrap
+    // passes it on untouched, as it does the gate and ready pipes, and
+    // flong init closes it with every other descriptor before tini.
+    if (s.files.len > 0) {
+        const data = spec.filesData(arena, s.home, s.files) catch return msg.fail(.NOMEM, "malloc", .{});
+        const f = try msg.check(fd.memfd("files"), "memfd_create", .{});
+        ends.files = f;
+        const n = try msg.check(f.pwrite(data, 0), "write the session's files", .{});
+        if (n != data.len) return msg.fail(.IO, "write the session's files", .{});
     }
 
     // The three pipes, both ends close-on-exec: bwrap is given its ends
@@ -169,6 +184,7 @@ fn start(
         .resolv = ends.resolv,
         .gate_r = ends.gate_r.?,
         .ready_w = ends.ready_w.?,
+        .files = ends.files,
     }, relay, paths.self) catch return msg.fail(.NOMEM, "realloc", .{});
     sp.stdio = stdio;
     sp.cgroup = cgroup;

@@ -15,7 +15,8 @@
 //!   6  the depth rule (:225-247)                        depth.zig
 //!   7  the maps (:249-290)                              subid.zig
 //!   8  the prepared root (:292-343)                     prepare.zig
-//!   9  the payload's identity (:345-375)                identity.zig
+//!   9  the payload's identity (:345-375), and the
+//!      home `exec`'s files must be under                identity.zig
 //!  10  $home/tmp (:377-389)                             hometmp.zig
 //!  11  the spec (:391-474)                              resolv.zig
 //!
@@ -321,6 +322,8 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
     try env.set("uid", id.uid);
     try env.set("gid", id.gid);
     try env.set("home", id.home);
+    // `exec`'s files, now that the home they must be under is known.
+    const seeded: []const spec.File = if (exec) |x| try homeFiles(gpa, d.exec.?, id.home, x.files) else &.{};
 
     // 10. $home/tmp, a private tmpfs unless a bind or a declared mount is
     // there (:377-389).
@@ -353,6 +356,7 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
             .id = id,
             .home_tmp = if (home_tmp) home_tmp_path else null,
             .exec = exec,
+            .files = seeded,
         }),
         .cold = cold,
         .environ = @ptrCast(environ[0..envLen(environ)]),
@@ -385,6 +389,8 @@ const Found = struct {
     home_tmp: ?[:0]const u8,
     /// what `exec` printed, when the declaration has it
     exec: ?cmd.Exec,
+    /// its files, relative to the home
+    files: []const spec.File,
 };
 
 /// The holder unit's cgroup, relative to user@UID.service, and how the
@@ -613,6 +619,7 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
         .env = l.env.items,
         .hostname = try z.of(gpa, d.container),
         .resolv_conf = resolv_conf,
+        .files = f.files,
         .trace = if (getenv(p.environ, "FLONG_TRACE")) |t| t.len > 0 else false,
         .command = @ptrCast(command[0 .. words.len + extra.len]),
     };
@@ -635,14 +642,18 @@ fn postStopCommands(gpa: Allocator, d: *const Declaration) Allocator.Error![]con
 /// The declaration's `exec`, run as the other commands are, with the
 /// launcher's arguments after its own, its stdout captured as theirs is
 /// (at most cmd.output_max) and read as its protocol (cmd.parseExec). Its
-/// failure, output of another shape, an empty name (each field is split
-/// at its first `=`), one printed twice, one tini reads
+/// failure, output of another shape, an empty name (an `env:` field is
+/// split at its first `=`), one printed twice, one tini reads
 /// (spec.init_prefix) and one the session already sets -- the launch's
 /// own (spec.fixed_env) or the container's (`environment`) -- are each
-/// refused, saying so: nothing it prints overrides anything silently.
-/// The names are held in a set as they are judged, so a caller whose
-/// arguments the hook echoes as variables, a MiB of them, costs a pass
-/// over them rather than a comparison of each with every earlier one.
+/// refused, saying so: nothing it prints overrides anything silently. So
+/// is a file's path that is not absolute and clean (spec.unclean), one
+/// printed twice, and one inside another's, which could not be both a
+/// file and a directory; whether each is under the payload's home is
+/// `homeFiles`', once the home is known. The names and paths are held in
+/// sets as they are judged, so a caller whose arguments the hook echoes as
+/// variables, a MiB of them, costs a pass over them rather than a
+/// comparison of each with every earlier one.
 fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const [*:0]const u8, envp: cmd.Envp) Error!cmd.Exec {
     const o = try cmd.capture(gpa, x, args, envp, cmd.output_max);
     if (o.status != 0) return msg.refuse("exec: {s} failed (status {d}); the payload does not run", .{ x[0], o.status });
@@ -650,9 +661,11 @@ fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const 
         .ok => |e| e,
         .bad => |bad| return switch (bad) {
             .unterminated => msg.refuse("exec: {s} printed a field without the NUL that ends it: every field, the last one too, ends with a NUL", .{x[0]}),
-            .no_separator => msg.refuse("exec: {s} printed no empty field to end the variables and begin the payload's argument list", .{x[0]}),
-            .not_a_variable => |field| msg.refuse("exec: {s} printed \"{s}\" before the empty field, where each field is a variable, NAME=VALUE", .{ x[0], field }),
-            .no_argv => msg.refuse("exec: {s} printed no argument list after the empty field: the payload needs at least its program", .{x[0]}),
+            .untagged => |field| msg.refuse("exec: {s} printed \"{s}\", where each field is env:NAME=VALUE, arg:WORD, or file:MODE:PATH followed by the file's content", .{ x[0], field }),
+            .not_a_variable => |field| msg.refuse("exec: {s} printed \"{s}\", which has no `=`: a variable is env:NAME=VALUE", .{ x[0], field }),
+            .bad_mode => |field| msg.refuse("exec: {s} printed \"{s}\", whose mode is not one to four octal digits of at most 0777: a file is file:MODE:PATH, and its mode permission bits alone, never setuid, setgid or sticky", .{ x[0], field }),
+            .no_content => |path| msg.refuse("exec: {s} printed the file {s} with no field after it for its content", .{ x[0], path }),
+            .no_argv => msg.refuse("exec: {s} printed no arg: field: the payload needs at least its program", .{x[0]}),
             .empty_program => msg.refuse("exec: {s} printed an empty program as the payload's", .{x[0]}),
         },
     };
@@ -671,7 +684,44 @@ fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const 
         if ((seen.getOrPut(gpa, v.name) catch return oom()).found_existing)
             return msg.refuse("exec: {s} sets {s} twice", .{ x[0], v.name });
     }
+    var paths: std.StringHashMapUnmanaged(void) = .empty;
+    for (e.files) |f| {
+        if (spec.unclean(f.path, .absolute) != null)
+            return msg.refuse("exec: {s} printed the file \"{s}\", which is not an absolute path without an empty, '.' or '..' component", .{ x[0], f.path });
+        if ((paths.getOrPut(gpa, f.path) catch return oom()).found_existing)
+            return msg.refuse("exec: {s} printed the file {s} twice", .{ x[0], f.path });
+    }
+    // A file inside another's path: each path's every parent looked up in
+    // the set, which is the whole of it once all are in.
+    for (e.files) |f| {
+        var i = f.path.len;
+        while (std.mem.lastIndexOfScalar(u8, f.path[0..i], '/')) |slash| : (i = slash) {
+            if (slash == 0) break;
+            if (paths.contains(f.path[0..slash]))
+                return msg.refuse("exec: {s} printed the file {s} inside the file {s}", .{ x[0], f.path, f.path[0..slash] });
+        }
+    }
     return e;
+}
+
+/// `exec`'s files, each of whose paths must be under the payload's `home`
+/// (`/home/u/x`, never `/home/u` itself), as the spec holds them: relative
+/// to it. A path elsewhere is refused, saying so: a seeded file is the
+/// session's own, and the home the one place a session keeps its own.
+/// Where under it a file may not go -- through a symbolic link, across a
+/// mount -- flong init finds, as it walks (init.zig).
+fn homeFiles(gpa: Allocator, x: decl.Command, home: []const u8, files: []const cmd.File) Error![]const spec.File {
+    const out = gpa.alloc(spec.File, files.len) catch return oom();
+    for (out, files) |*o, f| {
+        if (!(f.path.len > home.len + 1 and std.mem.startsWith(u8, f.path, home) and f.path[home.len] == '/'))
+            return msg.refuse("exec: {s} printed the file {s}, which is not under the payload's home, {s}", .{ x[0], f.path, home });
+        o.* = .{
+            .mode = f.mode,
+            .path = gpa.dupeZ(u8, f.path[home.len + 1 ..]) catch return oom(),
+            .content = f.content,
+        };
+    }
+    return out;
 }
 
 /// A port class of pasta's: "none", or each forward HOST:CONTAINER of

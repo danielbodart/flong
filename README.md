@@ -84,13 +84,17 @@ there is one and `/srv/reference` read-only.
 ### A payload decided at launch
 
 `exec` in place of `command` prints the payload on the host, with what the
-hooks know, so the session itself runs one exec'd program and no script:
+hooks know, so the session itself runs one exec'd program and no script. It
+can seed files into the session's home too, which the payload then owns:
 
 ```nix
 flong.sandbox.command = lib.mkForce null;
 flong.sandbox.exec = [ "${pkgs.writeShellScript "payload" ''
-  # NUL-ended fields: variables, an empty field, then the argument list.
-  printf '%s\0' "PROJECT=$(basename "$workspace")" "" cargo "$@"
+  # NUL-ended fields, each tagged: env:NAME=VALUE, arg:WORD, and
+  # file:MODE:PATH followed by the file's content.
+  printf '%s\0' "env:PROJECT=$(basename "$workspace")" arg:cargo
+  for a in "$@"; do printf 'arg:%s\0' "$a"; done
+  printf '%s\0' file:0600:/home/alice/.config/tool/token "$(tool-token)"
 ''}" ];
 ```
 
@@ -285,7 +289,7 @@ usage of every subcommand.
 | `container` | `<name>` | The `containers.<name>` declaration to run. |
 | `user` | *required* | Account inside the container that everything in the session runs as. Its uid and its primary group's gid must be declared in the container's `config`; its home is read from the prepared root's `/etc/passwd`. It is mapped onto the caller whatever its uid. Both must be at most 65535. |
 | `command` | `null` | The payload's argument list, e.g. `[ "cargo" ]` or `[ (lib.getExe pkgs.hello) ]`. The launcher's arguments are appended, and it is exec'd as `user` in the workspace, with nothing between, and with the container's `PATH` and the variables its `/etc/set-environment` sets, computed at evaluation. No element is read by a shell. A declaration has this or `exec`. |
-| `exec` | `null` | In place of `command`: a command run on the host after `seccompPolicy` that prints the payload's variables and argument list as NUL-ended fields, `NAME=VALUE`... then an empty field then the argument list. A name the session already sets (`PWD` among them), one tini reads (`TINI_*`), or output of any other shape, refuses the launch. |
+| `exec` | `null` | In place of `command`: a command run on the host after `seccompPolicy` that prints the payload as NUL-ended fields, each tagged: `env:NAME=VALUE` for a variable, `arg:WORD` for each word of the argument list (an empty one is `arg:`), and `file:MODE:PATH` then the content, for a file flong init writes into the home as `user` before the payload starts, replacing one there. A name the session already sets (`PWD` among them), one tini reads (`TINI_*`), a MODE past `0777`, a PATH outside the home, twice or inside another's, or output of any other shape, refuses the launch; a symlink or a mount on a file's path ends it. |
 | `workspace` | `null` | A command printing the directory to bind-mount at its own path and `cd` into: `PATH`, read-write, or `PATH:ro`. `null` is the directory the launcher starts in. |
 | `binds` | `[ ]` | Commands printing more directories to bind-mount, each at its own path, one per line: `PATH`, read-only, or `PATH:rw`. Their outputs are concatenated. |
 | `guard` | `[ ]` | Commands checking that the launch is one the declaration means to make. Each must exit 0; the first that does not refuses. A check, not a gate; setting it warns. |
@@ -374,6 +378,11 @@ so it releases whatever they staged too.
   user's home it is owned by the user, so a bind at `~/.cache/tool/data` leaves
   `~/.cache/tool` writable. Inside a host bind it is made as the caller, and
   stays on the host.
+- The files `exec` printed are in the home before the payload starts, the
+  user's, with the modes asked for, their missing directories 0700. They are
+  written by flong init after the mounts, following no symlink and crossing
+  no mount, so they are on the session's own filesystem and gone with it,
+  and a program that replaces one by renaming over it can.
 - `TMPDIR` is `~/tmp`, a 0700 tmpfs, unless a bind or a declared mount
   covers it, when it is `/tmp`, a fresh 1777 tmpfs. `XDG_RUNTIME_DIR` is `/run/user/<uid>`, a 0700
   tmpfs.

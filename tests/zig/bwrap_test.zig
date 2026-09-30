@@ -5,9 +5,11 @@
 //!
 //! - bwrap's argv per branch (plain, relay, nestedSandbox, a project
 //!   filter, the typed options: the resolver's memfd, the environment and
-//!   the hostname; trace), each descriptor's number read back as its name,
-//!   against the golden argv; and the stand-in holds 0-2 and exactly the
-//!   descriptors its argv names, the resolver's memfd included.
+//!   the hostname; trace; files to seed, flong init's FILES memfd and what
+//!   it holds), each descriptor's number read back as its name, against
+//!   the golden argv; and the stand-in holds 0-2 and exactly the
+//!   descriptors its argv names, the resolver's and the files' memfds
+//!   included.
 //! - checkpoint 2's list: after the root's walk of ChildEnds (written here
 //!   as launch.zig's is) the launcher holds its three ends and bwrap's
 //!   pidfd, and nothing of bwrap's; on a refused seccomp program (U2 in the
@@ -110,6 +112,7 @@ fn walk(ends: *const bwrap.ChildEnds) void {
     for (ends.seccomp) |h| h.close();
     ends.u2.close();
     if (ends.resolv) |h| h.close();
+    if (ends.files) |h| h.close();
 }
 
 /// Each of `ends`' handles is closed.
@@ -120,6 +123,7 @@ fn expectWalked(ends: *const bwrap.ChildEnds) !void {
     for (ends.seccomp) |h| try testing.expect(!h.isLive());
     try testing.expect(!ends.u2.isLive());
     if (ends.resolv) |h| try testing.expect(!h.isLive());
+    if (ends.files) |h| try testing.expect(!h.isLive());
 }
 
 // ---- the spec every branch starts from ----
@@ -189,6 +193,9 @@ const Branch = struct {
     /// a resolver, an environment and a hostname
     typed: bool = false,
     relay: bool = false,
+    /// files to seed, and what their memfd must hold
+    files: []const spec.File = &.{},
+    files_data: []const u8 = "",
 };
 
 /// Spawns the stand-in as bwrap for `b`, walks checkpoint 2's list, and
@@ -216,6 +223,7 @@ fn expectSpawn(b: Branch, want: []const []const u8) !void {
         s.env = &.{ .{ .name = "HOME", .value = "/home/u" }, .{ .name = "container", .value = "flong" } };
         s.hostname = "c";
     }
+    s.files = b.files;
 
     const before = fd.liveCount();
     var ends: bwrap.ChildEnds = .{ .u2 = try userns() };
@@ -237,6 +245,16 @@ fn expectSpawn(b: Branch, want: []const []const u8) !void {
     for (ends.seccomp, 0..) |h, i| try named.add(arena, &names, try std.fmt.allocPrint(arena, "@SECCOMP{d}@", .{i}), h);
     try testing.expectEqual(b.typed, ends.resolv != null);
     if (ends.resolv) |h| try named.add(arena, &names, "@RESOLV@", h);
+    try testing.expectEqual(b.files.len > 0, ends.files != null);
+    if (ends.files) |h| {
+        try named.add(arena, &names, "@FILES@", h);
+        var buf: [256]u8 = undefined;
+        const n = switch (h.pread(&buf, 0)) {
+            .ok => |n| n,
+            .err => return error.TestUnexpectedResult,
+        };
+        try testing.expectEqualStrings(b.files_data, buf[0..n]);
+    }
 
     // 2. checkpoint 2: the child's ends, at once.
     walk(&ends);
@@ -268,13 +286,15 @@ fn expectSpawn(b: Branch, want: []const []const u8) !void {
     for (args.items, 0..) |w, i| {
         var n = w;
         // A number is a descriptor's where the argv names one: after its
-        // option, or flong init's first two words.
+        // option, or flong init's first three words.
         const prev = if (i > 0) args.items[i - 1] else "";
         const prev2 = if (i > 1) args.items[i - 2] else "";
         const prev3 = if (i > 2) args.items[i - 3] else "";
+        const prev4 = if (i > 3) args.items[i - 4] else "";
         const is_fd = eql(prev, "--userns") or eql(prev, "--userns2") or eql(prev, "--info-fd") or
             eql(prev, "--add-seccomp-fd") or eql(prev, "--ro-bind-data") or
-            (eql(prev2, self_path) and eql(prev, "init")) or (eql(prev3, self_path) and eql(prev2, "init"));
+            (eql(prev2, self_path) and eql(prev, "init")) or (eql(prev3, self_path) and eql(prev2, "init")) or
+            (eql(prev4, self_path) and eql(prev3, "init"));
         if (is_fd) {
             for (names.items) |nm| {
                 if (eql(nm[1], w)) n = nm[0];
@@ -318,7 +338,7 @@ fn lessStr(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == .lt;
 }
 
-const init_plain = [_][]const u8{ "--", self_path, "init", "@GATE@", "@READY@", "100,27", "-", "-", "/home/u/w" };
+const init_plain = [_][]const u8{ "--", self_path, "init", "@GATE@", "@READY@", "-", "100,27", "-", "-", "/home/u/w" };
 
 test "spawn: plain" {
     try expectSpawn(.{}, comptime cat(&.{ &head, &middle, &init_plain, &tail_command }));
@@ -329,7 +349,7 @@ test "spawn: relay, a session of its own and flong init's ctty" {
         &head,
         &.{"--new-session"},
         &middle,
-        &.{ "--", self_path, "init", "@GATE@", "@READY@", "100,27", "ctty", "-", "/home/u/w" },
+        &.{ "--", self_path, "init", "@GATE@", "@READY@", "-", "100,27", "ctty", "-", "/home/u/w" },
         &tail_command,
     }));
 }
@@ -369,7 +389,22 @@ test "spawn: trace, and no groups" {
     try expectSpawn(.{ .trace = true, .groups = &.{} }, comptime cat(&.{
         &head,
         &middle,
-        &.{ "--", self_path, "init", "@GATE@", "@READY@", "-", "-", "trace", "/home/u/w" },
+        &.{ "--", self_path, "init", "@GATE@", "@READY@", "-", "-", "-", "trace", "/home/u/w" },
+        &tail_command,
+    }));
+}
+
+test "spawn: files to seed, in a memfd flong init is given as FILES" {
+    try expectSpawn(.{
+        .files = &.{
+            .{ .mode = 0o600, .path = ".claude/.credentials.json", .content = "{\"k\":1}\n" },
+            .{ .mode = 0, .path = "empty", .content = "" },
+        },
+        .files_data = "/home/u\x00600\x00.claude/.credentials.json\x00{\"k\":1}\n\x00" ++ "0\x00empty\x00\x00",
+    }, comptime cat(&.{
+        &head,
+        &middle,
+        &.{ "--", self_path, "init", "@GATE@", "@READY@", "@FILES@", "100,27", "-", "-", "/home/u/w" },
         &tail_command,
     }));
 }

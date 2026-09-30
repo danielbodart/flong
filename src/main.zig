@@ -3,7 +3,7 @@
 //! flong-init and flong-sweeper (DESIGN.md, "One binary").
 //!
 //!   flong launch DECL.zon|NAME [-- ARGS...]
-//!   flong init GATE READY GROUPS TTY TRACE DIR -- COMMAND...
+//!   flong init GATE READY FILES GROUPS TTY TRACE DIR -- COMMAND...
 //!   flong sweeper STATE-DIR
 //!   flong check DECL.zon
 //!   flong list
@@ -205,10 +205,11 @@ const help_text = usage ++
     \\
     \\flong runs these itself, and they are not for typing:
     \\
-    \\flong init GATE READY GROUPS TTY TRACE DIR -- COMMAND...
+    \\flong init GATE READY FILES GROUPS TTY TRACE DIR -- COMMAND...
     \\    A session's first process inside its sandbox: it sets the
-    \\    session's groups and capabilities, waits at the gate, and runs
-    \\    tini, which runs COMMAND.
+    \\    session's groups and capabilities, waits at the gate, writes the
+    \\    files `exec` printed into the home, and runs tini, which runs
+    \\    COMMAND.
     \\
     \\flong sweeper STATE-DIR
     \\    The holder of the caller's sessions: the one process of the
