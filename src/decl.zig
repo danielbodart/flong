@@ -200,7 +200,7 @@ pub const Declaration = struct {
     /// the launch is one this declaration means to make. A consistency
     /// check, not a gate: the session grants nothing the caller did not
     /// already have, and the caller can run `flong launch` directly with
-    /// any declaration. Setting it warns, to say so.
+    /// any declaration.
     ///
     /// Runs *after* `workspace` and `binds`, with their answers in its
     /// environment: `$workspace`, absolute and symlink-resolved,
