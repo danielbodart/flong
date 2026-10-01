@@ -239,8 +239,20 @@ let
 
   # The native launcher: flong, whose subcommands are launch, sweeper and
   # init, Zig, static and without libc (native.nix's launcher set). Built
-  # from this nixpkgs, so its bubblewrap is the host's.
-  flongLauncher = import ./launcher { inherit pkgs; };
+  # from this nixpkgs, so its bubblewrap is the host's, but for pasta, which
+  # is the flake's locked nixpkgs': what -t means changed in 2026_07 (auto
+  # became a modifier on a port set, and an address may bind it), and
+  # flong's checks run that nixpkgs', so a host on a release channel gets
+  # the pasta they ran.
+  lockedPasst =
+    let
+      locked = (builtins.fromJSON (builtins.readFile ./flake.lock)).nodes.nixpkgs.locked;
+    in
+    (import (fetchTarball {
+      url = "https://github.com/${locked.owner}/${locked.repo}/archive/${locked.rev}.tar.gz";
+      sha256 = locked.narHash;
+    }) { inherit (pkgs.stdenv.hostPlatform) system; }).passt;
+  flongLauncher = import ./launcher { inherit pkgs; passt = lockedPasst; };
 
   # A path as flong spells it to compare it (src/check.zig's norm, which
   # flong check and the launch's prologue use): /var/run is /run, and

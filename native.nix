@@ -12,6 +12,8 @@
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:10-19
 # does, since zig_0_15 is that nixpkgs' (DESIGN.md, "Why Zig, and what it cost").
+# passt defaults to pkgs', and module.nix gives the locked nixpkgs' whatever
+# its pkgs.
 {
   pkgs ?
     let
@@ -21,6 +23,7 @@
       url = "https://github.com/${locked.owner}/${locked.repo}/archive/${locked.rev}.tar.gz";
       sha256 = locked.narHash;
     }) { },
+  passt ? pkgs.passt,
 }:
 let
   inherit (pkgs) lib;
@@ -180,7 +183,7 @@ let
 
   # The programs flong launch runs, compiled in.
   bwrap = "${pkgs.bubblewrap}/bin/bwrap";
-  pasta = "${pkgs.passt}/bin/pasta";
+  pasta = "${passt}/bin/pasta";
   newuidmap = "/run/wrappers/bin/newuidmap";
   newgidmap = "/run/wrappers/bin/newgidmap";
   # The prepared root's cache tool (cache.nix, module.nix's cacheTool: the
