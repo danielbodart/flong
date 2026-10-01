@@ -864,10 +864,10 @@ in
   options.flong = lib.mkOption {
     default = { };
     description = ''
-      Ephemeral sessions that run one foreground process as the calling
+      Ephemeral containers that run one foreground process as the invoking
       user, through flong launch and bubblewrap, in user namespaces the
-      caller owns, with no root anywhere. Each starts from a root prepared
-      once and cached, rather than booted per session.
+      invoking user owns, with no root anywhere. Each starts from a rootfs
+      built once and cached, rather than booted per container.
 
       Each entry drives an existing `containers.<name>` declaration, using it
       only as a closure builder; the `container@` unit it installs is never
@@ -892,7 +892,7 @@ in
           type = lib.types.attrsOf lib.types.anything;
           default = { };
           visible = false;
-          description = "Refused: a session has no scope unit. See `limits`.";
+          description = "Refused: a container has no scope unit. See `limits`.";
         };
 
         path = lib.mkOption {
@@ -900,10 +900,10 @@ in
           default = [ ];
           description = ''
             Packages on `PATH` for every hook, all of which run on the host
-            as the caller: `workspace`, `binds`, `guard`, `seccompPolicy`,
-            `exec`, `postStart` and `postStop`. Not for the payload, which
-            runs inside the session with the container's own `PATH`: a tool
-            the workload needs belongs in the container's
+            as the invoking user: `workspace`, `binds`, `guard`,
+            `seccompPolicy`, `exec`, `postStart` and `postStop`. Not for the
+            entrypoint, which runs inside the container with its own `PATH`:
+            a tool the entrypoint needs belongs in the container's
             `environment.systemPackages`.
           '';
         };
@@ -914,20 +914,20 @@ in
           description = ''
             The declaration's command: `bin/<name>`, a link to flong, which
             runs /etc/flong/<name>.zon as `flong launch <name> -- ARGS`
-            would. Run it directly as the user whose session it is, never as
-            root. It needs their subordinate ids in /etc/subuid and
+            would. Run it directly as the user whose container it is, never
+            as root. It needs their subordinate ids in /etc/subuid and
             /etc/subgid (`users.users.<name>.subUidRanges`, or
             `autoSubUidGidRange`).
 
             Its checks -- `workspace`, `binds`, `guard`, the depth rule -- are
-            consistency checks, not a boundary: the caller can run
+            consistency checks, not a boundary: the invoking user can run
             flong launch directly with any declaration. flong launch's own
-            checks and the session's `seccomp` filter are the boundary
-            against the payload, and the prepared root and the records are
-            the caller's, as their `~/.bashrc` is. It exits with the
-            payload's status, 128+n when a signal killed the payload, 125
-            when the payload never ran, and 1 when it refused before
-            anything was launched.
+            checks and the container's `seccomp` filter are the boundary
+            against the entrypoint, and the cached rootfs and the records
+            are the invoking user's, as their `~/.bashrc` is. It exits with
+            the entrypoint's status, 128+n when a signal killed the
+            entrypoint, 125 when the entrypoint never ran, and 1 when it
+            refused before anything was launched.
           '';
         };
       };

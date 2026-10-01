@@ -6,7 +6,7 @@
     },
     "default": null,
     "required": true,
-    "doc": "User inside the container, which everything in the session runs\nas.\n\nIts uid and the gid of its primary group must be declared in the\ncontainer's `config`, and the container cannot be declared by\n`path`: they name the prepared root's cache and the caller's id\nmaps, which are needed before anything is prepared. The home is\nread at launch from the prepared root's `/etc/passwd`, and a\nlaunch refuses one whose ids disagree. The uid need not be the\ncaller's: the session's user is mapped onto the caller whatever\nits uid.",
+    "doc": "User inside the container, which everything in the container runs\nas.\n\nIts uid and the gid of its primary group must be declared in the\ncontainer's `config`, and the container cannot be declared by\n`path`: they name the cached rootfs and the invoking user's id\nmaps, which are needed before the rootfs is built. The home is\nread at launch from the rootfs's `/etc/passwd`, and a launch\nrefuses one whose ids disagree. The uid need not be the invoking\nuser's: the container's user is mapped onto the invoking user\nwhatever its uid.",
     "merge": "single",
     "nixOption": true
   },
@@ -18,7 +18,7 @@
     },
     "default": null,
     "required": false,
-    "doc": "The payload, as an argument list: the program, then its fixed\narguments. The launcher's own arguments are appended, and it is\nexec'd as `user` in the workspace, under `flong init` and tini,\nwith nothing between: no shell reads any element of either list,\nso a space, a `;` or a `$` in one is passed as it is.\n\nIts environment is the container's, computed on the host: what\nits `/etc/set-environment` would set (the declaration's\n`environment`), so a bare name is looked up on the container's\n`PATH` -- its `environment.systemPackages`, the user's `packages`\n-- and the payload has every variable the container exports. An\nabsolute path, such as `lib.getExe` of a package, is run as it\nis. Anything that needs a script is a package of its own, named\nhere by `lib.getExe`.\n\nA declaration has `command` or `exec`, never both and never\nneither.",
+    "doc": "The entrypoint, as an argument list: the program, then its fixed\narguments. The launcher's own arguments are appended, and it is\nexec'd as `user` in the working directory, under `flong init` and tini,\nwith nothing between: no shell reads any element of either list,\nso a space, a `;` or a `$` in one is passed as it is.\n\nIts environment is the container's, computed on the host: what\nits `/etc/set-environment` would set (the declaration's\n`environment`), so a bare name is looked up on the container's\n`PATH` -- its `environment.systemPackages`, the user's `packages`\n-- and the entrypoint has every variable the container exports. An\nabsolute path, such as `lib.getExe` of a package, is run as it\nis. Anything that needs a script is a package of its own, named\nhere by `lib.getExe`.\n\nA declaration has `command` or `exec`, never both and never\nneither.",
     "merge": "ordered",
     "nixOption": true
   },
@@ -30,7 +30,7 @@
     },
     "default": null,
     "required": false,
-    "doc": "A command printing the payload's argument list, variables to add\nto its environment and files to seed into its home, for a payload\nthat only the launch can decide: run on the host as the caller, in\nplace of `command`, after `seccompPolicy`, with the launcher's\narguments after its own and the environment `seccompPolicy` has --\n`$workspace`, `$workspace_mode`, `$binds` and `$machine` -- and\n`path` on `PATH`.\n\nIts stdout, at most 1 MiB, is fields each ended by a NUL byte, as\n`printf '%s\\0'` prints them, in any order, each starting with its\ntag:\n\n- `env:NAME=VALUE`, a variable, split at the first `=`;\n- `arg:WORD`, the next word of the payload's argument list, which\n  may be empty (`arg:`); the first is its program;\n- `file:MODE:PATH`, followed by exactly one more field, untagged,\n  which is the file's content, every byte of it but a NUL.\n\nThe argument list is the payload's whole: the launcher's arguments\nare not appended again. A program without a `/` is looked up on the\npayload's `PATH`, as `command`'s is.\n\nA file is written into the session's home before the payload\nstarts, by `flong init` inside the sandbox, as `user`, so it is the\npayload's own, and a file already there is replaced. MODE is one to\nfour octal digits of at most `0777`, the permission bits alone:\nsetuid, setgid and sticky are refused. PATH is absolute, under the\npayload's home (never the home itself), and has no empty, `.` or\n`..` component. Missing directories on the way are made, mode\n`0700`. Nothing on the way is followed and nothing is crossed: a\nsymbolic link on the path, the file's own name included, or a\nmount -- a bind into the home, `$HOME/tmp` -- ends the launch as\nthe session's failure to start, and so does anything other than a\nregular file where the file goes. So the files land on the\nsession's own root, which goes with it, and never on the host.\n\n`exec` is not told the home: the launch reads it from the\ncontainer's `/etc/passwd` only after `exec` has run, so a command\nthat seeds files writes a home it already knows, `user`'s in the\ncontainer's configuration. A PATH outside the home it turns out to\nbe refuses the launch then, and `postStop` releases what `exec`\nstaged.\n\n`flong init` writes the files under the session's syscall filter,\nwhich applies from its exec on: it calls `openat2`, `mkdirat`,\n`fchmod`, `fstat`, `mmap` and `umask`, which both tiers allow, so a\n`seccomp.deny` or a `seccompPolicy` line that takes one of them\naway makes every launch that seeds a file fail to start.\n\nA non-zero exit refuses the launch, and so does output that is not\nthat shape: a field with no tag (an empty one among them), an\n`env:` field without a `=`, a MODE that is not one, a `file:` field\nwith no `:` between its MODE and its PATH or no field after it, no `arg:` field, or an empty program. So do\nan empty name, a name printed twice, a name tini reads (`TINI_*`:\ntini is the session's init, and runs with the payload's\nenvironment), a name the session already sets -- the container's\n`environment`, or one of the launch's own (`PATH`, `HOME`, `USER`,\n`LOGNAME`, `SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`, `FLONG_BINDS`,\n`container`, `TERM`, `COLORTERM`, `PWD`) -- and a file's path that\nis not as above, printed twice, or inside another file's. Nothing\nis overridden silently. The loader's names, `LD_*` and\n`GLIBC_TUNABLES`, are allowed, and reach tini as well as the\npayload: both run as `user` inside the session, with no capability.\n\nOnce it has run, as once `seccompPolicy` has, `postStop` runs for\nthe session's `$machine` once, whichever way the launcher ends it:\na refusal, even before the session starts, or a terminating signal\n(`SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`), so whatever it staged\nfor `$machine` is released. It runs again when the launcher\nrelaunches itself, under a new `$machine`, the old one released\nfirst. A launcher killed outright (`SIGKILL`, the OOM killer)\nbefore its session's record exists leaves nothing to run it from.",
+    "doc": "A command printing the entrypoint's argument list, variables to\nadd to its environment and files to seed into its home, for an\nentrypoint that only the launch can decide: run on the host as the\ninvoking user, in\nplace of `command`, after `seccompPolicy`, with the launcher's\narguments after its own and the environment `seccompPolicy` has --\n`$workspace`, `$workspace_mode`, `$binds` and `$machine` -- and\n`path` on `PATH`.\n\nIts stdout, at most 1 MiB, is fields each ended by a NUL byte, as\n`printf '%s\\0'` prints them, in any order, each starting with its\ntag:\n\n- `env:NAME=VALUE`, a variable, split at the first `=`;\n- `arg:WORD`, the next word of the entrypoint's argument list, which\n  may be empty (`arg:`); the first is its program;\n- `file:MODE:PATH`, followed by exactly one more field, untagged,\n  which is the file's content, every byte of it but a NUL.\n\nThe argument list is the entrypoint's whole: the launcher's\narguments are not appended again. A program without a `/` is looked\nup on the entrypoint's `PATH`, as `command`'s is.\n\nA file is written into the container's home before the entrypoint\nstarts, by `flong init` inside the sandbox, as `user`, so it is the\nentrypoint's own, and a file already there is replaced. MODE is one to\nfour octal digits of at most `0777`, the permission bits alone:\nsetuid, setgid and sticky are refused. PATH is absolute, under the\nentrypoint's home (never the home itself), and has no empty, `.` or\n`..` component. Missing directories on the way are made, mode\n`0700`. Nothing on the way is followed and nothing is crossed: a\nsymbolic link on the path, the file's own name included, or a\nmount -- a bind into the home, `$HOME/tmp` -- ends the launch as\nthe container's failure to start, and so does anything other than\na regular file where the file goes. So the files land on the\ncontainer's own root, which goes with it, and never on the host.\n\n`exec` is not told the home: the launch reads it from the\ncontainer's `/etc/passwd` only after `exec` has run, so a command\nthat seeds files writes a home it already knows, `user`'s in the\ncontainer's configuration. A PATH outside the home it turns out to\nbe refuses the launch then, and `postStop` releases what `exec`\nstaged.\n\n`flong init` writes the files under the container's syscall filter,\nwhich applies from its exec on: it calls `openat2`, `mkdirat`,\n`fchmod`, `fstat`, `mmap` and `umask`, which both profiles allow, so a\n`seccomp.deny` or a `seccompPolicy` line that takes one of them\naway makes every launch that seeds a file fail to start.\n\nA non-zero exit refuses the launch, and so does output that is not\nthat shape: a field with no tag (an empty one among them), an\n`env:` field without a `=`, a MODE that is not one, a `file:` field\nwith no `:` between its MODE and its PATH or no field after it, no `arg:` field, or an empty program. So do\nan empty name, a name printed twice, a name tini reads (`TINI_*`:\ntini is the container's init, and runs with the entrypoint's\nenvironment), a name the container already sets -- the container's\n`environment`, or one of the launch's own (`PATH`, `HOME`, `USER`,\n`LOGNAME`, `SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`, `FLONG_BINDS`,\n`container`, `TERM`, `COLORTERM`, `PWD`) -- and a file's path that\nis not as above, printed twice, or inside another file's. Nothing\nis overridden silently. The loader's names, `LD_*` and\n`GLIBC_TUNABLES`, are allowed, and reach tini as well as the\nentrypoint: both run as `user` inside the container, with no\ncapability.\n\nOnce it has run, as once `seccompPolicy` has, `postStop` runs for\nthe container's `$machine` once, whichever way the launcher ends it:\na refusal, even before the container starts, or a terminating signal\n(`SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`), so whatever it staged\nfor `$machine` is released. It runs again when the launcher\nrelaunches itself, under a new `$machine`, the old one released\nfirst. A launcher killed outright (`SIGKILL`, the OOM killer)\nbefore its container's record exists leaves nothing to run it from.",
     "merge": "ordered",
     "nixOption": true
   },
@@ -42,7 +42,7 @@
     },
     "default": null,
     "required": false,
-    "doc": "A command printing the directory to bind into the container at its\nown path and start in: `PATH`, bound read-write, or `PATH:ro`,\nbound read-only. `null`, the default, runs nothing and takes the\ndirectory the launcher was started in; a consumer that wants a\nrepository's root asks git for it, with a script printing\n`git -C \"$PWD\" rev-parse --show-toplevel`. Runs on the host\nbefore launch, with the launcher's arguments after its own; a\nnon-zero exit aborts.\n\nRuns *before* `guard`, so that the gate can judge the directory\nthis resolves to rather than re-deriving one of its own.\n\nRuns as the caller, as every hook does.\n\nWhat it prints is resolved with `realpath`, must be a directory,\nand is refused if it names a `:` or a newline: a caller's path\ntravels as `PATH:MODE` lines, which either would make ambiguous.\nLater hooks see the path as `$workspace` and the mode as\n`$workspace_mode` (`ro` or `rw`). Deciding *which* directory is\nallowed is `guard`'s job, not this one's.",
+    "doc": "A command printing the directory to bind into the container at its\nown path and start in: `PATH`, bound read-write, or `PATH:ro`,\nbound read-only. `null`, the default, runs nothing and takes the\ndirectory the launcher was started in; a consumer that wants a\nrepository's root asks git for it, with a script printing\n`git -C \"$PWD\" rev-parse --show-toplevel`. Runs on the host\nbefore launch, with the launcher's arguments after its own; a\nnon-zero exit aborts.\n\nRuns *before* `guard`, so that `guard` can judge the directory\nthis resolves to rather than re-deriving one of its own.\n\nRuns as the invoking user, as every hook does.\n\nWhat it prints is resolved with `realpath`, must be a directory,\nand is refused if it names a `:` or a newline: a path travels as\n`PATH:MODE` lines, which either would make ambiguous.\nLater hooks see the path as `$workspace` and the mode as\n`$workspace_mode` (`ro` or `rw`). Deciding *which* directory is\nallowed is `guard`'s job, not this one's.",
     "merge": "ordered",
     "nixOption": true
   },
@@ -56,7 +56,7 @@
     },
     "default": [],
     "required": false,
-    "doc": "Commands printing more of the caller's directories to bind, one\nper line, each at its own path inside the container: `PATH`, bound\nread-only, or `PATH:rw`, bound read-write. Their outputs are\nconcatenated, in order. Empty output binds nothing, and so does\nthe default, no command.\n\nRuns after `workspace`, with `$workspace` and `$workspace_mode`\nin the environment, so it can answer \"what travels with THIS\ndirectory\" rather than having to name a fixed set. Runs as the\ncaller and gets the launcher's arguments after its own, exactly as\n`workspace` does; a non-zero exit aborts.\n\nEvery path is resolved with `realpath`, must be a directory, and is\nrefused if it names a `:` or a newline, as the workspace is.\nDeciding *which* directories are allowed is `guard`'s job: it sees\nthem as `$binds`, one `PATH:ro` or `PATH:rw` per line, with the\nmode always spelt out. The payload sees the same list as\n`$FLONG_BINDS`, to pass on to an agent's `--add-dir`.\n\nRead-only is not a boundary on its own -- it stops writes, not\nexecution -- so it is for directories a session should read rather\nthan edit, not for making an untrusted one safe.",
+    "doc": "Commands printing more of the invoking user's directories to bind, one\nper line, each at its own path inside the container: `PATH`, bound\nread-only, or `PATH:rw`, bound read-write. Their outputs are\nconcatenated, in order. Empty output binds nothing, and so does\nthe default, no command.\n\nRuns after `workspace`, with `$workspace` and `$workspace_mode`\nin the environment, so it can answer \"what travels with THIS\ndirectory\" rather than having to name a fixed set. Runs as the\ninvoking user and gets the launcher's arguments after its own, exactly as\n`workspace` does; a non-zero exit aborts.\n\nEvery path is resolved with `realpath`, must be a directory, and is\nrefused if it names a `:` or a newline, as the working directory is.\nDeciding *which* directories are allowed is `guard`'s job: it sees\nthem as `$binds`, one `PATH:ro` or `PATH:rw` per line, with the\nmode always spelt out. The entrypoint sees the same list as\n`$FLONG_BINDS`, to pass on to an agent's `--add-dir`.\n\nRead-only is not a boundary on its own -- it stops writes, not\nexecution -- so it is for directories a container should read rather\nthan edit, not for making an untrusted one safe.",
     "merge": "ordered",
     "nixOption": true
   },
@@ -70,7 +70,7 @@
     },
     "default": [],
     "required": false,
-    "doc": "Commands run as the caller before launch, in order, to check that\nthe launch is one this declaration means to make. A consistency\ncheck, not a gate: the session grants nothing the caller did not\nalready have, and the caller can run `flong launch` directly with\nany declaration.\n\nRuns *after* `workspace` and `binds`, with their answers in its\nenvironment: `$workspace`, absolute and symlink-resolved,\n`$workspace_mode`, and `$binds`, one `PATH:ro` or `PATH:rw` per\nline. Judge those rather than re-deriving a directory from `$PWD`\n-- they are exactly what will be bound, where anything a guard\nworks out for itself agrees with the mounts only by coincidence.\n\nEach is a process of its own, with the launcher's arguments after\nits own: every one must exit 0 for the launch to go on, the first\nthat does not refuses it, and nothing a guard sets reaches the\nlauncher: it judges `$workspace` and cannot change it.\n\nIt runs again when the launcher relaunches itself, which it does\nwhen the prepared root it found was swept before it could lock\nit, so a guard that asks a question can ask it twice.",
+    "doc": "Commands run as the invoking user before launch, in order, to check\nthat the launch is one this declaration means to make. A consistency\ncheck, not a gate: the container grants nothing the invoking user\ndid not already have, and they can run `flong launch` directly with\nany declaration.\n\nRuns *after* `workspace` and `binds`, with their answers in its\nenvironment: `$workspace`, absolute and symlink-resolved,\n`$workspace_mode`, and `$binds`, one `PATH:ro` or `PATH:rw` per\nline. Judge those rather than re-deriving a directory from `$PWD`\n-- they are exactly what will be bound, where anything a guard\nworks out for itself agrees with the mounts only by coincidence.\n\nEach is a process of its own, with the launcher's arguments after\nits own: every one must exit 0 for the launch to go on, the first\nthat does not refuses it, and nothing a guard sets reaches the\nlauncher: it judges `$workspace` and cannot change it.\n\nIt runs again when the launcher relaunches itself, which it does\nwhen the cached rootfs it found was swept before it could lock\nit, so a guard that asks a question can ask it twice.",
     "merge": "ordered",
     "nixOption": true
   },
@@ -84,7 +84,7 @@
     },
     "default": [],
     "required": false,
-    "doc": "Commands run by the launcher as the caller, in order, once per\nsession, as soon as the session's namespaces exist -- **before**\n`network` is attached and **before** the payload starts. The\npayload waits for them. `path` is on `PATH`, and each gets the\nlauncher's arguments after its own.\n\n`$leader` is the session's pid 1 as seen from the host, `$userns`\nthe session's user namespace and `$netns` its network namespace,\neach a `/proc/<launcher>/fd/<n>` descriptor the launcher holds.\n`$machine`, `$uid`, `$gid`, `$home`, `$workspace`,\n`$workspace_mode` and `$binds` are in the environment too. The\nsession's root exists only in its own mount namespace, reached as\n`/proc/$leader/root`. The hook enters the session as its root,\nwith every capability over it and none over the host:\n`nsenter --user=\"$userns\" --net=\"$netns\" nft -f ruleset.nft`.\n\n**The ordering is the contract, and it is the security property.**\nWhatever this installs into the namespace is in place before\nanything gives it egress: a session's namespace starts with `lo`\nup and an empty route table, so until egress exists the workload\nhas nowhere to go and there is no window to race. flong attaches\n`network` only after these return. A consumer that provisions\negress of its own first -- from `guard`, or from the first of\nthese -- has given the property away without any error.\n\nA non-zero exit ends the session, and the launcher exits\nnon-zero.\n\nUnlike systemd's `ExecStartPost`, the main process is not yet\nrunning: it is held until these and any `network` have finished.",
+    "doc": "Commands run by the launcher as the invoking user, in order, once\nper container, as soon as the container's namespaces exist --\n**before** `network` is attached and **before** the entrypoint\nstarts. The entrypoint waits for them. `path` is on `PATH`, and\neach gets the launcher's arguments after its own.\n\n`$leader` is the container's pid 1 as seen from the host, `$userns`\nthe container's user namespace and `$netns` its network namespace,\neach a `/proc/<launcher>/fd/<n>` descriptor the launcher holds.\n`$machine`, `$uid`, `$gid`, `$home`, `$workspace`,\n`$workspace_mode` and `$binds` are in the environment too. The\ncontainer's root exists only in its own mount namespace, reached as\n`/proc/$leader/root`. The hook enters the container as its root,\nwith every capability over it and none over the host:\n`nsenter --user=\"$userns\" --net=\"$netns\" nft -f ruleset.nft`.\n\n**The ordering is the contract, and it is the security property.**\nWhatever this installs into the namespace is in place before\nanything gives it egress: a container's namespace starts with `lo`\nup and an empty route table, so until egress exists the workload\nhas nowhere to go and there is no window to race. flong attaches\n`network` only after these return. A consumer that provisions\negress of its own first -- from `guard`, or from the first of\nthese -- has given the property away without any error.\n\nA non-zero exit ends the container, and the launcher exits\nnon-zero.\n\nUnlike systemd's `ExecStartPost`, the main process is not yet\nrunning: it is held until these and any `network` have finished.",
     "merge": "ordered",
     "nixOption": true
   },
@@ -98,7 +98,7 @@
     },
     "default": [],
     "required": false,
-    "doc": "Commands run as the caller after a session ends, in order, to\nrelease whatever `postStart` made outside it. `$machine` is in the\nenvironment, and nothing else is; nothing follows a command's own\narguments.\n\nThey run on two paths: from the launcher once the session has\nstopped, and -- for a session whose launcher was SIGKILLed --\nfrom the sweeper in the caller's holder unit, within moments,\nwhere the machine name is all that survives. Each session records\nits own `postStop`, so the one belonging to the session is run,\neven after a rebuild.\n\nSo each must depend on `$machine` alone and succeed when what it\nreleases is already gone. `path` is on `PATH`; a non-zero exit is\nreported and otherwise ignored, because flong's own release\nfollows it.",
+    "doc": "Commands run as the invoking user after a container ends, in order, to\nrelease whatever `postStart` made outside it. `$machine` is in the\nenvironment, and nothing else is; nothing follows a command's own\narguments.\n\nThey run on two paths: from the launcher once the container has\nstopped, and -- for a container whose launcher was SIGKILLed --\nfrom the sweeper in the invoking user's holder unit, within moments,\nwhere the machine name is all that survives. Each container records\nits own `postStop`, so the one belonging to the container is run,\neven after a rebuild.\n\nSo each must depend on `$machine` alone and succeed when what it\nreleases is already gone. `path` is on `PATH`; a non-zero exit is\nreported and otherwise ignored, because flong's own release\nfollows it.",
     "merge": "ordered",
     "nixOption": true
   },
@@ -159,7 +159,7 @@
                       },
                       "default": null,
                       "required": false,
-                      "doc": "Port in the session; `hostPort` if null.",
+                      "doc": "Port in the container; `hostPort` if null.",
                       "merge": "single",
                       "nixOption": true
                     }
@@ -170,7 +170,7 @@
           },
           "default": [],
           "required": false,
-          "doc": "Ports on the host forwarded into the session, shaped exactly\nlike `containers.<name>.forwardPorts`, bound on every host\naddress -- the host's firewall still decides who reaches them.\npasta binds them as the caller, so a port below the host's\n`net.ipv4.ip_unprivileged_port_start` is refused.\n\nA host port is one session's at a time. A second concurrent\nsession asking for the same one fails to attach its network,\nand is ended rather than left running without it.\n\n`\"auto\"`: whatever TCP port the session listens on is\npublished on the host at the same port, while it listens --\na dev server started inside is reached from the host's\nbrowser. A port another session already publishes is not,\nand that session is not ended for it.",
+          "doc": "Ports on the host forwarded into the container, shaped exactly\nlike `containers.<name>.forwardPorts`, bound on every host\naddress -- the host's firewall still decides who reaches them.\npasta binds them as the invoking user, so a port below the host's\n`net.ipv4.ip_unprivileged_port_start` is refused.\n\nA host port is one container's at a time. A second concurrent\ncontainer asking for the same one fails to attach its network,\nand is ended rather than left running without it.\n\n`\"auto\"`: whatever TCP port the container listens on is\npublished on the host at the same port, while it listens --\na dev server started inside is reached from the host's\nbrowser. A port another container already publishes is not,\nand that container is not ended for it.",
           "merge": "single",
           "nixOption": true
         },
@@ -181,7 +181,7 @@
           },
           "default": false,
           "required": false,
-          "doc": "A forwarded connection from the host's loopback arrives on\nthe session's loopback, rather than from the session's own\naddress -- pasta's --host-lo-to-ns-lo. A dev server\nlistening on 127.0.0.1 inside is then reached at\nlocalhost on the host. It also reaches anything else the\nsession listens on only on its loopback, which is why pasta\nno longer does it by default; a connection from anywhere\nbut the host's loopback is unaffected.",
+          "doc": "A forwarded connection from the host's loopback arrives on\nthe container's loopback, rather than from the container's own\naddress -- pasta's --host-lo-to-ns-lo. A dev server\nlistening on 127.0.0.1 inside is then reached at\nlocalhost on the host. It also reaches anything else the\ncontainer listens on only on its loopback, which is why pasta\ndoes not do it by default; a connection from anywhere\nbut the host's loopback is unaffected.",
           "merge": "single",
           "nixOption": true
         },
@@ -195,7 +195,7 @@
           },
           "default": [],
           "required": false,
-          "doc": "Ports on the host's loopback the session may reach, at the\nsame port on its own loopback: the database the host is\nrunning, say. TCP and UDP both. Nothing else on the host's\nloopback is reachable, the gateway address included.",
+          "doc": "Ports on the host's loopback the container may reach, at the\nsame port on its own loopback: the database the host is\nrunning, say. TCP and UDP both. Nothing else on the host's\nloopback is reachable, the gateway address included.",
           "merge": "ordered",
           "nixOption": true
         }
@@ -204,7 +204,7 @@
     },
     "default": null,
     "required": false,
-    "doc": "A real network for a `privateNetwork` session, provided by\n[pasta](https://passt.top): present or absent, with no `enable` --\n`network = { };` is a session that can reach the outside world and\nno port on the host.\n\npasta rather than a veth, because flong runs many concurrent\nsessions from one declaration: a veth needs an address per session,\nforwarding, NAT and host firewall rules, and gives the sandbox\npacket-level access to spoof with. pasta needs no host interface\nand no host configuration, and hands the sandbox sockets rather than\npackets.\n\nAttached after `postStart` returns, never before, which is what\nmakes the hook's ordering hold. pasta runs as the caller, in the\nsession's cgroup, and goes with the session.\n\nAlways passed, and not options: `--no-map-gw`, because otherwise\nthe gateway address reaches the host's loopback; an explicit\n`none` for every port class not listed here, because each defaults\nto `auto`, which forwards every bound port on the other side; and\n`--config-net`.\n\nDNS goes through pasta as well, and is not an option either. The\nsession's /etc/resolv.conf is written at launch naming\n169.254.1.1 -- and 100::1, where the host names an IPv6\nnameserver -- with the host's `search`, `domain` and `options`\ncarried over. pasta catches a query sent there and re-sends it\nfrom the host to the host's own first nameserver, so a stub\nresolver on the host's loopback answers it. Both read the host's\nfile once, at launch: a host that moves networks keeps a live\nsession on the old resolver.",
+    "doc": "A real network for a `privateNetwork` container, provided by\n[pasta](https://passt.top): present or absent, with no `enable` --\n`network = { };` is a container that can reach the outside world and\nno port on the host.\n\npasta rather than a veth, because flong runs many concurrent\ncontainers from one declaration: a veth needs an address per container,\nforwarding, NAT and host firewall rules, and gives the sandbox\npacket-level access to spoof with. pasta needs no host interface\nand no host configuration, and hands the sandbox sockets rather than\npackets.\n\nAttached after `postStart` returns, never before, which is what\nmakes the hook's ordering hold. pasta runs as the invoking user, in\nthe container's cgroup, and goes with the container.\n\nAlways passed, and not options: `--no-map-gw`, because otherwise\nthe gateway address reaches the host's loopback; an explicit\n`none` for every port class not listed here, because each defaults\nto `auto`, which forwards every bound port on the other side; and\n`--config-net`.\n\nDNS goes through pasta as well, and is not an option either. The\ncontainer's /etc/resolv.conf is written at launch naming\n169.254.1.1 -- and 100::1, where the host names an IPv6\nnameserver -- with the host's `search`, `domain` and `options`\ncarried over. pasta catches a query sent there and re-sends it\nfrom the host to the host's own first nameserver, so a stub\nresolver on the host's loopback answers it. Both read the host's\nfile once, at launch: a host that moves networks keeps a running\ncontainer on the old resolver.",
     "merge": "single",
     "nixOption": true
   },
@@ -217,7 +217,7 @@
     },
     "default": {},
     "required": false,
-    "doc": "Paths mounted as an overlay of `{ target = lower; }`: the lower\ndirectory is readable and every write goes to an upper layer that\ndies with the container.\n\noverlayfs reports changing device and inode numbers as a file is\nwritten, so this must not cover a path holding a sqlite database.\n\nAn overlay below a bind, at any depth, is allowed: a session that\nrenames its parent on the host only moves where its own writes\nland.",
+    "doc": "Paths mounted as an overlay of `{ target = lower; }`: the lower\ndirectory is readable and every write goes to an upper layer that\ndies with the container.\n\noverlayfs reports changing device and inode numbers as a file is\nwritten, so this must not cover a path holding a sqlite database.\n\nAn overlay below a bind, at any depth, is allowed: a container that\nrenames its parent on the host only moves where its own writes\nland.",
     "merge": "single",
     "nixOption": true
   },
@@ -232,7 +232,7 @@
     },
     "default": [],
     "required": false,
-    "doc": "Paths in the session replaced by an empty node of the same kind\nthat nobody can read. For carving one file out of a directory a\nbind brings in whole.\n\nUSE WITH CARE. Prefer binding only what the session needs to\nbinding everything and masking the rest:\n\n- A mask is a denylist. Whatever it does not name is in, so a file\n  the host's tool starts keeping beside the masked one next\n  release -- a second token, a refresh token -- is visible from\n  the day it appears.\n- The path must exist when the session starts, or the launch\n  fails. A file that is written later, on the host, into a\n  directory that is bound through is not masked.\n- It masks the file, not the name. A host program that replaces\n  the file by renaming a new one over it -- as many write a\n  credential -- detaches the mask in every running session, and\n  the new file shows through.\n\nA mask may lie at most one level below the root of a writable\nbind: deeper, a session that can write the host directory renames\nthe masked file's parent, leaves a decoy for the mask, and reads\nthe file at the new name. A declared writable bind is checked when\nthe declaration is, and the workspace and `binds` at launch. A\nmask below a read-only bind, and a declared `tmpfs` or an overlay\nat any depth, is not checked.",
+    "doc": "Paths in the container replaced by an empty node of the same kind\nthat nobody can read. For carving one file out of a directory a\nbind brings in whole.\n\nUSE WITH CARE. Prefer binding only what the container needs to\nbinding everything and masking the rest:\n\n- A mask is a denylist. Whatever it does not name is in, so a file\n  the host's tool starts keeping beside the masked one next\n  release -- a second token, a refresh token -- is visible from\n  the day it appears.\n- The path must exist when the container starts, or the launch\n  fails. A file that is written later, on the host, into a\n  directory that is bound through is not masked.\n- It masks the file, not the name. A host program that replaces\n  the file by renaming a new one over it -- as many write a\n  credential -- detaches the mask in every running container, and\n  the new file shows through.\n\nA mask may lie at most one level below the root of a writable\nbind: deeper, a container that can write the host directory renames\nthe masked file's parent, leaves a decoy for the mask, and reads\nthe file at the new name. A declared writable bind is checked when\nthe declaration is, and the working directory and `binds` at launch. A\nmask below a read-only bind, and a declared `tmpfs` or an overlay\nat any depth, is not checked.",
     "merge": "ordered",
     "nixOption": true
   },
@@ -247,7 +247,7 @@
     },
     "default": [],
     "required": false,
-    "doc": "Host paths no mount of a session may reach: no source may equal,\nlie inside or contain one. For a directory whose contents steer\nsessions from outside, such as a daemon's control socket.\n\nThe launch protects `/proc`, `/sys/fs/cgroup` and the user\nmanager's `bus` and `systemd` sockets as well, and the launcher its\nown state and the holder's cgroup.",
+    "doc": "Host paths no mount of a container may reach: no source may equal,\nlie inside or contain one. For a directory whose contents steer\ncontainers from outside, such as a daemon's control socket.\n\nThe launch protects `/proc`, `/sys/fs/cgroup` and the user\nmanager's `bus` and `systemd` sockets as well, and the launcher its\nown state and the holder's cgroup.",
     "merge": "ordered",
     "nixOption": true
   },
@@ -402,7 +402,7 @@
           },
           "default": null,
           "required": false,
-          "doc": "`cpu.weight`, against the caller's other processes.",
+          "doc": "`cpu.weight`, against your other processes.",
           "merge": "single",
           "nixOption": true
         },
@@ -413,7 +413,7 @@
           },
           "default": false,
           "required": false,
-          "doc": "`memory.oom.group`: an OOM kill takes the whole session\nrather than one process of it.",
+          "doc": "`memory.oom.group`: an OOM kill takes the whole container\nrather than one process of it.",
           "merge": "single",
           "nixOption": true
         }
@@ -421,7 +421,7 @@
     },
     "default": {},
     "required": false,
-    "doc": "Opt-in resource limits for a session, written into its own\ncgroup, which the caller's user manager delegates to the\nholder unit. Named and spelt as systemd's, and unset means\nunlimited, as it does there.\n\nOnly the controllers a user manager is delegated are offered --\nmemory, pids and cpu -- so there is no `IOWeight`: with no io\ncontroller below `user@.service`, it would have nothing to write\nto.\n\nA session's root, its TMPDIR and every overlay upper layer are\ntmpfs, which is RAM: `MemoryMax` makes a payload that fills\nthem the session's problem rather than the host's.",
+    "doc": "Opt-in resource limits for a container, written into its own\ncgroup, which the invoking user's user manager delegates to the\nholder unit. Named and spelt as systemd's, and unset means\nunlimited, as it does there.\n\nOnly the controllers a user manager is delegated are offered --\nmemory, pids and cpu -- so there is no `IOWeight`: with no io\ncontroller below `user@.service`, it would have nothing to write\nto.\n\nA container's root, its TMPDIR and every overlay upper layer are\ntmpfs, which is RAM: `MemoryMax` makes an entrypoint that fills\nthem the container's problem rather than the host's.",
     "merge": "single",
     "nixOption": true
   },
@@ -453,7 +453,7 @@
           },
           "default": false,
           "required": false,
-          "doc": "Adds `ptrace`, for strace and gdb. Its reach is the\nsession's own pid namespace.",
+          "doc": "Adds `ptrace`, for strace and gdb. Its reach is the\ncontainer's own pid namespace.",
           "merge": "single",
           "nixOption": true
         },
@@ -464,7 +464,7 @@
           },
           "default": false,
           "required": false,
-          "doc": "For a payload that sandboxes its own children, such as\nChromium's sandbox, `codex sandbox` or a nested bwrap: the\nsession may make user namespaces of its own, the namespace\nmask goes and `@mount` is allowed. All three are needed\ntogether. The payload still cannot reach the session's\nnetwork namespace.",
+          "doc": "For an entrypoint that sandboxes its own children, such as\nChromium's sandbox, `codex sandbox` or a nested bwrap: the\ncontainer may make user namespaces of its own, the namespace\nmask goes and `@mount` is allowed. All three are needed\ntogether. The entrypoint still cannot reach the container's\nnetwork namespace.",
           "merge": "single",
           "nixOption": true
         },
@@ -479,7 +479,7 @@
           },
           "default": [],
           "required": false,
-          "doc": "Syscall names or `@groups` added to the tier.",
+          "doc": "Syscall names or `@groups` added to the profile.",
           "merge": "ordered",
           "nixOption": true
         },
@@ -494,7 +494,7 @@
           },
           "default": [],
           "required": false,
-          "doc": "Syscall names or `@groups` removed, after the tier, the\nloosenings and `allow`, which it overrides.",
+          "doc": "Syscall names or `@groups` removed, after the profile, the\nloosenings and `allow`, which it overrides.",
           "merge": "ordered",
           "nixOption": true
         },
@@ -521,7 +521,7 @@
           },
           "default": false,
           "required": false,
-          "doc": "Allows the calls `errno` would refuse and has the kernel\nlog each (audit `type=1326`, with `syscall=NR`), to learn\na policy. `scmp_sys_resolver -a x86_64 NR` names a number;\nthe names become `allow` entries or `seccompPolicy` lines.\nNot for untrusted payloads, and it warns.",
+          "doc": "Allows the calls `errno` would refuse and has the kernel\nlog each (audit `type=1326`, with `syscall=NR`), to learn\na policy. `scmp_sys_resolver -a x86_64 NR` names a number;\nthe names become `allow` entries or `seccompPolicy` lines.\nNot for untrusted entrypoints, and it warns.",
           "merge": "single",
           "nixOption": true
         }
@@ -529,7 +529,7 @@
     },
     "default": {},
     "required": false,
-    "doc": "The session's syscall filter. A tier is an allow-list: the calls\nit names are allowed, the rest of systemd's `@known` get\n`errno`, and a call outside `@known` gets ENOSYS. It applies on\nx86_64, i386 and x32 alike.\n\nThree fixed filters are stacked behind it and are not options:\nthe audit mask (`socket(AF_NETLINK, ..., NETLINK_AUDIT)` gets\nEAFNOSUPPORT), the tty filter (`ioctl` TIOCSTI, TIOCLINUX,\nTIOCSETD and TIOCCONS get EPERM, in every tier and under any\nproject policy) and, unless `nestedSandbox`, the namespace mask\n(clone and unshare with a `CLONE_NEW*` flag, and setns, get\nEPERM, and clone3 ENOSYS).",
+    "doc": "The container's syscall filter. Its profile, `tier`, is an\nallow-list: the calls\nit names are allowed, the rest of systemd's `@known` get\n`errno`, and a call outside `@known` gets ENOSYS. It applies on\nx86_64, i386 and x32 alike.\n\nThree fixed filters are stacked behind it and are not options:\nthe audit mask (`socket(AF_NETLINK, ..., NETLINK_AUDIT)` gets\nEAFNOSUPPORT), the tty filter (`ioctl` TIOCSTI, TIOCLINUX,\nTIOCSETD and TIOCCONS get EPERM, in every profile and under any\nproject policy) and, unless `nestedSandbox`, the namespace mask\n(clone and unshare with a `CLONE_NEW*` flag, and setns, get\nEPERM, and clone3 ENOSYS).",
     "merge": "single",
     "nixOption": true
   },
@@ -543,7 +543,7 @@
     },
     "default": [],
     "required": false,
-    "doc": "Commands printing a project's own changes to the `seccomp` filter,\nfor a policy that is only known at launch. Run as the caller after\n`guard`, in order, with the launcher's arguments after their own,\nthe caller's stdin and stderr, and `$workspace`,\n`$workspace_mode`, `$binds` and `$machine` in the environment.\nTheir outputs are concatenated, and read as lines of `allow X...`\nor `deny X...`, where each X is a syscall name or an `@group`.\n`#` comments and blank lines are skipped. A non-zero exit refuses\nthe launch, and so does a line that cannot be read or a name\nsystemd does not list.\n\n`$machine` is the session's name, the one `postStart` and\n`postStop` see, so anything it approves for them can be staged\nper launch rather than per checkout.\n\nThe project's lines apply to the declaration's allow-list: its\nallows are added and then its denies removed. The fixed filters\nstay, the tty filter included. The result is compiled at launch\nand cached under `$XDG_RUNTIME_DIR/flong/seccomp` by the hash of\nwhat is compiled, so a policy already seen costs a hash. Printing\nnothing compiles nothing. A relaunch runs them again.\n\nIt needs a tier to act on, and it is a consistency check in the\nway `guard` is: the caller can launch with any filter.",
+    "doc": "Commands printing a project's own changes to the `seccomp` filter,\nfor a policy that is only known at launch. Run as the invoking user\nafter `guard`, in order, with the launcher's arguments after their\nown, the invoking user's stdin and stderr, and `$workspace`,\n`$workspace_mode`, `$binds` and `$machine` in the environment.\nTheir outputs are concatenated, and read as lines of `allow X...`\nor `deny X...`, where each X is a syscall name or an `@group`.\n`#` comments and blank lines are skipped. A non-zero exit refuses\nthe launch, and so does a line that cannot be read or a name\nsystemd does not list.\n\n`$machine` is the container's name, the one `postStart` and\n`postStop` see, so anything it approves for them can be staged\nper launch rather than per checkout.\n\nThe project's lines apply to the declaration's allow-list: its\nallows are added and then its denies removed. The fixed filters\nstay, the tty filter included. The result is compiled at launch\nand cached under `$XDG_RUNTIME_DIR/flong/seccomp` by the hash of\nwhat is compiled, so a policy already seen costs a hash. Printing\nnothing compiles nothing. A relaunch runs them again.\n\nIt needs a profile (`seccomp.tier`) to act on, and it is a\nconsistency check in the way `guard` is: the invoking user can\nlaunch with any filter.",
     "merge": "ordered",
     "nixOption": true
   },
@@ -554,7 +554,7 @@
     },
     "default": null,
     "required": true,
-    "doc": "The `containers.<name>` declaration this runs: its closure,\n`bindMounts`, `tmpfs` and `allowedDevices`, read as option values.\nIt must set `privateNetwork = true`. Under NixOS it is an option of\nits own, written by hand, whose default is the declaration's name;\nit also names the cgroup level between the holder and the\nsessions.",
+    "doc": "The `containers.<name>` declaration this runs: its closure,\n`bindMounts`, `tmpfs` and `allowedDevices`, read as option values.\nIt must set `privateNetwork = true`. Under NixOS it is an option of\nits own, written by hand, whose default is the declaration's name;\nit also names the cgroup level between the holder and the\nrunning containers.",
     "merge": "single",
     "nixOption": false
   },
@@ -565,7 +565,7 @@
     },
     "default": null,
     "required": true,
-    "doc": "The container's system closure, the store path the session's root\nis prepared from: `containers.<name>.path`.",
+    "doc": "The container's system closure, the store path the rootfs is\nbuilt from: `containers.<name>.path`.",
     "merge": "single",
     "nixOption": false
   },
@@ -578,7 +578,7 @@
     },
     "default": null,
     "required": true,
-    "doc": "The uid `user` has in the container's configuration, which the\ncaller's id maps and the prepared root's cache are made for. At\nmost 65535, the container's ids.",
+    "doc": "The uid `user` has in the container's configuration, which the\ninvoking user's id maps and the cached rootfs are made for. At\nmost 65535, the container's ids.",
     "merge": "single",
     "nixOption": false
   },
@@ -602,7 +602,7 @@
     },
     "default": null,
     "required": true,
-    "doc": "The first eight hex digits of the sha256 of the cache tool's store\npath, which references the prepare program: a change to either is\na different root, so it names a different cache.",
+    "doc": "The first eight hex digits of the sha256 of the cache tool's store\npath, which references the prepare program: a change to either is\na different rootfs, so it names a different cache.",
     "merge": "single",
     "nixOption": false
   },
@@ -637,7 +637,7 @@
             },
             "default": null,
             "required": true,
-            "doc": "Where it is mounted in the session: the bind's `mountPoint`, the\ntmpfs's path, the device's node.",
+            "doc": "Where it is mounted in the container: the bind's `mountPoint`, the\ntmpfs's path, the device's node.",
             "merge": "single",
             "nixOption": false
           },
@@ -684,7 +684,7 @@
             },
             "default": false,
             "required": false,
-            "doc": "A tmpfs owned by the session's user, rather than root: one with no\noptions, or with `uid=` and `gid=` naming the user's.",
+            "doc": "A tmpfs owned by the container's user, rather than root: one with no\noptions, or with `uid=` and `gid=` naming the user's.",
             "merge": "single",
             "nixOption": false
           }
@@ -742,7 +742,7 @@
     },
     "default": [],
     "required": false,
-    "doc": "The payload's environment from the container: what its\n`/etc/set-environment` would set, worked out at evaluation from\nits configuration, one entry per name, each with its final value.\nIn a value, `${NAME}` is filled in at launch with the session's\nvalue of NAME, one of `HOME`, `USER`, `LOGNAME`, `SHELL`,\n`XDG_RUNTIME_DIR` and `TMPDIR`, and `$$` is one `$`; any other `$`\nis refused. It may set `PATH`, which replaces the launch's own,\nnone of the launch's other names, and no `TINI_*`, which tini, the\nsession's init, would read. Under NixOS, module.nix\ncomputes it, and refuses at evaluation a container whose file says\nwhat cannot be computed without a shell.",
+    "doc": "The entrypoint's environment from the container: what its\n`/etc/set-environment` would set, worked out at evaluation from\nits configuration, one entry per name, each with its final value.\nIn a value, `${NAME}` is filled in at launch with the container's\nvalue of NAME, one of `HOME`, `USER`, `LOGNAME`, `SHELL`,\n`XDG_RUNTIME_DIR` and `TMPDIR`, and `$$` is one `$`; any other `$`\nis refused. It may set `PATH`, which replaces the launch's own,\nnone of the launch's other names, and no `TINI_*`, which tini, the\ncontainer's init, would read. Under NixOS, module.nix\ncomputes it, and refuses at evaluation a container whose file says\nwhat cannot be computed without a shell.",
     "merge": "ordered",
     "nixOption": false
   },
@@ -754,7 +754,7 @@
     },
     "default": null,
     "required": false,
-    "doc": "The compiled filter of `seccomp`'s tier, its loosenings, `allow`\nand `deny`, installed first; null when `seccomp.tier` is null. A\nproject's policy (`seccompPolicy`) replaces it at launch with one\ncompiled from `seccompProject`.",
+    "doc": "The compiled filter of the `seccomp.tier` profile, its loosenings,\n`allow` and `deny`, installed first; null when `seccomp.tier` is null. A\nproject's policy (`seccompPolicy`) replaces it at launch with one\ncompiled from `seccompProject`.",
     "merge": "single",
     "nixOption": false
   },
@@ -768,7 +768,7 @@
     },
     "default": [],
     "required": false,
-    "doc": "The fixed filters, compiled, each installed after the tier's in\nthis order: the audit mask, the tty filter and, unless\n`seccomp.nestedSandbox`, the namespace mask.",
+    "doc": "The fixed filters, compiled, each installed after the profile's in\nthis order: the audit mask, the tty filter and, unless\n`seccomp.nestedSandbox`, the namespace mask.",
     "merge": "ordered",
     "nixOption": false
   },
@@ -795,7 +795,7 @@
           },
           "default": null,
           "required": true,
-          "doc": "The file of the declaration's own names -- its tier, its\nloosenings, `allow`, and `deny` as `-name` -- which a project's\nlines apply to.",
+          "doc": "The file of the declaration's own names -- its profile, its\nloosenings, `allow`, and `deny` as `-name` -- which a project's\nlines apply to.",
           "merge": "single",
           "nixOption": false
         },
@@ -829,7 +829,7 @@
     },
     "default": [],
     "required": false,
-    "doc": "Directories put in front of `PATH`, in this order, for the commands\nthe launch runs as the caller before the session exists --\n`workspace`, `binds`, `guard`, `seccompPolicy` -- and in the\nenvironment the launch goes on with, which the hooks start from.\nUnder NixOS, the `bin` directories of `flong.<name>.path`. Empty,\nthe default, leaves `PATH` as the caller's.",
+    "doc": "Directories put in front of `PATH`, in this order, for the commands\nthe launch runs as the invoking user before the container exists --\n`workspace`, `binds`, `guard`, `seccompPolicy` -- and in the\nenvironment the launch goes on with, which the hooks start from.\nUnder NixOS, the `bin` directories of `flong.<name>.path`. Empty,\nthe default, leaves `PATH` as the invoking user's.",
     "merge": "ordered",
     "nixOption": false
   },
@@ -853,7 +853,7 @@
     },
     "default": null,
     "required": false,
-    "doc": "The same for each `postStop` command, which the session's record\nkeeps whole, program first, for the sweeper to run with `$machine`\nalone: module.nix's hook program, which takes the session's name\nfrom its last argument and puts `flong.<name>.path` on `PATH`. A\nstore path, since the record's program must be one. null runs each\ncommand as it is, and each must then be a store path itself.",
+    "doc": "The same for each `postStop` command, which the container's record\nkeeps whole, program first, for the sweeper to run with `$machine`\nalone: module.nix's hook program, which takes the container's name\nfrom its last argument and puts `flong.<name>.path` on `PATH`. A\nstore path, since the record's program must be one. null runs each\ncommand as it is, and each must then be a store path itself.",
     "merge": "single",
     "nixOption": false
   }

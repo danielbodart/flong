@@ -1,16 +1,10 @@
-# Phase 0 proofs
+# Proofs
 
-Each proof answers one question of the Zig port's phase 0 (ZIG.md, in git at
-e717355) by a build that
-fails when the answer is no. Phase 2 moved the three then standing here
-from `spike/proofs/`, phase 3 retired P2 (its last
-version is `tests/proofs/p2/` at 57e2de0) and phase 4 P5; the spike and the other retired
-proofs, P1, P4's round trip and P6's qemu run, are in
-`~/Projects/flong-spikes-archive/zig`, beside P2's spike version. A proof is a directory
-`tests/proofs/<pN>/` holding a `default.nix`; `tests/integration.nix` finds it with
-`builtins.readDir`, so adding one needs no edit there, in `tests/native.nix`
-or in `flake.nix`. As a flake only sees tracked files, `git add` the
-directory.
+A proof answers one question by a build that fails when the answer is no. A
+proof is a directory `tests/proofs/<pN>/` holding a `default.nix`;
+`tests/integration.nix` finds it with `builtins.readDir`, so adding one needs
+no edit there, in `tests/native.nix` or in `flake.nix`. As a flake only sees
+tracked files, `git add` the directory.
 
 ## The contract
 
@@ -77,32 +71,4 @@ column 0, like the rest of the testScript.
 
 ## The proofs
 
-None stands now; the contract stays for the next question.
-
-Retired in phase 5: `p3`, processes (its last version is `tests/proofs/p3/`
-at b79babb). Its questions are asked of the real `src/proc.zig` now: the
-`noreturn` fork's compile failure is `tests/zig/compile_fail/fork_body_returns.zig`
-(`native-lint`), its run and a panicking body are `native-test`'s
-(`tests/zig/proc_props.zig`, through `flong-proc`, `tests/zig/procdriver.zig`),
-and `clone3` into a delegated `O_PATH` leaf, its `system.slice` control and a
-fork after `setns(CLONE_NEWUSER)` are `checks.native`'s `proc:` subtests
-(`tests/native.nix`), with a `Spawn` into the leaf beside them.
-
-Retired in phase 4: `p5`, the hybrid link (its last version is
-`tests/proofs/p5/` at a7919be), a Zig archive with the shim's settings
-linked by `$CC` with the launcher's flags. The C launcher's build then
-linked `libflong-mount.a` that way until L5 deleted both; the mount helper
-is now a fork body of the Zig `flong launch` (`src/mount.zig`), which the
-full VM suite runs.
-
-Retired in phase 3: `p2`, flong-init's start code as pid 1, whose run as
-pid 1 through bwrap under the strict/log stack became phase 3 (a)'s
-C-against-Zig strace subtest of `tests/native.nix` (the first call after the
-Zig's `execve` is its `setgroups`), with the real `flong-init`, deleted with
-the C in phase 3 (b); its stack checks are rootless's `ulimit -s` subtest and
-the launcher set's `PT_GNU_STACK` check (native.nix).
-
-Retired in phase 2: `p1` (native.nix's derivations answer it every build),
-`p4` (its ABI asserts are `tests/zig/abi.zig`, in `test-libc` and
-`cross-aarch64`; its mount round trip returns with phase 4's walker), `p6`
-(its aarch64 builds are `cross-aarch64`'s).
+None stands now.

@@ -100,7 +100,7 @@ Then `debug` adds `ptrace`; `nestedSandbox` allows user namespaces and
 mounts, for Chromium's sandbox or a nested bwrap; `allow` adds names or
 systemd `@groups` (`systemd-analyze syscall-filter`); `deny` removes them,
 last. A refused call returns `errno`: `EPERM` (default), `EACCES` or
-`ENOSYS`. Whatever the tier, the container cannot type into your terminal
+`ENOSYS`. Whatever the tier, the container cannot inject keystrokes into your terminal
 (`TIOCSTI` and friends), open audit sockets, or, without `nestedSandbox`,
 make namespaces. Filters apply on x86_64, i386 and x32.
 

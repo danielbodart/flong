@@ -728,7 +728,7 @@ test "the schema says each kind of field as the grammar does" {
     try testing.expect(user.get("required").?.bool);
     try testing.expectEqual(.null, std.meta.activeTag(user.get("default").?));
     try testing.expect(user.get("nixOption").?.bool);
-    try testing.expect(std.mem.startsWith(u8, user.get("doc").?.string, "User inside the container, which everything in the session runs\nas.\n\nIts uid"));
+    try testing.expect(std.mem.startsWith(u8, user.get("doc").?.string, "User inside the container, which everything in the container runs\nas.\n\nIts uid"));
 
     const command = find(top, "command").?;
     try testing.expectEqualStrings("command", command.get("type").?.object.get("type").?.string);

@@ -3,7 +3,7 @@
 # flong
 
 Ephemeral rootless containers for [NixOS](https://nixos.org/) that start in
-about 12 ms, run one process as you, and leave nothing behind.
+about 10 ms, run one process as you, and leave nothing behind.
 
 > A *flong* is the papier-mâché mould a printer takes from composed type. It is
 > made once and casts many identical plates, each used once and discarded.
@@ -20,15 +20,19 @@ no root.
 
 |  | Docker | flong |
 |---|---|---|
-| **Image** | Pulled or built, stored as layers under `/var/lib/docker` | None. The container's packages are Nix store paths already on the host, shared with it |
-| **Start time** | A daemon request, then runc | ~12 ms warm, ~160 ms cold |
-| **Daemon** | `dockerd`, as root unless you set up rootless mode | None |
-| **Privilege** | The daemon is root; the `docker` group is root-equivalent | You. Only NixOS's setuid `newuidmap`/`newgidmap` write the id maps |
+| **Image** | Pulled or built, stored as layers | None. The container's packages are Nix store paths already on the host |
+| **Start time**¹ | ~120 ms, ~200 ms with a network | ~10 ms, ~19 ms with a network |
+| **Daemon** | `dockerd`, root's or (rootless) your own | None |
+| **Container root** | Host root; your uid in rootless mode | A subordinate id; the user inside is your uid |
+| **Files written to the working directory** | The container user's uid, often root; in rootless mode root's are yours and other users' a subordinate id | Yours, whatever user runs inside |
 | **Lifetime** | Kept until `docker rm`, unless `--rm` | Always ephemeral: writes are held in memory and gone on exit |
-| **Files written to the working directory** | Owned by the container's user, often root | Owned by you |
-| **Capabilities** | 14 by default | None, and `no_new_privs` |
-| **Seccomp** | Default profile | `strict` profile by default: systemd-nspawn's list minus ptrace, io_uring, userfaultfd, keyrings, mount and `process_vm_*`; no nested user namespaces; no typing into your terminal |
+| **Capabilities** | 14 by default; `no_new_privs` off | None; `no_new_privs` on |
+| **Seccomp** | Default profile: allows `ptrace` and `process_vm_*` | `strict` profile: also refuses `ptrace` and `process_vm_*` |
 | **Per-project policy** | Fixed by `docker run` flags | Hooks decide mounts, seccomp and firewall rules at launch |
+
+¹ Running `true`, medians of 20 launches on the same 24-core desktop
+(kernel 6.18): `docker run --rm alpine:3 true` on Docker 29.8, rootful and
+rootless alike, and a flong container with the same network choice.
 
 The trade-offs: NixOS only, one process with no init or services, and the
 process runs as your uid on the host, so an escape reaches what you can (see
@@ -52,7 +56,7 @@ Add `github:danielbodart/flong` as a flake input and
 { config, pkgs, ... }:
 {
   containers.sandbox = {
-    privateNetwork = true;           # loopback only
+    privateNetwork = true;           # required; loopback only
     config = { pkgs, ... }: {
       system.stateVersion = "24.05";
       users.users.alice = { isNormalUser = true; uid = 1000; };
@@ -74,21 +78,29 @@ directory bind-mounted at the same path as its working directory.
 
 ### Network and firewall
 
-Without `network` a container has loopback only. `network` adds user-mode
-networking through [pasta](https://passt.top). A `postStart` hook runs before
-the network is attached, so its firewall rules apply from the first packet,
-and the entrypoint has no capability to change them.
+`privateNetwork = true` is required, and on its own gives loopback only.
+`network` adds user-mode networking through [pasta](https://passt.top). A
+`postStart` hook runs before the network is attached, so its firewall rules
+apply from the first packet, and the entrypoint has no capability to change
+them.
 
 ```nix
 { lib, pkgs, ... }:
 {
+  containers.agent = {
+    privateNetwork = true;           # required: a network namespace of its own
+    config = { ... }: {
+      system.stateVersion = "24.05";
+      users.users.alice = { isNormalUser = true; uid = 1000; };
+    };
+  };
+
   flong.agent = {
-    container = "sandbox";           # the containers.sandbox above
     user = "alice";
     command = [ (lib.getExe pkgs.codex) ];
     network = {
+      forwardPorts = "auto";         # publish every port the container listens on
       hostPorts = [ 5432 ];          # host's localhost:5432, reachable inside
-      forwardPorts = [ { hostPort = 8080; containerPort = 3000; } ];
     };
     path = [ pkgs.nftables ];
     postStart = [

@@ -45,17 +45,17 @@ definitions in `mkOrder` order (`mkBefore`, `mkAfter`).
 - type: `string`
 - required
 
-User inside the container, which everything in the session runs
+User inside the container, which everything in the container runs
 as.
 
 Its uid and the gid of its primary group must be declared in the
 container's `config`, and the container cannot be declared by
-`path`: they name the prepared root's cache and the caller's id
-maps, which are needed before anything is prepared. The home is
-read at launch from the prepared root's `/etc/passwd`, and a
-launch refuses one whose ids disagree. The uid need not be the
-caller's: the session's user is mapped onto the caller whatever
-its uid.
+`path`: they name the cached rootfs and the invoking user's id
+maps, which are needed before the rootfs is built. The home is
+read at launch from the rootfs's `/etc/passwd`, and a launch
+refuses one whose ids disagree. The uid need not be the invoking
+user's: the container's user is mapped onto the invoking user
+whatever its uid.
 
 ### `command`
 
@@ -63,9 +63,9 @@ its uid.
 - default: `null`
 - ordered
 
-The payload, as an argument list: the program, then its fixed
+The entrypoint, as an argument list: the program, then its fixed
 arguments. The launcher's own arguments are appended, and it is
-exec'd as `user` in the workspace, under `flong init` and tini,
+exec'd as `user` in the working directory, under `flong init` and tini,
 with nothing between: no shell reads any element of either list,
 so a space, a `;` or a `$` in one is passed as it is.
 
@@ -73,7 +73,7 @@ Its environment is the container's, computed on the host: what
 its `/etc/set-environment` would set (the declaration's
 `environment`), so a bare name is looked up on the container's
 `PATH` -- its `environment.systemPackages`, the user's `packages`
--- and the payload has every variable the container exports. An
+-- and the entrypoint has every variable the container exports. An
 absolute path, such as `lib.getExe` of a package, is run as it
 is. Anything that needs a script is a package of its own, named
 here by `lib.getExe`.
@@ -87,9 +87,10 @@ neither.
 - default: `null`
 - ordered
 
-A command printing the payload's argument list, variables to add
-to its environment and files to seed into its home, for a payload
-that only the launch can decide: run on the host as the caller, in
+A command printing the entrypoint's argument list, variables to
+add to its environment and files to seed into its home, for an
+entrypoint that only the launch can decide: run on the host as the
+invoking user, in
 place of `command`, after `seccompPolicy`, with the launcher's
 arguments after its own and the environment `seccompPolicy` has --
 `$workspace`, `$workspace_mode`, `$binds` and `$machine` -- and
@@ -100,28 +101,28 @@ Its stdout, at most 1 MiB, is fields each ended by a NUL byte, as
 tag:
 
 - `env:NAME=VALUE`, a variable, split at the first `=`;
-- `arg:WORD`, the next word of the payload's argument list, which
+- `arg:WORD`, the next word of the entrypoint's argument list, which
   may be empty (`arg:`); the first is its program;
 - `file:MODE:PATH`, followed by exactly one more field, untagged,
   which is the file's content, every byte of it but a NUL.
 
-The argument list is the payload's whole: the launcher's arguments
-are not appended again. A program without a `/` is looked up on the
-payload's `PATH`, as `command`'s is.
+The argument list is the entrypoint's whole: the launcher's
+arguments are not appended again. A program without a `/` is looked
+up on the entrypoint's `PATH`, as `command`'s is.
 
-A file is written into the session's home before the payload
+A file is written into the container's home before the entrypoint
 starts, by `flong init` inside the sandbox, as `user`, so it is the
-payload's own, and a file already there is replaced. MODE is one to
+entrypoint's own, and a file already there is replaced. MODE is one to
 four octal digits of at most `0777`, the permission bits alone:
 setuid, setgid and sticky are refused. PATH is absolute, under the
-payload's home (never the home itself), and has no empty, `.` or
+entrypoint's home (never the home itself), and has no empty, `.` or
 `..` component. Missing directories on the way are made, mode
 `0700`. Nothing on the way is followed and nothing is crossed: a
 symbolic link on the path, the file's own name included, or a
 mount -- a bind into the home, `$HOME/tmp` -- ends the launch as
-the session's failure to start, and so does anything other than a
-regular file where the file goes. So the files land on the
-session's own root, which goes with it, and never on the host.
+the container's failure to start, and so does anything other than
+a regular file where the file goes. So the files land on the
+container's own root, which goes with it, and never on the host.
 
 `exec` is not told the home: the launch reads it from the
 container's `/etc/passwd` only after `exec` has run, so a command
@@ -130,9 +131,9 @@ container's configuration. A PATH outside the home it turns out to
 be refuses the launch then, and `postStop` releases what `exec`
 staged.
 
-`flong init` writes the files under the session's syscall filter,
+`flong init` writes the files under the container's syscall filter,
 which applies from its exec on: it calls `openat2`, `mkdirat`,
-`fchmod`, `fstat`, `mmap` and `umask`, which both tiers allow, so a
+`fchmod`, `fstat`, `mmap` and `umask`, which both profiles allow, so a
 `seccomp.deny` or a `seccompPolicy` line that takes one of them
 away makes every launch that seeds a file fail to start.
 
@@ -141,24 +142,25 @@ that shape: a field with no tag (an empty one among them), an
 `env:` field without a `=`, a MODE that is not one, a `file:` field
 with no `:` between its MODE and its PATH or no field after it, no `arg:` field, or an empty program. So do
 an empty name, a name printed twice, a name tini reads (`TINI_*`:
-tini is the session's init, and runs with the payload's
-environment), a name the session already sets -- the container's
+tini is the container's init, and runs with the entrypoint's
+environment), a name the container already sets -- the container's
 `environment`, or one of the launch's own (`PATH`, `HOME`, `USER`,
 `LOGNAME`, `SHELL`, `XDG_RUNTIME_DIR`, `TMPDIR`, `FLONG_BINDS`,
 `container`, `TERM`, `COLORTERM`, `PWD`) -- and a file's path that
 is not as above, printed twice, or inside another file's. Nothing
 is overridden silently. The loader's names, `LD_*` and
 `GLIBC_TUNABLES`, are allowed, and reach tini as well as the
-payload: both run as `user` inside the session, with no capability.
+entrypoint: both run as `user` inside the container, with no
+capability.
 
 Once it has run, as once `seccompPolicy` has, `postStop` runs for
-the session's `$machine` once, whichever way the launcher ends it:
-a refusal, even before the session starts, or a terminating signal
+the container's `$machine` once, whichever way the launcher ends it:
+a refusal, even before the container starts, or a terminating signal
 (`SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`), so whatever it staged
 for `$machine` is released. It runs again when the launcher
 relaunches itself, under a new `$machine`, the old one released
 first. A launcher killed outright (`SIGKILL`, the OOM killer)
-before its session's record exists leaves nothing to run it from.
+before its container's record exists leaves nothing to run it from.
 
 ### `workspace`
 
@@ -175,14 +177,14 @@ repository's root asks git for it, with a script printing
 before launch, with the launcher's arguments after its own; a
 non-zero exit aborts.
 
-Runs *before* `guard`, so that the gate can judge the directory
+Runs *before* `guard`, so that `guard` can judge the directory
 this resolves to rather than re-deriving one of its own.
 
-Runs as the caller, as every hook does.
+Runs as the invoking user, as every hook does.
 
 What it prints is resolved with `realpath`, must be a directory,
-and is refused if it names a `:` or a newline: a caller's path
-travels as `PATH:MODE` lines, which either would make ambiguous.
+and is refused if it names a `:` or a newline: a path travels as
+`PATH:MODE` lines, which either would make ambiguous.
 Later hooks see the path as `$workspace` and the mode as
 `$workspace_mode` (`ro` or `rw`). Deciding *which* directory is
 allowed is `guard`'s job, not this one's.
@@ -193,7 +195,7 @@ allowed is `guard`'s job, not this one's.
 - default: `.{}`
 - ordered
 
-Commands printing more of the caller's directories to bind, one
+Commands printing more of the invoking user's directories to bind, one
 per line, each at its own path inside the container: `PATH`, bound
 read-only, or `PATH:rw`, bound read-write. Their outputs are
 concatenated, in order. Empty output binds nothing, and so does
@@ -202,18 +204,18 @@ the default, no command.
 Runs after `workspace`, with `$workspace` and `$workspace_mode`
 in the environment, so it can answer "what travels with THIS
 directory" rather than having to name a fixed set. Runs as the
-caller and gets the launcher's arguments after its own, exactly as
+invoking user and gets the launcher's arguments after its own, exactly as
 `workspace` does; a non-zero exit aborts.
 
 Every path is resolved with `realpath`, must be a directory, and is
-refused if it names a `:` or a newline, as the workspace is.
+refused if it names a `:` or a newline, as the working directory is.
 Deciding *which* directories are allowed is `guard`'s job: it sees
 them as `$binds`, one `PATH:ro` or `PATH:rw` per line, with the
-mode always spelt out. The payload sees the same list as
+mode always spelt out. The entrypoint sees the same list as
 `$FLONG_BINDS`, to pass on to an agent's `--add-dir`.
 
 Read-only is not a boundary on its own -- it stops writes, not
-execution -- so it is for directories a session should read rather
+execution -- so it is for directories a container should read rather
 than edit, not for making an untrusted one safe.
 
 ### `guard`
@@ -222,10 +224,10 @@ than edit, not for making an untrusted one safe.
 - default: `.{}`
 - ordered
 
-Commands run as the caller before launch, in order, to check that
-the launch is one this declaration means to make. A consistency
-check, not a gate: the session grants nothing the caller did not
-already have, and the caller can run `flong launch` directly with
+Commands run as the invoking user before launch, in order, to check
+that the launch is one this declaration means to make. A consistency
+check, not a gate: the container grants nothing the invoking user
+did not already have, and they can run `flong launch` directly with
 any declaration.
 
 Runs *after* `workspace` and `binds`, with their answers in its
@@ -241,7 +243,7 @@ that does not refuses it, and nothing a guard sets reaches the
 launcher: it judges `$workspace` and cannot change it.
 
 It runs again when the launcher relaunches itself, which it does
-when the prepared root it found was swept before it could lock
+when the cached rootfs it found was swept before it could lock
 it, so a guard that asks a question can ask it twice.
 
 ### `postStart`
@@ -250,32 +252,32 @@ it, so a guard that asks a question can ask it twice.
 - default: `.{}`
 - ordered
 
-Commands run by the launcher as the caller, in order, once per
-session, as soon as the session's namespaces exist -- **before**
-`network` is attached and **before** the payload starts. The
-payload waits for them. `path` is on `PATH`, and each gets the
-launcher's arguments after its own.
+Commands run by the launcher as the invoking user, in order, once
+per container, as soon as the container's namespaces exist --
+**before** `network` is attached and **before** the entrypoint
+starts. The entrypoint waits for them. `path` is on `PATH`, and
+each gets the launcher's arguments after its own.
 
-`$leader` is the session's pid 1 as seen from the host, `$userns`
-the session's user namespace and `$netns` its network namespace,
+`$leader` is the container's pid 1 as seen from the host, `$userns`
+the container's user namespace and `$netns` its network namespace,
 each a `/proc/<launcher>/fd/<n>` descriptor the launcher holds.
 `$machine`, `$uid`, `$gid`, `$home`, `$workspace`,
 `$workspace_mode` and `$binds` are in the environment too. The
-session's root exists only in its own mount namespace, reached as
-`/proc/$leader/root`. The hook enters the session as its root,
+container's root exists only in its own mount namespace, reached as
+`/proc/$leader/root`. The hook enters the container as its root,
 with every capability over it and none over the host:
 `nsenter --user="$userns" --net="$netns" nft -f ruleset.nft`.
 
 **The ordering is the contract, and it is the security property.**
 Whatever this installs into the namespace is in place before
-anything gives it egress: a session's namespace starts with `lo`
+anything gives it egress: a container's namespace starts with `lo`
 up and an empty route table, so until egress exists the workload
 has nowhere to go and there is no window to race. flong attaches
 `network` only after these return. A consumer that provisions
 egress of its own first -- from `guard`, or from the first of
 these -- has given the property away without any error.
 
-A non-zero exit ends the session, and the launcher exits
+A non-zero exit ends the container, and the launcher exits
 non-zero.
 
 Unlike systemd's `ExecStartPost`, the main process is not yet
@@ -287,16 +289,16 @@ running: it is held until these and any `network` have finished.
 - default: `.{}`
 - ordered
 
-Commands run as the caller after a session ends, in order, to
+Commands run as the invoking user after a container ends, in order, to
 release whatever `postStart` made outside it. `$machine` is in the
 environment, and nothing else is; nothing follows a command's own
 arguments.
 
-They run on two paths: from the launcher once the session has
-stopped, and -- for a session whose launcher was SIGKILLed --
-from the sweeper in the caller's holder unit, within moments,
-where the machine name is all that survives. Each session records
-its own `postStop`, so the one belonging to the session is run,
+They run on two paths: from the launcher once the container has
+stopped, and -- for a container whose launcher was SIGKILLed --
+from the sweeper in the invoking user's holder unit, within moments,
+where the machine name is all that survives. Each container records
+its own `postStop`, so the one belonging to the container is run,
 even after a rebuild.
 
 So each must depend on `$machine` alone and succeed when what it
@@ -309,21 +311,21 @@ follows it.
 - type: `struct, or null`
 - default: `null`
 
-A real network for a `privateNetwork` session, provided by
+A real network for a `privateNetwork` container, provided by
 [pasta](https://passt.top): present or absent, with no `enable` --
-`network = { };` is a session that can reach the outside world and
+`network = { };` is a container that can reach the outside world and
 no port on the host.
 
 pasta rather than a veth, because flong runs many concurrent
-sessions from one declaration: a veth needs an address per session,
+containers from one declaration: a veth needs an address per container,
 forwarding, NAT and host firewall rules, and gives the sandbox
 packet-level access to spoof with. pasta needs no host interface
 and no host configuration, and hands the sandbox sockets rather than
 packets.
 
 Attached after `postStart` returns, never before, which is what
-makes the hook's ordering hold. pasta runs as the caller, in the
-session's cgroup, and goes with the session.
+makes the hook's ordering hold. pasta runs as the invoking user, in
+the container's cgroup, and goes with the container.
 
 Always passed, and not options: `--no-map-gw`, because otherwise
 the gateway address reaches the host's loopback; an explicit
@@ -332,35 +334,35 @@ to `auto`, which forwards every bound port on the other side; and
 `--config-net`.
 
 DNS goes through pasta as well, and is not an option either. The
-session's /etc/resolv.conf is written at launch naming
+container's /etc/resolv.conf is written at launch naming
 169.254.1.1 -- and 100::1, where the host names an IPv6
 nameserver -- with the host's `search`, `domain` and `options`
 carried over. pasta catches a query sent there and re-sends it
 from the host to the host's own first nameserver, so a stub
 resolver on the host's loopback answers it. Both read the host's
-file once, at launch: a host that moves networks keeps a live
-session on the old resolver.
+file once, at launch: a host that moves networks keeps a running
+container on the old resolver.
 
 ### `network.forwardPorts`
 
 - type: `.auto | .{ .ports = list of struct }`
 - default: `.{ .ports = .{} }`
 
-Ports on the host forwarded into the session, shaped exactly
+Ports on the host forwarded into the container, shaped exactly
 like `containers.<name>.forwardPorts`, bound on every host
 address -- the host's firewall still decides who reaches them.
-pasta binds them as the caller, so a port below the host's
+pasta binds them as the invoking user, so a port below the host's
 `net.ipv4.ip_unprivileged_port_start` is refused.
 
-A host port is one session's at a time. A second concurrent
-session asking for the same one fails to attach its network,
+A host port is one container's at a time. A second concurrent
+container asking for the same one fails to attach its network,
 and is ended rather than left running without it.
 
-`"auto"`: whatever TCP port the session listens on is
+`"auto"`: whatever TCP port the container listens on is
 published on the host at the same port, while it listens --
 a dev server started inside is reached from the host's
-browser. A port another session already publishes is not,
-and that session is not ended for it.
+browser. A port another container already publishes is not,
+and that container is not ended for it.
 
 ### `network.forwardPorts.ports.*.protocol`
 
@@ -381,7 +383,7 @@ Port on the host, on every address.
 - type: `integer 0..65535, or null`
 - default: `null`
 
-Port in the session; `hostPort` if null.
+Port in the container; `hostPort` if null.
 
 ### `network.hostLoopbackToSession`
 
@@ -389,12 +391,12 @@ Port in the session; `hostPort` if null.
 - default: `false`
 
 A forwarded connection from the host's loopback arrives on
-the session's loopback, rather than from the session's own
+the container's loopback, rather than from the container's own
 address -- pasta's --host-lo-to-ns-lo. A dev server
 listening on 127.0.0.1 inside is then reached at
 localhost on the host. It also reaches anything else the
-session listens on only on its loopback, which is why pasta
-no longer does it by default; a connection from anywhere
+container listens on only on its loopback, which is why pasta
+does not do it by default; a connection from anywhere
 but the host's loopback is unaffected.
 
 ### `network.hostPorts`
@@ -403,7 +405,7 @@ but the host's loopback is unaffected.
 - default: `.{}`
 - ordered
 
-Ports on the host's loopback the session may reach, at the
+Ports on the host's loopback the container may reach, at the
 same port on its own loopback: the database the host is
 running, say. TCP and UDP both. Nothing else on the host's
 loopback is reachable, the gateway address included.
@@ -420,7 +422,7 @@ dies with the container.
 overlayfs reports changing device and inode numbers as a file is
 written, so this must not cover a path holding a sqlite database.
 
-An overlay below a bind, at any depth, is allowed: a session that
+An overlay below a bind, at any depth, is allowed: a container that
 renames its parent on the host only moves where its own writes
 land.
 
@@ -429,7 +431,7 @@ land.
 - type: `string`
 - required
 
-Where the overlay is mounted in the session.
+Where the overlay is mounted in the container.
 
 ### `overlays.*.lower`
 
@@ -444,30 +446,30 @@ The host directory it shows, read-only, beneath the writes.
 - default: `.{}`
 - ordered
 
-Paths in the session replaced by an empty node of the same kind
+Paths in the container replaced by an empty node of the same kind
 that nobody can read. For carving one file out of a directory a
 bind brings in whole.
 
-USE WITH CARE. Prefer binding only what the session needs to
+USE WITH CARE. Prefer binding only what the container needs to
 binding everything and masking the rest:
 
 - A mask is a denylist. Whatever it does not name is in, so a file
   the host's tool starts keeping beside the masked one next
   release -- a second token, a refresh token -- is visible from
   the day it appears.
-- The path must exist when the session starts, or the launch
+- The path must exist when the container starts, or the launch
   fails. A file that is written later, on the host, into a
   directory that is bound through is not masked.
 - It masks the file, not the name. A host program that replaces
   the file by renaming a new one over it -- as many write a
-  credential -- detaches the mask in every running session, and
+  credential -- detaches the mask in every running container, and
   the new file shows through.
 
 A mask may lie at most one level below the root of a writable
-bind: deeper, a session that can write the host directory renames
+bind: deeper, a container that can write the host directory renames
 the masked file's parent, leaves a decoy for the mask, and reads
 the file at the new name. A declared writable bind is checked when
-the declaration is, and the workspace and `binds` at launch. A
+the declaration is, and the working directory and `binds` at launch. A
 mask below a read-only bind, and a declared `tmpfs` or an overlay
 at any depth, is not checked.
 
@@ -477,9 +479,9 @@ at any depth, is not checked.
 - default: `.{}`
 - ordered
 
-Host paths no mount of a session may reach: no source may equal,
+Host paths no mount of a container may reach: no source may equal,
 lie inside or contain one. For a directory whose contents steer
-sessions from outside, such as a daemon's control socket.
+containers from outside, such as a daemon's control socket.
 
 The launch protects `/proc`, `/sys/fs/cgroup` and the user
 manager's `bus` and `systemd` sockets as well, and the launcher its
@@ -490,8 +492,8 @@ own state and the holder's cgroup.
 - type: `struct`
 - default: `.{}`
 
-Opt-in resource limits for a session, written into its own
-cgroup, which the caller's user manager delegates to the
+Opt-in resource limits for a container, written into its own
+cgroup, which the invoking user's user manager delegates to the
 holder unit. Named and spelt as systemd's, and unset means
 unlimited, as it does there.
 
@@ -500,9 +502,9 @@ memory, pids and cpu -- so there is no `IOWeight`: with no io
 controller below `user@.service`, it would have nothing to write
 to.
 
-A session's root, its TMPDIR and every overlay upper layer are
-tmpfs, which is RAM: `MemoryMax` makes a payload that fills
-them the session's problem rather than the host's.
+A container's root, its TMPDIR and every overlay upper layer are
+tmpfs, which is RAM: `MemoryMax` makes an entrypoint that fills
+them the container's problem rather than the host's.
 
 ### `limits.MemoryMax`
 
@@ -544,14 +546,14 @@ them the session's problem rather than the host's.
 - type: `integer 1..10000, or null`
 - default: `null`
 
-`cpu.weight`, against the caller's other processes.
+`cpu.weight`, against your other processes.
 
 ### `limits.oomGroup`
 
 - type: `bool`
 - default: `false`
 
-`memory.oom.group`: an OOM kill takes the whole session
+`memory.oom.group`: an OOM kill takes the whole container
 rather than one process of it.
 
 ### `seccomp`
@@ -559,7 +561,8 @@ rather than one process of it.
 - type: `struct`
 - default: `.{}`
 
-The session's syscall filter. A tier is an allow-list: the calls
+The container's syscall filter. Its profile, `tier`, is an
+allow-list: the calls
 it names are allowed, the rest of systemd's `@known` get
 `errno`, and a call outside `@known` gets ENOSYS. It applies on
 x86_64, i386 and x32 alike.
@@ -567,7 +570,7 @@ x86_64, i386 and x32 alike.
 Three fixed filters are stacked behind it and are not options:
 the audit mask (`socket(AF_NETLINK, ..., NETLINK_AUDIT)` gets
 EAFNOSUPPORT), the tty filter (`ioctl` TIOCSTI, TIOCLINUX,
-TIOCSETD and TIOCCONS get EPERM, in every tier and under any
+TIOCSETD and TIOCCONS get EPERM, in every profile and under any
 project policy) and, unless `nestedSandbox`, the namespace mask
 (clone and unshare with a `CLONE_NEW*` flag, and setns, get
 EPERM, and clone3 ENOSYS).
@@ -590,18 +593,18 @@ the fixed filters, and warns.
 - default: `false`
 
 Adds `ptrace`, for strace and gdb. Its reach is the
-session's own pid namespace.
+container's own pid namespace.
 
 ### `seccomp.nestedSandbox`
 
 - type: `bool`
 - default: `false`
 
-For a payload that sandboxes its own children, such as
+For an entrypoint that sandboxes its own children, such as
 Chromium's sandbox, `codex sandbox` or a nested bwrap: the
-session may make user namespaces of its own, the namespace
+container may make user namespaces of its own, the namespace
 mask goes and `@mount` is allowed. All three are needed
-together. The payload still cannot reach the session's
+together. The entrypoint still cannot reach the container's
 network namespace.
 
 ### `seccomp.allow`
@@ -610,7 +613,7 @@ network namespace.
 - default: `.{}`
 - ordered
 
-Syscall names or `@groups` added to the tier.
+Syscall names or `@groups` added to the profile.
 
 ### `seccomp.deny`
 
@@ -618,7 +621,7 @@ Syscall names or `@groups` added to the tier.
 - default: `.{}`
 - ordered
 
-Syscall names or `@groups` removed, after the tier, the
+Syscall names or `@groups` removed, after the profile, the
 loosenings and `allow`, which it overrides.
 
 ### `seccomp.errno`
@@ -639,7 +642,7 @@ Allows the calls `errno` would refuse and has the kernel
 log each (audit `type=1326`, with `syscall=NR`), to learn
 a policy. `scmp_sys_resolver -a x86_64 NR` names a number;
 the names become `allow` entries or `seccompPolicy` lines.
-Not for untrusted payloads, and it warns.
+Not for untrusted entrypoints, and it warns.
 
 ### `seccompPolicy`
 
@@ -648,9 +651,9 @@ Not for untrusted payloads, and it warns.
 - ordered
 
 Commands printing a project's own changes to the `seccomp` filter,
-for a policy that is only known at launch. Run as the caller after
-`guard`, in order, with the launcher's arguments after their own,
-the caller's stdin and stderr, and `$workspace`,
+for a policy that is only known at launch. Run as the invoking user
+after `guard`, in order, with the launcher's arguments after their
+own, the invoking user's stdin and stderr, and `$workspace`,
 `$workspace_mode`, `$binds` and `$machine` in the environment.
 Their outputs are concatenated, and read as lines of `allow X...`
 or `deny X...`, where each X is a syscall name or an `@group`.
@@ -658,7 +661,7 @@ or `deny X...`, where each X is a syscall name or an `@group`.
 the launch, and so does a line that cannot be read or a name
 systemd does not list.
 
-`$machine` is the session's name, the one `postStart` and
+`$machine` is the container's name, the one `postStart` and
 `postStop` see, so anything it approves for them can be staged
 per launch rather than per checkout.
 
@@ -669,8 +672,9 @@ and cached under `$XDG_RUNTIME_DIR/flong/seccomp` by the hash of
 what is compiled, so a policy already seen costs a hash. Printing
 nothing compiles nothing. A relaunch runs them again.
 
-It needs a tier to act on, and it is a consistency check in the
-way `guard` is: the caller can launch with any filter.
+It needs a profile (`seccomp.tier`) to act on, and it is a
+consistency check in the way `guard` is: the invoking user can
+launch with any filter.
 
 ## Computed fields
 
@@ -689,7 +693,7 @@ The `containers.<name>` declaration this runs: its closure,
 It must set `privateNetwork = true`. Under NixOS it is an option of
 its own, written by hand, whose default is the declaration's name;
 it also names the cgroup level between the holder and the
-sessions.
+running containers.
 
 ### `closure`
 
@@ -697,8 +701,8 @@ sessions.
 - required
 - computed
 
-The container's system closure, the store path the session's root
-is prepared from: `containers.<name>.path`.
+The container's system closure, the store path the rootfs is
+built from: `containers.<name>.path`.
 
 ### `cuid`
 
@@ -707,7 +711,7 @@ is prepared from: `containers.<name>.path`.
 - computed
 
 The uid `user` has in the container's configuration, which the
-caller's id maps and the prepared root's cache are made for. At
+invoking user's id maps and the cached rootfs are made for. At
 most 65535, the container's ids.
 
 ### `cgid`
@@ -727,7 +731,7 @@ configuration. At most 65535, as `cuid`.
 
 The first eight hex digits of the sha256 of the cache tool's store
 path, which references the prepare program: a change to either is
-a different root, so it names a different cache.
+a different rootfs, so it names a different cache.
 
 ### `containerMounts`
 
@@ -755,7 +759,7 @@ launch sorts them, parents first, so their order does not matter.
 - required
 - computed
 
-Where it is mounted in the session: the bind's `mountPoint`, the
+Where it is mounted in the container: the bind's `mountPoint`, the
 tmpfs's path, the device's node.
 
 ### `containerMounts.*.src`
@@ -791,7 +795,7 @@ anything but a tmpfs.
 - default: `false`
 - computed
 
-A tmpfs owned by the session's user, rather than root: one with no
+A tmpfs owned by the container's user, rather than root: one with no
 options, or with `uid=` and `gid=` naming the user's.
 
 ### `name`
@@ -811,15 +815,15 @@ of its command.
 - ordered
 - computed
 
-The payload's environment from the container: what its
+The entrypoint's environment from the container: what its
 `/etc/set-environment` would set, worked out at evaluation from
 its configuration, one entry per name, each with its final value.
-In a value, `${NAME}` is filled in at launch with the session's
+In a value, `${NAME}` is filled in at launch with the container's
 value of NAME, one of `HOME`, `USER`, `LOGNAME`, `SHELL`,
 `XDG_RUNTIME_DIR` and `TMPDIR`, and `$$` is one `$`; any other `$`
 is refused. It may set `PATH`, which replaces the launch's own,
 none of the launch's other names, and no `TINI_*`, which tini, the
-session's init, would read. Under NixOS, module.nix
+container's init, would read. Under NixOS, module.nix
 computes it, and refuses at evaluation a container whose file says
 what cannot be computed without a shell.
 
@@ -846,8 +850,8 @@ variables and `$$` for a `$`.
 - default: `null`
 - computed
 
-The compiled filter of `seccomp`'s tier, its loosenings, `allow`
-and `deny`, installed first; null when `seccomp.tier` is null. A
+The compiled filter of the `seccomp.tier` profile, its loosenings,
+`allow` and `deny`, installed first; null when `seccomp.tier` is null. A
 project's policy (`seccompPolicy`) replaces it at launch with one
 compiled from `seccompProject`.
 
@@ -858,7 +862,7 @@ compiled from `seccompProject`.
 - ordered
 - computed
 
-The fixed filters, compiled, each installed after the tier's in
+The fixed filters, compiled, each installed after the profile's in
 this order: the audit mask, the tty filter and, unless
 `seccomp.nestedSandbox`, the namespace mask.
 
@@ -888,7 +892,7 @@ project's lines mean.
 - required
 - computed
 
-The file of the declaration's own names -- its tier, its
+The file of the declaration's own names -- its profile, its
 loosenings, `allow`, and `deny` as `-name` -- which a project's
 lines apply to.
 
@@ -910,11 +914,11 @@ number (`1`, `13` or `38`, for `seccomp.errno`), or `log` for
 - computed
 
 Directories put in front of `PATH`, in this order, for the commands
-the launch runs as the caller before the session exists --
+the launch runs as the invoking user before the container exists --
 `workspace`, `binds`, `guard`, `seccompPolicy` -- and in the
 environment the launch goes on with, which the hooks start from.
 Under NixOS, the `bin` directories of `flong.<name>.path`. Empty,
-the default, leaves `PATH` as the caller's.
+the default, leaves `PATH` as the invoking user's.
 
 ### `postStartProgram`
 
@@ -933,9 +937,9 @@ first (mkHookProgram). null runs each command as it is.
 - default: `null`
 - computed
 
-The same for each `postStop` command, which the session's record
+The same for each `postStop` command, which the container's record
 keeps whole, program first, for the sweeper to run with `$machine`
-alone: module.nix's hook program, which takes the session's name
+alone: module.nix's hook program, which takes the container's name
 from its last argument and puts `flong.<name>.path` on `PATH`. A
 store path, since the record's program must be one. null runs each
 command as it is, and each must then be a store path itself.
