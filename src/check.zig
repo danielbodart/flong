@@ -98,6 +98,7 @@ pub fn validate(arena: Allocator, d: *const Declaration) Allocator.Error![]const
     try c.twice();
     try c.noTier();
     try c.postStop();
+    try c.forwardBind();
     return c.out.items;
 }
 
@@ -357,6 +358,19 @@ const Checker = struct {
     /// than a record's value may be, PATH_MAX - 1 bytes. record.create
     /// refuses either at launch, after the session's name is taken; here
     /// it fails the build instead.
+    /// What `patterns` cannot say of the forwarded ports' bind: an address
+    /// that parses, an interface name short enough (decl.bindBad, which
+    /// the launch asks of `exec`'s `forward:` too). The pattern's own
+    /// refusal is said already, so only a value that keeps to it is
+    /// judged here.
+    fn forwardBind(c: *Checker) Allocator.Error!void {
+        const n = c.d.network orelse return;
+        if (n.forwardAddress) |a| if (matches(decl.Network.patterns.forwardAddress, a) and !decl.isIpAddress(a))
+            try c.say("flong.{s}.network.forwardAddress is \"{s}\", which is not an IPv4 or IPv6 address.", .{ c.n, a });
+        if (n.forwardInterface) |i| if (matches(decl.Network.patterns.forwardInterface, i) and !decl.isInterfaceName(i))
+            try c.say("flong.{s}.network.forwardInterface is \"{s}\", which is not an interface name of 1 to {d} bytes.", .{ c.n, i, decl.interface_max });
+    }
+
     fn postStop(c: *Checker) Allocator.Error!void {
         const d = c.d;
         const seps = [_]u8{ '\n', record_command_sep, record_word_sep };

@@ -448,7 +448,7 @@ let
           else {
             ports = map (p: { inherit (p) protocol hostPort containerPort; }) c.network.forwardPorts;
           };
-        inherit (c.network) hostLoopbackToSession hostPorts;
+        inherit (c.network) forwardAddress forwardInterface hostLoopbackToSession hostPorts;
       };
       overlays = lib.mapAttrsToList (target: lower: { inherit target; lower = toString lower; }) c.overlays;
       limits = {

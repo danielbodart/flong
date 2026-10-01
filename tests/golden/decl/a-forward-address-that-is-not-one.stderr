@@ -1,0 +1,2 @@
+flong check: @GOLDEN@/decl/a-forward-address-that-is-not-one.zon: flong.box.network.forwardAddress is "1.2.3", which is not an IPv4 or IPv6 address.
+flong check: @GOLDEN@/decl/a-forward-address-that-is-not-one.zon: flong.box.network.forwardInterface is "abcdefghijklmnop", which is not an interface name of 1 to 15 bytes.

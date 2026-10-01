@@ -93,7 +93,13 @@ pub const Declaration = struct {
     /// - `arg:WORD`, the next word of the entrypoint's argument list, which
     ///   may be empty (`arg:`); the first is its program;
     /// - `file:MODE:PATH`, followed by exactly one more field, untagged,
-    ///   which is the file's content, every byte of it but a NUL.
+    ///   which is the file's content, every byte of it but a NUL;
+    /// - `forward:BIND`, at most once, where `network.forwardPorts` binds
+    ///   for this launch, replacing `forwardAddress` and
+    ///   `forwardInterface` both: `ADDRESS`, `ADDRESS%INTERFACE`,
+    ///   `%INTERFACE`, or nothing for every address. Refused when the
+    ///   container has no `network`, or when either part is not as those
+    ///   fields take it.
     ///
     /// The argument list is the entrypoint's whole: the launcher's
     /// arguments are not appended again. A program without a `/` is looked
@@ -518,20 +524,46 @@ pub const Declaration = struct {
 pub const Network = struct {
     /// Ports on the host forwarded into the container, shaped exactly
     /// like `containers.<name>.forwardPorts`, bound on every host
-    /// address -- the host's firewall still decides who reaches them.
+    /// address unless `forwardAddress` or `forwardInterface` says
+    /// otherwise -- the host's firewall still decides who reaches them.
     /// pasta binds them as the invoking user, so a port below the host's
     /// `net.ipv4.ip_unprivileged_port_start` is refused.
     ///
-    /// A host port is one container's at a time. A second concurrent
-    /// container asking for the same one fails to attach its network,
-    /// and is ended rather than left running without it.
+    /// A host port, at one address, is one container's at a time. A
+    /// second concurrent container asking for the same one fails to
+    /// attach its network, and is ended rather than left running
+    /// without it.
     ///
     /// `"auto"`: whatever TCP port the container listens on is
     /// published on the host at the same port, while it listens --
     /// a dev server started inside is reached from the host's
-    /// browser. A port another container already publishes is not,
-    /// and that container is not ended for it.
+    /// browser. A port another container already publishes at the same
+    /// address is not, and that container is not ended for it. Nor is a
+    /// port in the host's ephemeral range,
+    /// `net.ipv4.ip_local_port_range`, 32768 and up by default: pasta
+    /// forwards only the ports outside it.
     forwardPorts: ForwardPorts = .{ .ports = &.{} },
+
+    /// The host address `forwardPorts` binds, an IPv4 or IPv6 address:
+    /// every address when null, the default. A listener inside is then
+    /// reached on the host at this address alone, and two containers
+    /// can publish the same port at two addresses. Any address, a
+    /// loopback one or not: which to give is the caller's to decide.
+    ///
+    /// `hostLoopbackToSession` reaches the container's loopback only from
+    /// the host's `127.0.0.1`, so at any other address a listener inside
+    /// must listen on the container's own address, or every address, to
+    /// be reached.
+    ///
+    /// `exec` can give another for one launch, with a `forward:`
+    /// field, which then replaces this and `forwardInterface` both.
+    forwardAddress: ?[]const u8 = null,
+
+    /// The host interface `forwardPorts` binds, by name, as pasta's
+    /// `%INTERFACE` (Linux 5.7 or later): every interface when null, the
+    /// default. With `forwardAddress`, that address on this interface.
+    /// At most 15 bytes, each a letter, a digit, `.`, `_` or `-`.
+    forwardInterface: ?[]const u8 = null,
 
     /// A forwarded connection from the host's loopback arrives on
     /// the container's loopback, rather than from the container's own
@@ -548,7 +580,51 @@ pub const Network = struct {
     /// running, say. TCP and UDP both. Nothing else on the host's
     /// loopback is reachable, the gateway address included.
     hostPorts: []const u16 = &.{},
+
+    pub const patterns = .{ .forwardAddress = "[0-9A-Fa-f.:]+", .forwardInterface = "[A-Za-z0-9._-]+" };
 };
+
+/// The longest interface name Linux has: IFNAMSIZ less its NUL.
+pub const interface_max = 15;
+
+/// Why a forwarded port's bind -- `network.forwardAddress` and
+/// `network.forwardInterface`, or `exec`'s `forward:` -- is not one pasta
+/// can be given, or null when it is. pasta reads `ADDRESS%INTERFACE/`
+/// before the ports of `-t` and `-u`, and splits its argument at `,`, `/`,
+/// `%`, `:`, `-` and `~`, so the address must parse as an IP address and
+/// the interface stays within the bytes a name needs: nothing else can
+/// reach pasta's parser as anything but the address or the name.
+pub const BindBad = enum { address, interface };
+
+pub fn bindBad(address: ?[]const u8, interface: ?[]const u8) ?BindBad {
+    if (address) |a| if (!isIpAddress(a)) return .address;
+    if (interface) |i| if (!isInterfaceName(i)) return .interface;
+    return null;
+}
+
+/// An IPv4 address in dotted quad, or an IPv6 address, with no port, no
+/// zone and no brackets.
+pub fn isIpAddress(a: []const u8) bool {
+    if (a.len == 0) return false;
+    for (a) |ch| switch (ch) {
+        '0'...'9', 'a'...'f', 'A'...'F', '.', ':' => {},
+        else => return false,
+    };
+    if (std.net.Ip4Address.parse(a, 0)) |_| return true else |_| {}
+    if (std.net.Ip6Address.parse(a, 0)) |_| return true else |_| {}
+    return false;
+}
+
+/// A Linux interface name, as far as pasta's spec can carry one.
+pub fn isInterfaceName(i: []const u8) bool {
+    if (i.len == 0 or i.len > interface_max) return false;
+    if (std.mem.eql(u8, i, ".") or std.mem.eql(u8, i, "..")) return false;
+    for (i) |ch| switch (ch) {
+        'A'...'Z', 'a'...'z', '0'...'9', '.', '_', '-' => {},
+        else => return false,
+    };
+    return true;
+}
 
 /// `network.forwardPorts`: `.auto`, or `.{ .ports = .{ ... } }`.
 pub const ForwardPorts = union(enum) {
@@ -1054,6 +1130,11 @@ test "a minimal declaration takes module.nix's defaults" {
     try testing.expect(!n.hostLoopbackToSession);
     const auto = (try parse(arena_state.allocator(), minimal[0 .. minimal.len - 1] ++ "    .network = .{ .forwardPorts = .auto },\n}", null)).network.?;
     try testing.expectEqual(.auto, auto.forwardPorts);
+    try testing.expectEqual(null, auto.forwardAddress);
+    try testing.expectEqual(null, auto.forwardInterface);
+    const bound = (try parse(arena_state.allocator(), minimal[0 .. minimal.len - 1] ++ "    .network = .{ .forwardPorts = .auto, .forwardAddress = \"127.9.9.9\", .forwardInterface = \"lo\" },\n}", null)).network.?;
+    try testing.expectEqualStrings("127.9.9.9", bound.forwardAddress.?);
+    try testing.expectEqualStrings("lo", bound.forwardInterface.?);
     // tier = null, no allow-list, is said as null.
     const none = try parse(arena_state.allocator(), minimal[0 .. minimal.len - 1] ++ "    .seccomp = .{ .tier = null },\n}", null);
     try testing.expectEqual(null, none.seccomp.tier);
@@ -1164,4 +1245,16 @@ test "load refuses a file that never ends, and one that is not there" {
     defer msg.prog = was;
     try testing.expectError(error.Reported, load(a, "/dev/zero"));
     try testing.expectError(error.Reported, load(a, "/nonexistent/flong/agent.zon"));
+}
+
+test "bindBad: an IP address and an interface name, and nothing pasta would read as more" {
+    try testing.expectEqual(null, bindBad(null, null));
+    for ([_][]const u8{ "127.9.9.9", "0.0.0.0", "192.0.2.1", "::1", "::", "fe80::1", "2001:db8::5", "::ffff:127.0.0.1" }) |a|
+        try testing.expectEqual(null, bindBad(a, null));
+    for ([_][]const u8{ "lo", "eth0", "wlp3s0", "br-1a2b", "veth.1", "a_b", "abcdefghijklmno" }) |i|
+        try testing.expectEqual(null, bindBad("127.0.0.1", i));
+    for ([_][]const u8{ "", "localhost", "127.0.0.1/8", "127.0.0.1,1", "1.2.3", "1.2.3.4.5", "256.1.1.1", "::1%lo", "[::1]", "127.0.0.1:80", " 127.0.0.1", "1.2.3.4~5" }) |a|
+        try testing.expectEqual(BindBad.address, bindBad(a, null).?);
+    for ([_][]const u8{ "", "abcdefghijklmnop", "eth0/1", "eth0,1", "eth 0", "eth0%", "eth:0", ".", "..", "eth~0" }) |i|
+        try testing.expectEqual(BindBad.interface, bindBad(null, i).?);
 }

@@ -301,6 +301,18 @@ let
         || throw "assertions: a TasksMax of 0 was accepted")
       (untyped { flong.box.network.forwardPorts = "all"; } [ "flong" "box" "network" "forwardPorts" ]
         || throw "assertions: forwardPorts = \"all\" was accepted")
+      # Where forwarded ports bind: what pasta could read as more than an
+      # address or a name is refused at evaluation, and any address or
+      # interface else is the declaration's to give, a loopback one or not.
+      (untyped { flong.box.network.forwardAddress = "127.0.0.1/8"; } [ "flong" "box" "network" "forwardAddress" ]
+        || throw "assertions: a forwardAddress with a / was accepted")
+      (untyped { flong.box.network.forwardInterface = "eth0,1"; } [ "flong" "box" "network" "forwardInterface" ]
+        || throw "assertions: a forwardInterface with a , was accepted")
+      (accepted "a forwarded port's address and interface"
+        { flong.box.network = { forwardPorts = "auto"; forwardAddress = "192.0.2.1"; forwardInterface = "eth0"; }; })
+      (let n = (declFile { flong.box.network = { forwardPorts = "auto"; forwardAddress = "127.9.9.9"; }; }).declaration.network; in
+        (n.forwardAddress == "127.9.9.9" && n.forwardInterface == null)
+        || throw "assertions: the declaration file has forwardAddress ${builtins.toJSON n.forwardAddress} and forwardInterface ${builtins.toJSON n.forwardInterface}")
       (accepted "every limit spelling"
         { flong.box.limits = { MemoryMax = "infinity"; MemoryHigh = 1073741824; MemorySwapMax = "2G"; TasksMax = "infinity"; CPUQuota = "150%"; CPUWeight = 10000; }; })
   ];

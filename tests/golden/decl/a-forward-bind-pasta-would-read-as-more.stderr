@@ -1,0 +1,2 @@
+flong check: @GOLDEN@/decl/a-forward-bind-pasta-would-read-as-more.zon: flong.box.network.forwardAddress is "127.0.0.1/8", which is not a string matching the pattern [0-9A-Fa-f.:]+.
+flong check: @GOLDEN@/decl/a-forward-bind-pasta-would-read-as-more.zon: flong.box.network.forwardInterface is "eth0,1", which is not a string matching the pattern [A-Za-z0-9._-]+.

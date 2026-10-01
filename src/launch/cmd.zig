@@ -239,6 +239,9 @@ pub const Exec = struct {
     env: []const Var,
     argv: []const [:0]const u8,
     files: []const File,
+    /// `forward:`'s value, `ADDRESS%INTERFACE` or either alone, which may
+    /// be empty (every address); null when it printed none
+    forward: ?[]const u8 = null,
 };
 
 /// A file `exec` asks for in the payload's home: `file:MODE:PATH`, then
@@ -257,6 +260,7 @@ pub const File = struct {
 pub const tag_env = "env:";
 pub const tag_arg = "arg:";
 pub const tag_file = "file:";
+pub const tag_forward = "forward:";
 
 /// The most octal digits a file's MODE is written with: `0600` at most,
 /// so no value past 07777 is spelt and none past 0777 taken.
@@ -281,6 +285,8 @@ pub const ExecBad = union(enum) {
     no_argv,
     /// the first `arg:` field is empty
     empty_program,
+    /// a second `forward:` field, whole
+    forward_twice: []const u8,
 };
 
 /// `exec`'s stdout read as its protocol (decl.zig's `exec`): fields each
@@ -288,7 +294,9 @@ pub const ExecBad = union(enum) {
 /// is a variable, split at the first `=` after the tag, so a name never
 /// holds one; `arg:WORD` is the next word of the payload's argv, which may
 /// be empty; `file:MODE:PATH` asks for a file, and the one field after it,
-/// untagged, is the file's content, whatever it holds. Nothing else is a
+/// untagged, is the file's content, whatever it holds; `forward:BIND`, at
+/// most once, is where the forwarded ports bind for this launch. Nothing
+/// else is a
 /// field, so an empty argv word is `arg:` and never the empty field. Whether
 /// a name or a path is one the payload may be given is the caller's to
 /// judge. The lists are `gpa`'s, their strings slices of `out`'s but for
@@ -300,6 +308,7 @@ pub fn parseExec(gpa: Allocator, out: []const u8) Allocator.Error!union(enum) { 
     var env: std.ArrayList(Var) = .empty;
     var argv: std.ArrayList([:0]const u8) = .empty;
     var files: std.ArrayList(File) = .empty;
+    var forward: ?[]const u8 = null;
     while (fields.next()) |f| {
         if (std.mem.startsWith(u8, f, tag_env)) {
             const v = f[tag_env.len..];
@@ -314,11 +323,14 @@ pub fn parseExec(gpa: Allocator, out: []const u8) Allocator.Error!union(enum) { 
             const path = v[colon + 1 ..];
             const content = fields.next() orelse return .{ .bad = .{ .no_content = path } };
             try files.append(gpa, .{ .mode = mode, .path = path, .content = content });
+        } else if (std.mem.startsWith(u8, f, tag_forward)) {
+            if (forward != null) return .{ .bad = .{ .forward_twice = f } };
+            forward = f[tag_forward.len..];
         } else return .{ .bad = .{ .untagged = f } };
     }
     if (argv.items.len == 0) return .{ .bad = .no_argv };
     if (argv.items[0].len == 0) return .{ .bad = .empty_program };
-    return .{ .ok = .{ .env = env.items, .argv = argv.items, .files = files.items } };
+    return .{ .ok = .{ .env = env.items, .argv = argv.items, .files = files.items, .forward = forward } };
 }
 
 /// A file's MODE: one to four octal digits, at most 0777, the permission
@@ -412,6 +424,13 @@ test "parseExec: tagged fields, each ended by a NUL, in any order" {
     try testing.expectEqualStrings("rel:a", (try parseExec(a, "file:600:rel:a\x00c\x00arg:p\x00")).ok.files[0].path);
     // A name that is empty is the caller's to refuse.
     try testing.expectEqualStrings("", (try parseExec(a, "env:=v\x00arg:p\x00")).ok.env[0].name);
+
+    // `forward:` at most once, its value as printed, empty included: the
+    // caller judges it.
+    try testing.expectEqual(null, full.forward);
+    try testing.expectEqualStrings("127.9.9.9%lo", (try parseExec(a, "forward:127.9.9.9%lo\x00arg:p\x00")).ok.forward.?);
+    try testing.expectEqualStrings("", (try parseExec(a, "arg:p\x00forward:\x00")).ok.forward.?);
+    try testing.expectEqualStrings("forward:b", (try parseExec(a, "forward:a\x00arg:p\x00forward:b\x00")).bad.forward_twice);
 
     try testing.expectEqual(ExecBad.no_argv, (try parseExec(a, "")).bad);
     try testing.expectEqual(ExecBad.unterminated, (try parseExec(a, "arg:prog")).bad);

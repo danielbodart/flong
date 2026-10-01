@@ -383,6 +383,29 @@ in
       command = [ "bash" "-c" ];
     };
 
+    # The same, its ports bound at one host address: the declaration's,
+    # and exec's in its place for one launch. No hostLoopbackToSession:
+    # pasta applies it to the host's 127.0.0.1 alone, so a listener on the
+    # session's loopback is not reached at another address.
+    flong.boundPorts = {
+      container = "netless";
+      user = "alice";
+      workspace = ws ''realpath /srv/work'';
+      network.forwardPorts = "auto";
+      network.forwardAddress = "127.9.9.9";
+      command = [ "bash" "-c" ];
+    };
+    flong.execBoundPorts = {
+      container = "netless";
+      user = "alice";
+      workspace = ws ''realpath /srv/work'';
+      network.forwardPorts = "auto";
+      network.forwardAddress = "127.9.9.9";
+      exec = [ (script "exec-bound" ''
+        printf '%s\0' forward:127.9.9.8 arg:bash arg:-c "arg:$1"
+      '') ];
+    };
+
     flong.networked = {
       container = "netless";
       user = "alice";
@@ -793,6 +816,8 @@ in
       badMask = exe "badmask";
       symlinkOverlay = exe "symlinkoverlay";
       autoPorts = exe "autoPorts";
+      boundPorts = exe "boundPorts";
+      execBoundPorts = exe "execBoundPorts";
       # The container's own closure, whose system profile hello is not in.
       closure = nodes.machine.containers.demo.path;
     in
@@ -974,7 +999,7 @@ in
           assert out == "/srv/work|rw||a=b|/srv/work|en_US.UTF-8|[a b][$HOME][]\n", out
           # Each refused, 1, saying why under the declaration's name.
           program = machine.succeed("grep -o '/nix/store/[a-z0-9]*-flong-test-exec' /etc/flong/execd.zon | head -1").strip()
-          tags = "where each field is env:NAME=VALUE, arg:WORD, or file:MODE:PATH followed by the file's content"
+          tags = "where each field is env:NAME=VALUE, arg:WORD, file:MODE:PATH followed by the file's content, or forward:BIND"
           refusals = [
               ("fixed", "sets HOME, which the launch sets for every session"),
               ("pwd", "sets PWD, which the launch sets for every session"),
@@ -1584,6 +1609,30 @@ in
           machine.succeed(by_caller("${autoPorts} 'echo from-auto | nc -N -l 127.0.0.1 18300'")
                           + " >/dev/null 2>&1 &")
           machine.wait_until_succeeds("nc -d -w 3 127.0.0.1 18300 | grep -q from-auto", timeout=30)
+          machine.wait_until_succeeds(NO_SESSIONS)
+
+      @test("with forwardAddress, a listener is published at that address alone, and exec's forward: replaces it", part="a")
+      def _():
+          # Declared: 127.9.9.9, and nothing else -- not the host's
+          # 127.0.0.1, which plain auto would have bound with every other
+          # address.
+          machine.succeed(by_caller("${boundPorts} 'echo from-bound | timeout 20 nc -N -l 18310'")
+                          + " >/dev/null 2>&1 &")
+          machine.wait_until_succeeds("ss -ltnH | grep -q '127.9.9.9:18310'", timeout=30)
+          listening = machine.succeed("ss -ltnH")
+          assert "*:18310" not in listening and "0.0.0.0:18310" not in listening, listening
+          out = machine.succeed("nc -d -w 2 127.0.0.1 18310 </dev/null 2>&1 || true")
+          assert "from-bound" not in out, out
+          machine.succeed("nc -d -w 3 127.9.9.9 18310 | grep -q from-bound")
+          machine.wait_until_succeeds(NO_SESSIONS)
+          # exec printed forward:127.9.9.8, which replaces the declaration's
+          # 127.9.9.9 for its launch.
+          machine.succeed(by_caller("${execBoundPorts} 'echo from-exec | timeout 20 nc -N -l 18311'")
+                          + " >/dev/null 2>&1 &")
+          machine.wait_until_succeeds("ss -ltnH | grep -q '127.9.9.8:18311'", timeout=30)
+          listening = machine.succeed("ss -ltnH")
+          assert "127.9.9.9:18311" not in listening and "*:18311" not in listening, listening
+          machine.succeed("nc -d -w 3 127.9.9.8 18311 | grep -q from-exec")
           machine.wait_until_succeeds(NO_SESSIONS)
 
       @test("a forwarded port reaches the session from the host", part="a")

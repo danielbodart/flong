@@ -900,6 +900,34 @@ A fixed host port is one container's at a time, so a second concurrent
 container with the same `forwardPorts` entry fails in pasta ("Address already
 in use") and is ended rather than run without its network.
 
+**Where forwarded ports bind.** By default every host address: pasta's
+`-t auto` publishes a listener inside as the host's `*:P`. `forwardAddress`
+and `forwardInterface` put pasta's `ADDRESS%INTERFACE/` before `-t`'s and
+`-u`'s port classes, so a port binds that address, that interface, or both,
+and two containers can publish the same port at two addresses. pasta reads
+an address with `auto` from 2026_07 on; the module builds the launcher with
+the pasta of flong's own locked nixpkgs, whatever the host's, for that. The
+address differs per launch for a caller that gives each workspace its own,
+so `exec` can print `forward:ADDRESS%INTERFACE` (either part alone, or
+neither for every address), which replaces both fields for that launch.
+flong takes any IP address and any interface name: which one a container
+should have is its caller's policy. Only what pasta could read as more than
+an address or a name is refused: the address must parse as IPv4 or IPv6, and
+the name be 1 to 15 bytes of letters, digits, `.`, `_` and `-`.
+Measured with pasta 2026_07_16: `-t 127.9.9.9/auto` publishes a listener on
+port 13000 inside as `127.9.9.9:13000` alone, and `127.0.0.1:13000` does not
+answer. `hostLoopbackToSession` does not carry over: pasta sends to the
+container's loopback only what arrived at the host's `127.0.0.1`, so with an
+address bound, a listener inside on `127.0.0.1` alone is not reached, and one
+on every address is. None of pasta's `toaddr` forms (`ADDR/all:127.0.0.1`,
+a range to `127.0.0.1/...`) changes that, and `auto:TOADDR` does not parse.
+
+**pasta 2026_07 changed what `auto` covers.** It is now a modifier on a port
+set, `auto` alone the set of every port outside the host's ephemeral range
+(`net.ipv4.ip_local_port_range`, 32768 and up by default): a listener inside
+on 38123 is not published, where 2025_09's `auto` published it. Exclusions
+(`auto,~P`) now parse too.
+
 ### DNS
 
 A networked container's `/etc/resolv.conf` is written at launch and given to

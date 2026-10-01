@@ -529,10 +529,11 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
     var resolv_conf: ?[]const u8 = null;
     if (d.network) |n| {
         const fp = n.forwardPorts;
+        const at = try bindPrefix(gpa, forwardBind(n, f.exec));
         try l.pasta_args.append(gpa, "-t");
-        try l.pasta_args.append(gpa, if (fp == .auto) "auto" else try portList(gpa, fp.ports, .tcp));
+        try l.pasta_args.append(gpa, try bound(gpa, at, if (fp == .auto) "auto" else try portList(gpa, fp.ports, .tcp)));
         try l.pasta_args.append(gpa, "-u");
-        try l.pasta_args.append(gpa, if (fp == .auto) "none" else try portList(gpa, fp.ports, .udp));
+        try l.pasta_args.append(gpa, try bound(gpa, at, if (fp == .auto) "none" else try portList(gpa, fp.ports, .udp)));
         const host = try hostPorts(gpa, n.hostPorts);
         for ([_][:0]const u8{ "-T", host, "-U", host }) |x| try l.pasta_args.append(gpa, x);
         if (n.hostLoopbackToSession) try l.pasta_args.append(gpa, "--host-lo-to-ns-lo");
@@ -661,15 +662,25 @@ fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const 
         .ok => |e| e,
         .bad => |bad| return switch (bad) {
             .unterminated => msg.refuse("exec: {s} printed a field without the NUL that ends it: every field, the last one too, ends with a NUL", .{x[0]}),
-            .untagged => |field| msg.refuse("exec: {s} printed \"{s}\", where each field is env:NAME=VALUE, arg:WORD, or file:MODE:PATH followed by the file's content", .{ x[0], field }),
+            .untagged => |field| msg.refuse("exec: {s} printed \"{s}\", where each field is env:NAME=VALUE, arg:WORD, file:MODE:PATH followed by the file's content, or forward:BIND", .{ x[0], field }),
             .not_a_variable => |field| msg.refuse("exec: {s} printed \"{s}\", which has no `=`: a variable is env:NAME=VALUE", .{ x[0], field }),
             .bad_mode => |field| msg.refuse("exec: {s} printed \"{s}\", whose mode is not one to four octal digits of at most 0777: a file is file:MODE:PATH, and its mode permission bits alone, never setuid, setgid or sticky", .{ x[0], field }),
             .no_path => |field| msg.refuse("exec: {s} printed \"{s}\", which has no `:` after its mode: a file is file:MODE:PATH", .{ x[0], field }),
             .no_content => |path| msg.refuse("exec: {s} printed the file {s} with no field after it for its content", .{ x[0], path }),
             .no_argv => msg.refuse("exec: {s} printed no arg: field: the payload needs at least its program", .{x[0]}),
             .empty_program => msg.refuse("exec: {s} printed an empty program as the payload's", .{x[0]}),
+            .forward_twice => |field| msg.refuse("exec: {s} printed \"{s}\", a second forward: field", .{ x[0], field }),
         },
     };
+    if (e.forward) |f| {
+        if (d.network == null)
+            return msg.refuse("exec: {s} printed \"forward:{s}\", but the container has no network to forward ports from", .{ x[0], f });
+        const b = splitBind(f);
+        if (decl.bindBad(b.address, b.interface)) |why| return switch (why) {
+            .address => msg.refuse("exec: {s} printed \"forward:{s}\", whose address is not an IPv4 or IPv6 address: a bind is forward:ADDRESS, forward:ADDRESS%INTERFACE, forward:%INTERFACE, or forward: for every address", .{ x[0], f }),
+            .interface => msg.refuse("exec: {s} printed \"forward:{s}\", whose interface is not a name of 1 to {d} letters, digits, '.', '_' or '-'", .{ x[0], f, decl.interface_max }),
+        };
+    }
     var declared: std.StringHashMapUnmanaged(void) = .empty;
     for (d.environment) |w| declared.put(gpa, w.name, {}) catch return oom();
     var seen: std.StringHashMapUnmanaged(void) = .empty;
@@ -749,7 +760,8 @@ fn underHome(home: []const u8, path: []const u8) ?[]const u8 {
 /// the thing named, and a resolver there is as likely a reason to name one
 /// as a database. forwardPorts `auto` is pasta's own: every second it reads
 /// what is listening in the session and publishes the same TCP port on the
-/// host, for as long as it is listening.
+/// host, for as long as it is listening, outside the host's ephemeral
+/// range. Either is bound where `forwardBind` says (`bound`).
 fn portList(gpa: Allocator, ports: []const decl.ForwardPort, protocol: decl.Protocol) Allocator.Error![:0]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (ports) |x| {
@@ -759,6 +771,39 @@ fn portList(gpa: Allocator, ports: []const decl.ForwardPort, protocol: decl.Prot
     }
     if (out.items.len == 0) return "none";
     return out.toOwnedSliceSentinel(gpa, 0);
+}
+
+/// Where the forwarded ports bind: `exec`'s `forward:` when it printed
+/// one, which replaces the declaration's address and interface both, or
+/// the declaration's `forwardAddress` and `forwardInterface`. Each null is
+/// every address, or every interface.
+pub const Bind = struct { address: ?[]const u8 = null, interface: ?[]const u8 = null };
+
+fn forwardBind(n: decl.Network, exec: ?cmd.Exec) Bind {
+    if (exec) |x| if (x.forward) |f| return splitBind(f);
+    return .{ .address = n.forwardAddress, .interface = n.forwardInterface };
+}
+
+/// `forward:`'s value split at its first `%`: ADDRESS, then INTERFACE,
+/// either part empty being none. A `%` with nothing after it is an empty
+/// interface, which `decl.bindBad` refuses.
+pub fn splitBind(f: []const u8) Bind {
+    const pct = std.mem.indexOfScalar(u8, f, '%') orelse
+        return .{ .address = if (f.len > 0) f else null };
+    return .{ .address = if (pct > 0) f[0..pct] else null, .interface = f[pct + 1 ..] };
+}
+
+/// pasta's `ADDRESS%INTERFACE/` before a port class, or "" for every
+/// address on every interface.
+fn bindPrefix(gpa: Allocator, b: Bind) Allocator.Error![]const u8 {
+    if (b.address == null and b.interface == null) return "";
+    return std.fmt.allocPrint(gpa, "{s}{s}{s}/", .{ b.address orelse "", if (b.interface != null) "%" else "", b.interface orelse "" });
+}
+
+/// A port class bound at `at`: "none" binds nothing, so it stays as it is.
+fn bound(gpa: Allocator, at: []const u8, class: [:0]const u8) Allocator.Error![:0]const u8 {
+    if (at.len == 0 or std.mem.eql(u8, class, "none")) return class;
+    return std.mem.concatWithSentinel(gpa, u8, &.{ at, class }, 0);
 }
 
 fn hostPorts(gpa: Allocator, ports: []const u16) Allocator.Error![:0]const u8 {
@@ -913,6 +958,51 @@ test "portList and hostPorts: pasta's port classes, none when empty" {
     try testing.expectEqualStrings("none", try portList(a, &.{}, .tcp));
     try testing.expectEqualStrings("none", try hostPorts(a, &.{}));
     try testing.expectEqualStrings("18123,19999", try hostPorts(a, &.{ 18123, 19999 }));
+}
+
+test "forwardBind: exec's forward: replaces the declaration's address and interface, each part bound as pasta reads it" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const none: decl.Network = .{};
+    const both: decl.Network = .{ .forwardAddress = "192.0.2.1", .forwardInterface = "eth0" };
+    const x = struct {
+        fn exec(f: ?[]const u8) cmd.Exec {
+            return .{ .env = &.{}, .argv = &.{}, .files = &.{}, .forward = f };
+        }
+    };
+    const P = struct {
+        fn of(al: Allocator, n: decl.Network, e: ?cmd.Exec) ![]const u8 {
+            return bindPrefix(al, forwardBind(n, e));
+        }
+    };
+    // Neither: every address, as before.
+    try testing.expectEqualStrings("", try P.of(a, none, null));
+    try testing.expectEqualStrings("", try P.of(a, none, x.exec(null)));
+    // The declaration's: address, interface, both.
+    try testing.expectEqualStrings("127.9.9.9/", try P.of(a, .{ .forwardAddress = "127.9.9.9" }, null));
+    try testing.expectEqualStrings("%lo/", try P.of(a, .{ .forwardInterface = "lo" }, null));
+    try testing.expectEqualStrings("192.0.2.1%eth0/", try P.of(a, both, null));
+    // exec's replaces both, `forward:` alone with every address.
+    try testing.expectEqualStrings("127.1.191.78/", try P.of(a, both, x.exec("127.1.191.78")));
+    try testing.expectEqualStrings("::1%lo/", try P.of(a, none, x.exec("::1%lo")));
+    try testing.expectEqualStrings("%lo/", try P.of(a, both, x.exec("%lo")));
+    try testing.expectEqualStrings("", try P.of(a, both, x.exec("")));
+    // An exec that printed none leaves the declaration's.
+    try testing.expectEqualStrings("192.0.2.1%eth0/", try P.of(a, both, x.exec(null)));
+
+    // The port classes, bound; none stays none.
+    try testing.expectEqualStrings("auto", try bound(a, "", "auto"));
+    try testing.expectEqualStrings("127.9.9.9/auto", try bound(a, "127.9.9.9/", "auto"));
+    try testing.expectEqualStrings("none", try bound(a, "127.9.9.9/", "none"));
+    try testing.expectEqualStrings("::1%lo/8080:80,18200:18200", try bound(a, "::1%lo/", "8080:80,18200:18200"));
+
+    // splitBind: at the first %, an empty part none.
+    try testing.expectEqualDeep(Bind{ .address = "a" }, splitBind("a"));
+    try testing.expectEqualDeep(Bind{ .interface = "i" }, splitBind("%i"));
+    try testing.expectEqualDeep(Bind{ .address = "a", .interface = "" }, splitBind("a%"));
+    try testing.expectEqualDeep(Bind{ .address = "a", .interface = "i%j" }, splitBind("a%i%j"));
+    try testing.expectEqualDeep(Bind{}, splitBind(""));
 }
 
 test "underHome: a component or more below the home, relative to it" {
