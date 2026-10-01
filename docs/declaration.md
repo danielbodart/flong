@@ -111,6 +111,11 @@ tag:
   `%INTERFACE`, or nothing for every address. Refused when the
   container has no `network`, or when either part is not as those
   fields take it.
+- `label:TEXT`, at most once, the name the terminal is told the
+  container has (OSC 666's `vte.container.name`) in place of
+  `container`'s, for this launch: the hostname and everything else
+  keep `container`. 1 to 80 bytes of UTF-8 with no control
+  character; a `;` or `\` is written escaped, as VTE reads them.
 
 The argument list is the entrypoint's whole: the launcher's
 arguments are not appended again. A program without a `/` is looked

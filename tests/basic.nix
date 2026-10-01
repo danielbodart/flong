@@ -659,6 +659,13 @@ in
           home) field "file:0600:/home/alice" "" arg:true ;;
           filetwice) field "file:0600:/home/alice/x" "" "file:0600:/home/alice/x" "" arg:true ;;
           inside) field "file:0600:/home/alice/x/y" "" "file:0600:/home/alice/x" "" arg:true ;;
+          # The name the terminal is told the container has, its `;`
+          # escaped; and none, which leaves the container's.
+          label) field "label:frisket · a;b" arg:true ;;
+          unlabelled) field arg:true ;;
+          labeltwice) field label:a arg:true label:b ;;
+          labelempty) field label: arg:true ;;
+          labelcontrol) field $'label:a\eb' arg:true ;;
           fail) echo "exec refuses this launch" >&2; exit 3 ;;
           slow) sleep 60; field arg:true ;;
         esac
@@ -1001,7 +1008,7 @@ in
           assert out == "/srv/work|rw||a=b|/srv/work|en_US.UTF-8|[a b][$HOME][]\n", out
           # Each refused, 1, saying why under the declaration's name.
           program = machine.succeed("grep -o '/nix/store/[a-z0-9]*-flong-test-exec' /etc/flong/execd.zon | head -1").strip()
-          tags = "where each field is env:NAME=VALUE, arg:WORD, file:MODE:PATH followed by the file's content, or forward:BIND"
+          tags = "where each field is env:NAME=VALUE, arg:WORD, file:MODE:PATH followed by the file's content, forward:BIND, or label:TEXT"
           refusals = [
               ("fixed", "sets HOME, which the launch sets for every session"),
               ("pwd", "sets PWD, which the launch sets for every session"),
@@ -1027,6 +1034,9 @@ in
               ("home", "printed the file /home/alice, which is not under the payload's home, /home/alice"),
               ("filetwice", "printed the file /home/alice/x twice"),
               ("inside", "printed the file /home/alice/x/y inside the file /home/alice/x"),
+              ("labeltwice", 'printed "label:b", a second label: field'),
+              ("labelempty", "printed an empty label: field"),
+              ("labelcontrol", "printed a label: with a control character in it"),
               ("fail", "failed (status 3); the payload does not run"),
           ]
           for mode, said in refusals:
@@ -1043,6 +1053,22 @@ in
           released = machine.succeed("cat /tmp/execd-released").split()
           assert sorted(released) == sorted(machines), (machines, released)
           machine.fail("ls /tmp/execd-staged-*")
+          machine.succeed(NO_SESSIONS)
+
+      @test("exec: label: is the name the terminal is told the container has, and cleared at the end")
+      def _():
+          machine.succeed("rm -f /tmp/execd-* /tmp/label-*")
+          # On a terminal of script's, as a caller's: the mark the launcher
+          # writes, its `;` escaped as VTE reads it, and the clearing mark.
+          machine.succeed(by_caller("script -qec '${execd} label' /tmp/label-out"))
+          out = machine.succeed("cat /tmp/label-out")
+          named = out.find("\x1b]666;vte.container.name=frisket · a\\sb;vte.container.runtime=flong;vte.container.uid=")
+          cleared = out.rfind("\x1b]666;vte.container.\x1b\\")
+          assert 0 <= named < cleared, repr(out)
+          # With no label, the container's own name, as before.
+          machine.succeed(by_caller("script -qec '${execd} unlabelled' /tmp/label-plain"))
+          out = machine.succeed("cat /tmp/label-plain")
+          assert "\x1b]666;vte.container.name=demo;vte.container.runtime=flong;" in out, repr(out)
           machine.succeed(NO_SESSIONS)
 
       @test("exec: files seeded into the home, the payload's, and each walk flong init refuses")

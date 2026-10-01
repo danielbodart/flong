@@ -619,6 +619,7 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
         .pasta_wait = if (d.network) |n| n.forwardPorts == .ports and n.forwardPorts.ports.len > 0 else false,
         .env = l.env.items,
         .hostname = try z.of(gpa, d.container),
+        .label = if (f.exec) |x| if (x.label) |t| try z.of(gpa, t) else null else null,
         .resolv_conf = resolv_conf,
         .files = f.files,
         .trace = if (getenv(p.environ, "FLONG_TRACE")) |t| t.len > 0 else false,
@@ -662,7 +663,7 @@ fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const 
         .ok => |e| e,
         .bad => |bad| return switch (bad) {
             .unterminated => msg.refuse("exec: {s} printed a field without the NUL that ends it: every field, the last one too, ends with a NUL", .{x[0]}),
-            .untagged => |field| msg.refuse("exec: {s} printed \"{s}\", where each field is env:NAME=VALUE, arg:WORD, file:MODE:PATH followed by the file's content, or forward:BIND", .{ x[0], field }),
+            .untagged => |field| msg.refuse("exec: {s} printed \"{s}\", where each field is env:NAME=VALUE, arg:WORD, file:MODE:PATH followed by the file's content, forward:BIND, or label:TEXT", .{ x[0], field }),
             .not_a_variable => |field| msg.refuse("exec: {s} printed \"{s}\", which has no `=`: a variable is env:NAME=VALUE", .{ x[0], field }),
             .bad_mode => |field| msg.refuse("exec: {s} printed \"{s}\", whose mode is not one to four octal digits of at most 0777: a file is file:MODE:PATH, and its mode permission bits alone, never setuid, setgid or sticky", .{ x[0], field }),
             .no_path => |field| msg.refuse("exec: {s} printed \"{s}\", which has no `:` after its mode: a file is file:MODE:PATH", .{ x[0], field }),
@@ -670,7 +671,14 @@ fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const 
             .no_argv => msg.refuse("exec: {s} printed no arg: field: the payload needs at least its program", .{x[0]}),
             .empty_program => msg.refuse("exec: {s} printed an empty program as the payload's", .{x[0]}),
             .forward_twice => |field| msg.refuse("exec: {s} printed \"{s}\", a second forward: field", .{ x[0], field }),
+            .label_twice => |field| msg.refuse("exec: {s} printed \"{s}\", a second label: field", .{ x[0], field }),
         },
+    };
+    if (e.label) |t| if (decl.labelBad(t)) |why| return switch (why) {
+        .empty => msg.refuse("exec: {s} printed an empty label: field: a label names the container to the terminal", .{x[0]}),
+        .too_long => msg.refuse("exec: {s} printed a label: of {d} bytes, more than {d}", .{ x[0], t.len, decl.label_max }),
+        .not_utf8 => msg.refuse("exec: {s} printed a label: that is not UTF-8", .{x[0]}),
+        .control => msg.refuse("exec: {s} printed a label: with a control character in it, which the terminal could read as the end of the mark", .{x[0]}),
     };
     if (e.forward) |f| {
         if (d.network == null)
@@ -984,7 +992,7 @@ test "forwardBind: exec's forward: replaces the declaration's address and interf
     try testing.expectEqualStrings("%lo/", try P.of(a, .{ .forwardInterface = "lo" }, null));
     try testing.expectEqualStrings("192.0.2.1%eth0/", try P.of(a, both, null));
     // exec's replaces both, `forward:` alone with every address.
-    try testing.expectEqualStrings("127.1.191.78/", try P.of(a, both, x.exec("127.1.191.78")));
+    try testing.expectEqualStrings("127.101.170.171/", try P.of(a, both, x.exec("127.101.170.171")));
     try testing.expectEqualStrings("::1%lo/", try P.of(a, none, x.exec("::1%lo")));
     try testing.expectEqualStrings("%lo/", try P.of(a, both, x.exec("%lo")));
     try testing.expectEqualStrings("", try P.of(a, both, x.exec("")));

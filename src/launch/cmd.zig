@@ -242,6 +242,9 @@ pub const Exec = struct {
     /// `forward:`'s value, `ADDRESS%INTERFACE` or either alone, which may
     /// be empty (every address); null when it printed none
     forward: ?[]const u8 = null,
+    /// `label:`'s value, the name the terminal is told the container has;
+    /// null when it printed none
+    label: ?[]const u8 = null,
 };
 
 /// A file `exec` asks for in the payload's home: `file:MODE:PATH`, then
@@ -261,6 +264,7 @@ pub const tag_env = "env:";
 pub const tag_arg = "arg:";
 pub const tag_file = "file:";
 pub const tag_forward = "forward:";
+pub const tag_label = "label:";
 
 /// The most octal digits a file's MODE is written with: `0600` at most,
 /// so no value past 07777 is spelt and none past 0777 taken.
@@ -287,6 +291,8 @@ pub const ExecBad = union(enum) {
     empty_program,
     /// a second `forward:` field, whole
     forward_twice: []const u8,
+    /// a second `label:` field, whole
+    label_twice: []const u8,
 };
 
 /// `exec`'s stdout read as its protocol (decl.zig's `exec`): fields each
@@ -295,9 +301,9 @@ pub const ExecBad = union(enum) {
 /// holds one; `arg:WORD` is the next word of the payload's argv, which may
 /// be empty; `file:MODE:PATH` asks for a file, and the one field after it,
 /// untagged, is the file's content, whatever it holds; `forward:BIND`, at
-/// most once, is where the forwarded ports bind for this launch. Nothing
-/// else is a
-/// field, so an empty argv word is `arg:` and never the empty field. Whether
+/// most once, is where the forwarded ports bind for this launch; and
+/// `label:TEXT`, at most once, the name the terminal is told the container
+/// has. Nothing else is a field, so an empty argv word is `arg:` and never the empty field. Whether
 /// a name or a path is one the payload may be given is the caller's to
 /// judge. The lists are `gpa`'s, their strings slices of `out`'s but for
 /// the argv's, which are copied to carry their NUL.
@@ -309,6 +315,7 @@ pub fn parseExec(gpa: Allocator, out: []const u8) Allocator.Error!union(enum) { 
     var argv: std.ArrayList([:0]const u8) = .empty;
     var files: std.ArrayList(File) = .empty;
     var forward: ?[]const u8 = null;
+    var label: ?[]const u8 = null;
     while (fields.next()) |f| {
         if (std.mem.startsWith(u8, f, tag_env)) {
             const v = f[tag_env.len..];
@@ -326,11 +333,14 @@ pub fn parseExec(gpa: Allocator, out: []const u8) Allocator.Error!union(enum) { 
         } else if (std.mem.startsWith(u8, f, tag_forward)) {
             if (forward != null) return .{ .bad = .{ .forward_twice = f } };
             forward = f[tag_forward.len..];
+        } else if (std.mem.startsWith(u8, f, tag_label)) {
+            if (label != null) return .{ .bad = .{ .label_twice = f } };
+            label = f[tag_label.len..];
         } else return .{ .bad = .{ .untagged = f } };
     }
     if (argv.items.len == 0) return .{ .bad = .no_argv };
     if (argv.items[0].len == 0) return .{ .bad = .empty_program };
-    return .{ .ok = .{ .env = env.items, .argv = argv.items, .files = files.items, .forward = forward } };
+    return .{ .ok = .{ .env = env.items, .argv = argv.items, .files = files.items, .forward = forward, .label = label } };
 }
 
 /// A file's MODE: one to four octal digits, at most 0777, the permission
@@ -431,6 +441,10 @@ test "parseExec: tagged fields, each ended by a NUL, in any order" {
     try testing.expectEqualStrings("127.9.9.9%lo", (try parseExec(a, "forward:127.9.9.9%lo\x00arg:p\x00")).ok.forward.?);
     try testing.expectEqualStrings("", (try parseExec(a, "arg:p\x00forward:\x00")).ok.forward.?);
     try testing.expectEqualStrings("forward:b", (try parseExec(a, "forward:a\x00arg:p\x00forward:b\x00")).bad.forward_twice);
+    // `label:` the same: at most once, as printed, judged by the caller.
+    try testing.expectEqualStrings("frisket \xc2\xb7 trusted", (try parseExec(a, "label:frisket \xc2\xb7 trusted\x00arg:p\x00")).ok.label.?);
+    try testing.expect((try parseExec(a, "arg:p\x00")).ok.label == null);
+    try testing.expectEqualStrings("label:b", (try parseExec(a, "label:a\x00arg:p\x00label:b\x00")).bad.label_twice);
 
     try testing.expectEqual(ExecBad.no_argv, (try parseExec(a, "")).bad);
     try testing.expectEqual(ExecBad.unterminated, (try parseExec(a, "arg:prog")).bad);

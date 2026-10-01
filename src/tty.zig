@@ -164,12 +164,23 @@ fn takeForeground() void {
 /// all (flong-tty.c:119-121).
 pub const unmark = "\x1b]666;vte.container.\x1b\\";
 
-/// The mark `prepare` writes, in `buf`: the container's name, flong, and
-/// the uid inside. snprintf into 256 bytes, so a mark of 256 bytes or more
-/// is not written at all: null (flong-tty.c:157-161). The name is the
-/// spec's, which holds no byte a terminal would read as the sequence's end.
-pub fn mark(buf: *[256]u8, container: []const u8, uid: u32) ?[]const u8 {
-    const text = std.fmt.bufPrint(buf, "\x1b]666;vte.container.name={s};vte.container.runtime=flong;vte.container.uid={d}\x1b\\", .{ container, uid }) catch return null;
+/// The mark `prepare` writes, in `buf`: the name, flong, and the uid
+/// inside. snprintf into 256 bytes, so a mark of 256 bytes or more is not
+/// written at all: null (flong-tty.c:157-161). The name is the container's,
+/// or `exec`'s `label:`, which decl.labelBad has judged: no byte of either
+/// is one a terminal would read as the sequence's end. VTE splits the
+/// sequence's properties at `;` and reads `\\` and `\s` as a backslash and
+/// a semicolon in a value, so those two are written escaped.
+pub fn mark(buf: *[256]u8, name: []const u8, uid: u32) ?[]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    w.writeAll("\x1b]666;vte.container.name=") catch return null;
+    for (name) |c| switch (c) {
+        '\\' => w.writeAll("\\\\") catch return null,
+        ';' => w.writeAll("\\s") catch return null,
+        else => w.writeByte(c) catch return null,
+    };
+    w.print(";vte.container.runtime=flong;vte.container.uid={d}\x1b\\", .{uid}) catch return null;
+    const text = w.buffered();
     return if (text.len < buf.len) text else null;
 }
 
@@ -197,12 +208,13 @@ fn writeTerminal(bytes: []const u8) void {
 /// When stdin is a terminal and the launcher was started in the
 /// background, stops itself with SIGTTOU until the caller's shell brings it
 /// to the foreground, and refuses an orphaned group. When stdout is a
-/// terminal, marks it as showing the container, for `uid` inside (OSC 666,
-/// as toolbox and distrobox do). Then decides the mode: a relay when stdin
+/// terminal, marks it as showing the container, by `label` -- the
+/// container's, or `exec`'s label for it -- for `uid` inside (OSC 666, as
+/// toolbox and distrobox do). Then decides the mode: a relay when stdin
 /// and stdout are both terminals, which opens the pty and gives the slave
 /// the caller's modes and window size. On a failure what was marked stays
 /// for `finish`, as in the C.
-pub fn prepare(t: *Tty, container: []const u8, uid: u32) sig.Error!void {
+pub fn prepare(t: *Tty, label: []const u8, uid: u32) sig.Error!void {
     t.* = .{};
 
     if (Stdio.in.isatty()) {
@@ -218,7 +230,7 @@ pub fn prepare(t: *Tty, container: []const u8, uid: u32) sig.Error!void {
     // to (:151-165).
     if (Stdio.out.isatty()) {
         var buf: [256]u8 = undefined;
-        if (mark(&buf, container, uid)) |text| {
+        if (mark(&buf, label, uid)) |text| {
             writeTerminal(text);
             t.marked = true;
         }
@@ -832,6 +844,15 @@ test "the mark: written whole below 256 bytes, not at all from 256" {
     try testing.expectEqual(@as(usize, 255), mark(&buf, name[0 .. 255 - frame], 1000).?.len);
     try testing.expect(mark(&buf, name[0 .. 256 - frame], 1000) == null);
     try testing.expect(mark(&buf, name[0 .. 300 - frame], 1000) == null);
+}
+
+test "the mark: a label's `\\` and `;` escaped as VTE reads them, its UTF-8 as it is" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("\x1b]666;vte.container.name=frisket \xc2\xb7 trusted;vte.container.runtime=flong;vte.container.uid=1000\x1b\\", mark(&buf, "frisket \xc2\xb7 trusted", 1000).?);
+    try testing.expectEqualStrings("\x1b]666;vte.container.name=a\\sb\\\\c;vte.container.runtime=flong;vte.container.uid=0\x1b\\", mark(&buf, "a;b\\c", 0).?);
+    // The longest label, every byte escaped, with the longest uid, fits.
+    var worst: [80]u8 = @splat(';');
+    try testing.expect(mark(&buf, &worst, std.math.maxInt(u32)) != null);
 }
 
 test "cfmakeraw clears glibc's bits and sets eight bits, VMIN 1, VTIME 0" {

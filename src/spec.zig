@@ -125,6 +125,9 @@ pub const Spec = struct {
     env: ?[]const Var = null,
     /// bwrap's --hostname; null: none
     hostname: ?[:0]const u8 = null,
+    /// the name the terminal is told the container has (tty.mark), `exec`'s
+    /// `label:`, which decl.labelBad has judged; null: `container`
+    label: ?[:0]const u8 = null,
     /// A networked session's /etc/resolv.conf, whole: bwrap binds it there
     /// read-only, mode 0644, from a memfd the spawn writes it into
     /// (launch/bwrap.zig). null: none

@@ -100,6 +100,11 @@ pub const Declaration = struct {
     ///   `%INTERFACE`, or nothing for every address. Refused when the
     ///   container has no `network`, or when either part is not as those
     ///   fields take it.
+    /// - `label:TEXT`, at most once, the name the terminal is told the
+    ///   container has (OSC 666's `vte.container.name`) in place of
+    ///   `container`'s, for this launch: the hostname and everything else
+    ///   keep `container`. 1 to 80 bytes of UTF-8 with no control
+    ///   character; a `;` or `\` is written escaped, as VTE reads them.
     ///
     /// The argument list is the entrypoint's whole: the launcher's
     /// arguments are not appended again. A program without a `/` is looked
@@ -624,6 +629,32 @@ pub fn isInterfaceName(i: []const u8) bool {
         else => return false,
     };
     return true;
+}
+
+/// The longest `label:` `exec` may print, in bytes. Escaped for OSC 666
+/// (tty.mark) it is at most twice that, which with the rest of the mark and
+/// a uid of ten digits stays under the 256 bytes the mark is written in.
+pub const label_max = 80;
+
+/// Why `exec`'s `label:` -- the name the terminal is told the container
+/// has, OSC 666's vte.container.name -- is not one it can be given, or null
+/// when it is. VTE splits the sequence at `;` and reads `\\`, `\s` and
+/// `\n` as escapes in a value, which tty.mark writes for `\\` and `;`; a
+/// control byte (C0, DEL, or a C1 code point, which VTE reads in UTF-8 as
+/// it reads the byte) could end the sequence or start another, so none is
+/// a label's. Anything else UTF-8 is a label.
+pub const LabelBad = enum { empty, too_long, not_utf8, control };
+
+pub fn labelBad(l: []const u8) ?LabelBad {
+    if (l.len == 0) return .empty;
+    if (l.len > label_max) return .too_long;
+    const view = std.unicode.Utf8View.init(l) catch return .not_utf8;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |c| switch (c) {
+        0x00...0x1f, 0x7f...0x9f => return .control,
+        else => {},
+    };
+    return null;
 }
 
 /// `network.forwardPorts`: `.auto`, or `.{ .ports = .{ ... } }`.
@@ -1245,6 +1276,21 @@ test "load refuses a file that never ends, and one that is not there" {
     defer msg.prog = was;
     try testing.expectError(error.Reported, load(a, "/dev/zero"));
     try testing.expectError(error.Reported, load(a, "/nonexistent/flong/agent.zon"));
+}
+
+test "labelBad: any UTF-8 of 1 to 80 bytes with no control character" {
+    try testing.expectEqual(@as(?LabelBad, null), labelBad("agent-trusted"));
+    try testing.expectEqual(@as(?LabelBad, null), labelBad("frisket \xc2\xb7 trusted"));
+    // `;` and `\\` are labels' too: tty.mark escapes them as VTE reads them.
+    try testing.expectEqual(@as(?LabelBad, null), labelBad("a;b\\c"));
+    try testing.expectEqual(@as(?LabelBad, null), labelBad("x" ** label_max));
+    try testing.expectEqual(@as(?LabelBad, LabelBad.empty), labelBad(""));
+    try testing.expectEqual(@as(?LabelBad, LabelBad.too_long), labelBad("x" ** (label_max + 1)));
+    try testing.expectEqual(@as(?LabelBad, LabelBad.not_utf8), labelBad("a\xffb"));
+    // ESC and BEL end the sequence, a newline and DEL are controls, and so
+    // is U+009C, ST, which VTE reads from UTF-8 as it reads the byte.
+    for ([_][]const u8{ "a\x1b\\b", "a\x07b", "a\nb", "a\x00b", "a\x7fb", "a\xc2\x9cb", "a\xc2\x9db" }) |l|
+        try testing.expectEqual(@as(?LabelBad, LabelBad.control), labelBad(l));
 }
 
 test "bindBad: an IP address and an interface name, and nothing pasta would read as more" {

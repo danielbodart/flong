@@ -1285,9 +1285,17 @@ background of your own terminal, and leaks terminal modes the entrypoint set
   reused; ^C is 130 under a pty and in a pipeline. A SIGWINCH before the gate
   has no entrypoint to tell, so the gate copies the window size once more.
 - **OSC 666 `vte.container.*` termprops** tell a VTE terminal it is attached
-  to a container, as toolbox and distrobox do: `name` is the container,
-  `runtime` is `flong` and `uid` is the container user's uid. ST-terminated,
-  since VTE rejects the BEL form, and written only when stdout is a terminal.
+  to a container, as toolbox and distrobox do: `name` is the container, or
+  `exec`'s `label:` for this launch, `runtime` is `flong` and `uid` is the
+  container user's uid. ST-terminated, since VTE rejects the BEL form, and
+  written only when stdout is a terminal. VTE splits the properties at `;`
+  and reads `\\`, `\s` and `\n` in a value as a backslash, a semicolon and
+  a newline, rejecting any other escape and a value over 1024 characters, so
+  the name is written with `\\` and `\s` for those two, and a label with a
+  control character in it -- which could end the sequence, U+009C included,
+  since VTE decodes UTF-8 first -- is refused. exec runs in the wrapper's
+  half, before the terminal is marked, so the label is the first and only
+  name it is told.
   The launcher writes them, so it clears them in its teardown, whatever stage
   the launch reached, and the watchdog clears them after a SIGKILL.
 

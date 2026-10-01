@@ -342,8 +342,10 @@ fn mountHelper(job: mount.Job) noreturn {
 fn run(l: *Launch) sig.Error!u8 {
     const s = l.s;
 
-    // 6. The foreground, relay or passthrough, the pty (:713-714).
-    try tty.prepare(&l.tty, s.container, s.uid);
+    // 6. The foreground, relay or passthrough, the pty (:713-714). The
+    // terminal is told `exec`'s label for the container when it printed
+    // one: exec ran in the wrapper's half, before any of this.
+    try tty.prepare(&l.tty, s.label orelse s.container, s.uid);
 
     // 7. nsdelegate; the holder, found or started (:716-718).
     try cgroup.checkNsdelegate(l.arena);
