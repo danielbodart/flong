@@ -153,6 +153,26 @@ pub fn identityMap(gpa: Allocator, m: []const spec.IdMap) Allocator.Error![:0]co
     return t.toOwnedSliceSentinel(gpa, 0);
 }
 
+/// A networked session's net.ipv4.ping_group_range, as U1's ids: every gid
+/// U1 maps may open an ICMP echo socket (IPv4 and IPv6 alike), so `ping`
+/// works without CAP_NET_RAW, as on a NixOS host, whose range is
+/// "0 2147483647". A new network namespace's is "1 0", no one. The kernel
+/// reads the two ids in the writer's user namespace and refuses an
+/// unmapped one (EINVAL), and keeps the range as one interval of host ids:
+/// so its ends are the inside ids of the lowest and the highest host id U1
+/// maps, and every id a process of the session can have lies between them.
+/// Null for no extent.
+pub fn pingGroups(m: []const spec.IdMap) ?[2]u64 {
+    if (m.len == 0) return null;
+    var lo = m[0];
+    var hi = m[0];
+    for (m[1..]) |e| {
+        if (e.outside < lo.outside) lo = e;
+        if (e.outside + e.count > hi.outside + hi.count) hi = e;
+    }
+    return .{ lo.inside, hi.inside + hi.count - 1 };
+}
+
 // ---- U1 (flong-ns.c:103-220) ----
 
 const U1Child = struct { up: fdt.Fd(.pipe_w), hold: fdt.Fd(.pipe_r) };
@@ -500,4 +520,21 @@ test "identityMap splits along U1's extents" {
     try testing.expectEqualStrings("", try identityMap(arena.allocator(), &.{}));
     const big = [_]spec.IdMap{.{ .inside = std.math.maxInt(u64), .outside = 0, .count = 4294967294 }};
     try testing.expectEqualStrings("18446744073709551615 18446744073709551615 4294967294\n", try identityMap(arena.allocator(), &big));
+}
+
+test "pingGroups spans the lowest host id U1 maps to the highest" {
+    // alice's: her gid 100 onto the host's 100, the rest from 100000.
+    const m = [_]spec.IdMap{
+        .{ .inside = 0, .outside = 100000, .count = 100 },
+        .{ .inside = 100, .outside = 100, .count = 1 },
+        .{ .inside = 101, .outside = 100100, .count = 65436 },
+    };
+    try testing.expectEqual([2]u64{ 100, 65536 }, pingGroups(&m).?);
+    // In any order, and one extent alone.
+    const r = [_]spec.IdMap{ m[2], m[0], m[1] };
+    try testing.expectEqual([2]u64{ 100, 65536 }, pingGroups(&r).?);
+    const sub = [_]spec.IdMap{ m[0], .{ .inside = 100, .outside = 100100, .count = 65436 } };
+    try testing.expectEqual([2]u64{ 0, 65535 }, pingGroups(&sub).?);
+    try testing.expectEqual([2]u64{ 5, 5 }, pingGroups(&.{.{ .inside = 5, .outside = 1000, .count = 1 }}).?);
+    try testing.expectEqual(@as(?[2]u64, null), pingGroups(&.{}));
 }

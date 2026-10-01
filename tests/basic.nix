@@ -300,8 +300,10 @@ in
         # and to add a link and a route of its own. nc, curl, unshare and
         # nsenter are in every NixOS closure already.
         #
-        # dig, to query each of pasta's DNS addresses directly.
-        environment.systemPackages = [ pkgs.nftables pkgs.iproute2 pkgs.dig ];
+        # dig, to query each of pasta's DNS addresses directly. iputils'
+        # ping, plain and not the host's setuid wrapper, which is not
+        # mounted: it opens an ICMP echo socket, or a raw one it may not.
+        environment.systemPackages = [ pkgs.nftables pkgs.iproute2 pkgs.dig pkgs.iputils ];
       };
     };
 
@@ -1337,6 +1339,22 @@ in
           # gives it egress -- which is what a hook's ordering rests on.
           out = machine.succeed(by_caller("${netless} 'tail -n +2 /proc/net/route | wc -l; cat /proc/net/ipv6_route | grep -vc \" lo$\" || true'"))
           assert out.split() == ["0", "0"], out
+
+      @test("a networked session pings without CAP_NET_RAW, and only it", part="a")
+      def _():
+          # The range is U1's gids from the lowest host gid it maps to the
+          # highest: alice's 100 is the host's 100, and 65536 the last of
+          # her 65536 subordinate gids. A session reads them as its own ids.
+          out = machine.succeed(by_caller("${networked} '"
+              "cat /proc/sys/net/ipv4/ping_group_range; "
+              "ping -c1 -W2 127.0.0.1 >/dev/null && echo v4; "
+              "ping -c1 -W2 ::1 >/dev/null && echo v6'"))
+          assert out.splitlines() == ["100\t65536", "v4", "v6"], out
+          # A session with no network keeps a new namespace's range, which
+          # is no one, so its ping finds only the raw socket it may not open.
+          out = machine.succeed(by_caller("${netless} '"
+              "ping -c1 -W2 127.0.0.1 2>&1 || echo refused'"))
+          assert "refused" in out and "Operation not permitted" in out, out
 
       @test("a private session without a network has no resolv.conf", part="a")
       def _():

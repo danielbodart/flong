@@ -84,6 +84,8 @@ directory bind-mounted at the same path as its working directory.
 `postStart` hook runs before the network is attached, so its firewall rules
 apply from the first packet, and the entrypoint has no capability to change
 them.
+`ping` works too: any group in the container may open ICMP echo sockets
+(`net.ipv4.ping_group_range`), as on a NixOS host.
 
 ```nix
 { lib, pkgs, ... }:
@@ -189,7 +191,7 @@ The variables each hook sees are in [docs/reference.md](docs/reference.md#hooks)
 - **The entrypoint runs as your uid on the host.** An escape reaches what you
   can.
 - **No init.** No systemd units, D-Bus or PAM inside.
-- **No setuid.** `sudo` and `ping` do not work inside.
+- **No setuid.** `sudo` does not work inside; `ping` does, with a network.
 - **No Nix.** `nix build` does not work inside.
 - **Writes use RAM.** Set `limits.MemoryMax`.
 - **Not in `machinectl`.** Use `systemctl --user status flong-sessions`.

@@ -75,6 +75,9 @@ pub const Job = struct {
     /// the spec's protect paths plus the state directory and the holder's
     /// cgroup, each made canonical by the launcher before the fork
     protect: []const [:0]const u8,
+    /// a networked session's net.ipv4.ping_group_range, as U1's gids
+    /// (ns.pingGroups); null: left as the kernel made it
+    ping_groups: ?[2]u64 = null,
 };
 
 /// One mount, from its spec to the detached tree attached in the session
@@ -570,6 +573,17 @@ fn byDest(_: void, a: Src, b: Src) bool {
     return std.mem.orderZ(u8, a.m.dest, b.m.dest) == .lt;
 }
 
+/// Writes "LO HI" to the sysctl at `path`, a file of the network namespace
+/// this process is in, whose ids the kernel reads as this process's user
+/// namespace's.
+fn writeSysctl(path: [*:0]const u8, range: [2]u64) Error!void {
+    var b: [48]u8 = undefined;
+    const text = std.fmt.bufPrint(&b, "{d} {d}", .{ range[0], range[1] }) catch unreachable; // proven: two u64s are at most 41 bytes
+    const f = try msg.check(fd.openFile(fd.cwd, path, .{ .ACCMODE = .WRONLY, .NOFOLLOW = true }, 0), "open {s}", .{path});
+    defer f.close();
+    _ = try msg.check(f.writeAll(text), "write {s} to {s}", .{ text, path });
+}
+
 /// Sorts `srcs` by destination, parents first, and refuses the same
 /// destination twice (flong-mount.c:533-541). spec.validate has already made
 /// each destination an absolute path of plain components.
@@ -616,6 +630,15 @@ pub fn run(job: *const Job) Error!void {
     };
     _ = try msg.check(root_ids, "cannot become U1's root", .{});
 
+    // 2b. The session's network namespace, which U1 owns, so U1's root may
+    //     write its sysctls, through the host's /proc: the session's has
+    //     bwrap's read-only /proc/sys. ping_group_range lets the payload's
+    //     `ping` open an ICMP echo socket, CAP_NET_RAW being out of reach.
+    //     A failure is the launch's, as every step here is: a session that
+    //     came up without what its declaration promised would be worse.
+    _ = try msg.check(net.setns(.net), "setns the session's network namespace", .{});
+    if (job.ping_groups) |g| try writeSysctl("/proc/sys/net/ipv4/ping_group_range", g);
+
     // 3. A copy of the host's mount namespace, owned by U1, where the
     //    sources are opened and cloned while bwrap builds the root.
     _ = try msg.check(sys.unshare(sys.CLONE.NEWNS), "unshare a mount namespace", .{});
@@ -647,7 +670,7 @@ pub fn run(job: *const Job) Error!void {
     var w: Walker = .{ .job = job, .root = root, .root_id = try mountId(root) };
     // The kernel refuses a fresh sysfs unless one is fully visible in the
     // mount namespace, so bwrap bound the host's at /.hostsys. A sysfs made
-    // in the session's network namespace shows only the session's
+    // in the session's network namespace (2b) shows only the session's
     // interfaces. cgroup2 is mounted from the payload's own cgroup
     // namespace, which bwrap rooted at the sandbox leaf, so the mount's
     // root is the cgroup /proc/self/cgroup names, "/": Go uses a cgroup2
@@ -655,7 +678,6 @@ pub fn run(job: *const Job) Error!void {
     // Node and Java read the declared limits there. The leaf is the
     // namespace's root, whose files nsdelegate keeps the payload from
     // writing (flong-mount.c:456-482).
-    _ = try msg.check(net.setns(.net), "setns the session's network namespace", .{});
     _ = try msg.check(cgns.setns(.cgroup), "setns the session's cgroup namespace", .{});
     // /sys may be missing from the root; /sys/fs/cgroup is sysfs's own and
     // cannot be made.

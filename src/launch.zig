@@ -450,6 +450,7 @@ fn run(l: *Launch) sig.Error!u8 {
         .gid = s.gid,
         .home = s.home,
         .protect = l.protect,
+        .ping_groups = if (s.network) ns.pingGroups(s.gidmap) else null,
     }, mountHelper);
     // Checkpoint 3: the helper holds the only read end now, so it alone
     // sees the ready byte, or EOF when bwrap dies first (:554-556).

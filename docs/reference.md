@@ -181,8 +181,10 @@ the build log's last line.
 - **No init.** No units, D-Bus, `systemd.user` services, PAM or socket
   activation. `systemd.tmpfiles.rules` apply when the rootfs is built, except
   boot-only rules and paths under `/dev`, `/run` or `/tmp`.
-- **No setuid.** `/run/wrappers` is not mounted; `sudo`, `ping` and
-  `fusermount` do not work.
+- **No setuid.** `/run/wrappers` is not mounted; `sudo` and `fusermount` do
+  not work. `ping` does, with a `network`, through ICMP echo sockets rather
+  than setuid: its `net.ipv4.ping_group_range` spans every gid in the
+  container.
 - **No Nix.** No daemon, and the store database may miss recent paths. See
   [PLAN.md](../PLAN.md) §3.
 - **No symlinks on the way to a mount point.** One ends the launch.
