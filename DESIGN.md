@@ -498,8 +498,8 @@ default.
 judges those rather than re-deriving a directory from `$PWD`. A non-zero exit
 refuses the launch. Without root it cannot refuse the caller anything: the
 caller can run `flong launch` directly with any spec. So it catches a launch
-the declaration does not mean to make (chase's tier check is one),
-and setting it warns, to say so. It runs in a shell of its own, so `exit 0`
+the declaration does not mean to make (chase's tier check is one), as the
+launcher's other checks do, and like them it is not warned about. It runs in a shell of its own, so `exit 0`
 allows the launch rather than ending the launcher, and nothing it assigns
 reaches the launcher.
 

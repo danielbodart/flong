@@ -732,10 +732,6 @@ let
     ++ lib.optional c.seccomp.log ''
       flong.${n} has seccomp.log = true, so it logs rather than refuses calls
       outside its tier: for learning a policy, not for untrusted payloads.
-    ''
-    ++ lib.optional (c.guard != [ ]) ''
-      flong.${n} has a guard, which is a consistency check and not a gate:
-      the caller can run flong launch directly, with any spec.
     '';
 
   # THE HOLDER: one user unit per caller, whose cgroup every session of

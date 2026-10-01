@@ -263,8 +263,8 @@ capability over a session's mounts and namespaces from the host, and owns its
 prepared root and its records, as they own their `~/.bashrc`. So the session
 grants nothing the caller lacks, and `guard` is a check the declaration makes
 on its own launch, not a gate: the caller can run `flong launch` directly with
-any declaration file. Setting `guard` warns, to say so. The boundary is
-between the payload and the caller.
+any declaration file, as with every check the launcher makes. The boundary
+is between the payload and the caller.
 
 The launcher exits with the payload's status, or 128+n when a signal killed
 the payload. It exits 125 when the payload never ran: `flong launch` refused
@@ -300,7 +300,7 @@ usage of every subcommand.
 | `exec` | `null` | In place of `command`: a command run on the host after `seccompPolicy` that prints the payload as NUL-ended fields, each tagged: `env:NAME=VALUE` for a variable, `arg:WORD` for each word of the argument list (an empty one is `arg:`), and `file:MODE:PATH` then the content, for a file flong init writes into the home as `user` before the payload starts, replacing one there. A name the session already sets (`PWD` among them), one tini reads (`TINI_*`), a MODE past `0777`, a PATH outside the home, twice or inside another's, or output of any other shape, refuses the launch; a symlink or a mount on a file's path ends it. |
 | `workspace` | `null` | A command printing the directory to bind-mount at its own path and `cd` into: `PATH`, read-write, or `PATH:ro`. `null` is the directory the launcher starts in. |
 | `binds` | `[ ]` | Commands printing more directories to bind-mount, each at its own path, one per line: `PATH`, read-only, or `PATH:rw`. Their outputs are concatenated. |
-| `guard` | `[ ]` | Commands checking that the launch is one the declaration means to make. Each must exit 0; the first that does not refuses. A check, not a gate; setting it warns. |
+| `guard` | `[ ]` | Commands checking that the launch is one the declaration means to make. Each must exit 0; the first that does not refuses. A check, not a gate. |
 | `seccompPolicy` | `[ ]` | Commands printing a project's `allow NAME...` and `deny NAME...` lines for the syscall filter, concatenated, compiled at launch and cached by content. Non-zero exit refuses. Needs a `seccomp.tier`. |
 | `postStart` | `[ ]` | Commands configuring the session once its namespaces exist, before `network` is attached and before the payload starts. The first non-zero exit ends the session. |
 | `postStop` | `[ ]` | Commands releasing what `postStart` made, after the session ends, with `$machine` and no arguments. |

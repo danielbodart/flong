@@ -102,9 +102,11 @@ let
         || throw "assertions: a seccomp name with a blank was accepted")
       (untyped { flong.box.seccomp.errno = "EINVAL"; } [ "flong" "box" "seccomp" "errno" ]
         || throw "assertions: an errno outside EPERM, EACCES and ENOSYS was accepted")
-      (lib.any (lib.hasInfix "consistency check and not a gate")
+      # A guard is a consistency check as the launcher's other checks are,
+      # and like them it is not warned about.
+      (! lib.any (lib.hasInfix "guard")
         (flongWarnings { flong.box.guard = [ [ "true" ] ]; })
-        || throw "assertions: a guard is not warned about")
+        || throw "assertions: a guard is warned about")
       (refused "a container name beginning with a dot"
         {
           containers.".box" = { privateNetwork = true; config.system.stateVersion = "24.05"; };
