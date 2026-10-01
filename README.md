@@ -2,8 +2,9 @@
 
 # flong
 
-Ephemeral rootless containers for [NixOS](https://nixos.org/) that start in
-about 10 ms, run one process as you, and leave nothing behind.
+Ephemeral rootless containers for [NixOS](https://nixos.org/) that start
+**10× faster than Docker**, run with **less privilege by default**, and leave
+nothing behind.
 
 > A *flong* is the papier-mâché mould a printer takes from composed type. It is
 > made once and casts many identical plates, each used once and discarded.
