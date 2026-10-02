@@ -116,10 +116,10 @@ let
     # a newline, and the policy without its trailing newline (quirk 36).
     #
     # Written for flong's own lines, which the bash never read, on
-    # 2026-10-02: project-log-*, project-nolog-*, project-base-* and
-    # project-declared-deny-* (a project's `log`, `nolog` and `base none`
-    # lines, and a declaration's deny binding them, over
-    # strict-deny-ptrace.names, the strict names and two `-X` lines), each
+    # 2026-10-02: project-log-*, project-nolog-* and project-base-* (a
+    # project's `log`, `nolog` and `base none` lines), and
+    # project-over-declared-deny (a project's `allow` and `log` putting back
+    # what a declaration's deny took, over expand-strict-deny's names), each
     # policy checked when written against one built from `flong-seccomp
     # expand` and its filter against compiling that policy directly; and
     # resolve-*, `flong-seccomp resolve ARCH NR`. A refusal of a line names

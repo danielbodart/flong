@@ -14,13 +14,13 @@
 //!   - `base none`: the project's lines apply to no names in place of
 //!     NAMES' own, so `allow` alone says what is allowed.
 //!
-//! NAMES is the declaration's names, one a line, and then its `seccomp.deny`
-//! as `-X` lines (seccomp/policy.nix's projectNamesFor). Those subtractions
-//! bind every project line: no `allow` adds what they take, no `log` logs
-//! it, and `base none` keeps them; a project `allow` they take is said on
-//! stderr, the launch going on. `base none` with nothing allowed is
-//! refused. With none of the three lines, the policy
-//! rendered, its key and its filter are the bash's, byte for byte.
+//! NAMES is the declaration's names, one a line, its `seccomp.deny`
+//! already taken out (seccomp/policy.nix's namesFor). The project's lines
+//! override them, deny included: an `allow` puts back a call the
+//! declaration denied, and a `log` logs one, since a project's policy is
+//! the closer fit for the launch. `base none` with nothing allowed is
+//! refused. With none of the three lines, the policy rendered, its key and
+//! its filter are the bash's, byte for byte.
 //!
 //! Step by step as the bash, each step citing its lines:
 //!
@@ -29,7 +29,7 @@
 //!   2. the expansion of NAMES and those entries, the project's denies
 //!      winning; an unknown group or name prints the expander's unprefixed
 //!      line, exit 1 (:173-176); then the logged, `log`'s entries less
-//!      `nolog`'s and NAMES' subtractions, expanded in the same way;
+//!      `nolog`'s, expanded in the same way;
 //!   3. the rendered policy, NAMES empty giving one empty name, `allow `
 //!      (quirk 35), and a logged name refused rendered `log`; a DENY render
 //!      refuses is render's message, exit 2;
@@ -153,44 +153,6 @@ fn parse(gpa: std.mem.Allocator, input: []const u8, out: *Lines) msg.Error!void 
     }
 }
 
-/// The records of a NAMES `text` whose first field starts with "-", as
-/// expand.zig reads a record: the declaration's `seccomp.deny`.
-fn subtractions(gpa: std.mem.Allocator, text: []const u8) msg.Error![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var records: expand.Records = .{ .rest = text };
-    while (records.next()) |r| {
-        const f = std.mem.trimLeft(u8, r, " \t");
-        if (f.len == 0 or f[0] != '-') continue;
-        out.appendSlice(gpa, r) catch return nomem();
-        out.append(gpa, '\n') catch return nomem();
-    }
-    return out.items;
-}
-
-/// Says which calls a project's `allow`s name that the declaration's deny
-/// takes, so an `allow` the declaration overrides is not left refused
-/// quietly: a project that put back a denied call before the deny bound
-/// it launches as it did, with that call refused. A `log` naming one is
-/// not said: `log @known` names every one.
-fn sayBound(gpa: std.mem.Allocator, dump: *const expand.Dump, spec: []const u8, declared_denies: []const u8) msg.Error!void {
-    if (declared_denies.len == 0) return;
-    var a: expand.Expansion = .init(gpa, dump);
-    try a.lines(spec);
-    const allowed = try a.names();
-    if (allowed.len == 0) return;
-    try a.lines(declared_denies);
-    var kept: std.StringHashMapUnmanaged(void) = .empty;
-    for (try a.names()) |n| kept.put(gpa, n, {}) catch return nomem();
-    var bound: std.ArrayList(u8) = .empty;
-    for (allowed) |n| {
-        if (kept.contains(n)) continue;
-        bound.append(gpa, ' ') catch return nomem();
-        bound.appendSlice(gpa, n) catch return nomem();
-    }
-    if (bound.items.len > 0)
-        msg.say("seccomp.deny refuses what the project allows:{s}", .{bound.items});
-}
-
 /// `${dir%/*}`: DIR up to its last "/", or DIR when it has none.
 fn parentOf(dir: []const u8) []const u8 {
     const slash = std.mem.lastIndexOfScalar(u8, dir, '/') orelse return dir;
@@ -278,10 +240,8 @@ fn run(gpa: std.mem.Allocator, dump_path: [*:0]const u8, names_path: [*:0]const 
     // warning. DUMP was built into the bash, so it has no awk precedent.
     const dump = expand.Dump.parse(gpa, (try expand.readOperand(gpa, dump_path)) orelse "") catch return nomem();
     const names_text = (try expand.readOperand(gpa, names_path)) orelse "";
-    // The declaration's own denies, which bind the project's lines.
-    const declared_denies = try subtractions(gpa, names_text);
     var e: expand.Expansion = .init(gpa, &dump);
-    try e.lines(if (lines.base_none) declared_denies else names_text);
+    if (!lines.base_none) try e.lines(names_text);
     try e.lines(lines.spec.items);
     const list = try e.names();
     // `base none` with nothing allowed would render `allow ` and fail in
@@ -289,13 +249,11 @@ fn run(gpa: std.mem.Allocator, dump_path: [*:0]const u8, names_path: [*:0]const 
     // the bash's own case, NAMES empty, keeps).
     if (lines.base_none and list.len == 0)
         return msg.refuse("base none allows nothing: name at least one call with allow", .{});
-    try sayBound(gpa, &dump, lines.spec.items, declared_denies);
-    // The logged: `log` less `nolog` and the declaration's denies; render
-    // takes the allowed from them, and what is not in @known.
+    // The logged: `log` less `nolog`; render takes the allowed from them,
+    // and what is not in @known.
     const logged: []const []const u8 = if (lines.logged.items.len == 0) &.{} else blk: {
         var l: expand.Expansion = .init(gpa, &dump);
         try l.lines(lines.logged.items);
-        try l.lines(declared_denies);
         break :blk try l.names();
     };
 
@@ -410,14 +368,6 @@ test "log, nolog and base none" {
     try testing.expectEqualStrings("read\n", lines.spec.items);
     try testing.expectEqualStrings("@known\n-ptrace\n-kill\n", lines.logged.items);
     try testing.expect(lines.base_none);
-}
-
-test "subtractions are NAMES' minus lines" {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    try testing.expectEqualStrings("", try subtractions(a, "read\nwrite\n"));
-    try testing.expectEqualStrings("-ptrace\n \t-@swap\n", try subtractions(a, "read\n-ptrace\nwrite\n \t-@swap"));
 }
 
 test "each refusal of a policy line" {

@@ -1,3 +1,0 @@
-drwx------ cache
-drwx------ cache/seccomp
--rw------- cache/seccomp/@KEY@.bpf

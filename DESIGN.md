@@ -1377,7 +1377,8 @@ Loosenings, combinable:
   sandbox, `codex sandbox` and a nested bwrap need all three together, and ran
   with 16.
 - **`allow`** adds names or groups; **`deny`** removes them, after everything
-  else, which it overrides, a project's policy included.
+  else in the declaration, which it overrides. A project's policy comes after
+  the declaration and can put back what `deny` removed.
 - **`log`** allows the calls `errno` would refuse and has the kernel log each
   (audit `type=1326`), to learn a policy. It warns. `flong-seccomp resolve
   ARCH NR` names a record's `arch=` and `syscall=` by libseccomp's tables, an
@@ -1398,21 +1399,17 @@ removed). chase evaluates a project's envelope there, sends any loosening
 through its approver, and prints the result. The fixed filters stay, the tty
 filter included.
 
-**The declaration's `deny` binds a project.** `flong-seccomp project` is given
-the declaration's names expanded, which cannot say what `deny` took out, so
-its NAMES file is the names and then each `deny` entry as a `-X` line
-(policy.nix's `projectNamesFor`; with no `deny`, the names file itself). The
-expansion subtracts those whatever order its lines come in, so no project
-`allow` puts back what `deny` took and no `log` logs it: `deny` overrides a
-project as it overrides the profile, the loosenings and `allow`. The
-declaration is Nix's, and its last word stands over a policy computed at
-launch from a checkout. Until 2026-10-02 a project's `allow` put back a call
-`deny` took, the names file having no word of it; such an `allow` is now said
-on stderr (`seccomp.deny refuses what the project allows: X…`) and the launch
-goes on with the call refused. A `log` naming one is not said, since `log
-@known` names every one. The binding is against the project's lines, not
-`seccomp.log`: under it every call of `@known` the filter refuses is rendered
-`log`, `deny`'s included, so a declaration that sets it has no hard `deny`.
+**A project's lines override the declaration, `deny` included.** This is by
+design. A declaration is the ready-made fit, written once in Nix for every
+project it launches; a project's policy is the tailored one, computed at
+launch for this checkout, and where the two disagree the tailored one wins.
+`flong-seccomp project` is given the declaration's names already expanded,
+`deny` taken out (policy.nix's `namesFor`), and applies the project's lines to
+them, so a project `allow` puts back a call the declaration's `deny` removed,
+and a `log` logs one, as it would any call the declaration leaves out. A
+`seccomp.deny` therefore cannot keep a call refused against a project; a
+declaration that must leaves `seccompPolicy` empty, or has its commands refuse
+a policy that would let that call through.
 
 **Learning a policy at launch.** Three more lines make a filter that learns.
 `log X…` renders each call of `@known` it names that the filter would refuse
@@ -1420,10 +1417,10 @@ as `log` in place of `errno` (allowed, and audited as `type=1326`), and
 `nolog X…` takes names back out of it, whatever order the two come in;
 neither touches what is allowed. A project's own `deny` takes a call from
 what is allowed but not from what is logged, so a `log` naming it still lets
-it through unless `nolog` names it too; a call the declaration's `deny` took
-is neither allowed nor logged, but under `seccomp.log`. `base none` applies the project's lines to no
-names in place of the declaration's, so its `allow`s alone are what is
-allowed, and refuses a policy whose `allow`s leave nothing. Learning against a profile is `log @known`, beside the project's own
+it through unless `nolog` names it too. `base none` applies the project's
+lines to no names in place of the declaration's, so its `allow`s alone are
+what is allowed, and refuses a policy whose `allow`s leave nothing. Learning
+against a profile is `log @known`, beside the project's own
 `allow`s and `deny`s: whatever the launch's filter would have refused is
 allowed and logged instead. Learning from nothing is
 

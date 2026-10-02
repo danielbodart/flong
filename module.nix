@@ -411,7 +411,7 @@ let
         ++ lib.optional (! s.nestedSandbox) seccomp.fixed.nsmask);
       project = if c.seccompPolicy == [ ] || s.tier == null then null else {
         dump = "${seccomp.dump}";
-        names = "${seccomp.projectNamesFor s}";
+        names = "${seccomp.namesFor s}";
         deny = seccomp.deny s;
       };
     };

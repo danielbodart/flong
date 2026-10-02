@@ -58,20 +58,6 @@ let
         (writeText "flong-seccomp-extra" (lib.concatLines extras))
       ];
 
-  # What a project's policy applies to (`flong-seccomp project`'s NAMES): a
-  # declaration's names, then its deny entries as `-X` lines, so that they
-  # bind the project's lines as they bound the declaration's own -- no
-  # `allow` adds back what they took, and no `log` logs it. With no deny
-  # entries, the names themselves.
-  projectNamesFor =
-    s:
-    if s.deny == [ ] then
-      namesFor s
-    else
-      runCommand "flong-seccomp-project-names" { } ''
-        cat ${namesFor s} ${writeText "flong-seccomp-deny" (lib.concatMapStrings (x: "-${x}\n") s.deny)} > $out
-      '';
-
   # What a @known call outside the names gets: an errno, or `log`.
   deny =
     s:
@@ -112,7 +98,7 @@ let
 
   # A project's policy is compiled at launch by `flong-seccomp project DUMP
   # NAMES DENY DIR < POLICY` (src/seccomp/project.zig), which module.nix
-  # hands the launch with this dump, projectNamesFor's names and its deny.
+  # hands the launch with this dump, the declaration's names and its deny.
 in
 {
   inherit
@@ -120,7 +106,6 @@ in
     expand
     tierNames
     namesFor
-    projectNamesFor
     deny
     filterFor
     fixed

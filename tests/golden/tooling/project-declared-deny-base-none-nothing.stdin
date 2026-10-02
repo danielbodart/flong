@@ -1,3 +1,0 @@
-base none
-allow ptrace swapoff
-log @known

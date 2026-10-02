@@ -376,8 +376,8 @@ in
           seccompPolicy = hook "policy" seccompPolicy;
           postStart = hook "poststart" ''echo "$machine" > /tmp/project-poststart'';
         };
-        # debug's ptrace taken back by deny, which a project's lines cannot
-        # undo.
+        # debug's ptrace taken back by deny, which a project's lines can
+        # put back.
         denied = base // {
           seccomp = { debug = true; deny = [ "ptrace" ]; };
           seccompPolicy = hook "policy" seccompPolicy;
@@ -1264,19 +1264,17 @@ in
         names = logged(since)
         assert names and not names & {"read", "write", "close"}, names
 
-    @test("a declaration's deny binds a project's allow and log", part="b")
+    @test("a project's allow overrides a declaration's deny", part="b")
     def _():
-        since = machine.succeed("sleep 1; date +%s").strip()
-        out = machine.succeed(as_user(
-            "FLONG_TEST_POLICY=$'allow ptrace\\nlog @known' denied 'strace true 2>&1; echo rc=$?'"))
+        # The declaration alone refuses ptrace.
+        out = machine.succeed(as_user("denied 'strace true 2>&1; echo rc=$?'"))
         assert "Operation not permitted" in out and out.split()[-1] != "rc=0", out
-        # Nor is it logged, as far as the rate limit lets this see: ptrace
-        # kept its errno.
-        machine.fail(
-            f"journalctl -k --since @{since} -o cat --no-pager | grep -F type=1326 | grep -q 'syscall=101 '")
-        # The allow it overrides is said, and the launch goes on.
+        # A project's allow puts it back, by design, and says nothing.
+        out = machine.succeed(as_user(
+            "FLONG_TEST_POLICY='allow ptrace' denied 'strace true 2>&1; echo rc=$?'"))
+        assert "+++ exited with 0 +++" in out and out.split()[-1] == "rc=0", out
         out = machine.succeed(as_user("FLONG_TEST_POLICY='allow ptrace' denied 'echo payload-ran' 2>&1"))
-        assert out == "flong-seccomp-project: seccomp.deny refuses what the project allows: ptrace\npayload-ran\n", out
+        assert out == "payload-ran\n", out
 
     @test("a launch with a project policy writes nothing to stderr", part="b")
     def _():

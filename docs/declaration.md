@@ -667,8 +667,8 @@ Syscall names or `@groups` added to the profile.
 - ordered
 
 Syscall names or `@groups` removed, after the profile, the
-loosenings and `allow`, which it overrides, and after a
-project's `seccompPolicy` lines, which it binds.
+loosenings and `allow`, which it overrides. A project's
+`seccompPolicy` lines come after it and override it in turn.
 
 ### `seccomp.errno`
 
@@ -727,16 +727,18 @@ per launch rather than per checkout.
 
 The project's lines apply to the declaration's allow-list: its
 allows are added and then its denies removed, whatever order
-they come in. `seccomp.deny` binds them too: no project `allow`
-or `log` puts back a call it removes, and a project `allow` it
-overrides is said on stderr as the launch goes on (until
-2026-10-02 such an `allow` put the call back). So `log @known` logs every call of `@known` the filter
-would otherwise refuse but those, and `base none` with `allow`
+they come in. They override the declaration, `seccomp.deny`
+included, by design: the declaration is the general fit, the
+project's policy the one made for this launch, so a project
+`allow` puts back a call `seccomp.deny` removed, and a `log`
+logs one. A declaration that must keep a call refused leaves
+`seccompPolicy` empty, or has its commands refuse a policy that
+lets the call through. `log @known` logs every call of `@known`
+the filter would otherwise refuse, and `base none` with `allow`
 of a few calls and `log @known` logs every other. Calls outside
 `@known` stay ENOSYS, and the fixed filters stay, the tty filter
 included. Under `seccomp.log` every refused call of `@known` is
-logged, `seccomp.deny`'s included, so neither `nolog` nor the
-binding keeps a call refused.
+logged already, and `nolog` changes nothing.
 
 The result is compiled at launch and cached under
 `$XDG_RUNTIME_DIR/flong/seccomp` by the hash of what is
@@ -963,11 +965,11 @@ project's lines mean.
 - required
 - computed
 
-The file of the declaration's own names, one a line -- its
-profile, its loosenings and `allow`, less `deny` -- then each of
-`deny`'s entries as a `-X` line, which a project's lines apply
-to. The `-X` lines bind them: no `allow` adds back and no `log`
-logs what they take, and `base none` keeps them.
+The file of the declaration's own names, expanded, one a line:
+its profile, its loosenings and `allow`, with `deny`'s entries
+already taken out. A project's lines apply to them and override
+them, `deny` included, by design: an `allow` puts back a call
+`deny` took out, and a `log` logs one.
 
 ### `seccompProject.deny`
 

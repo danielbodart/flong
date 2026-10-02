@@ -1,5 +1,0 @@
-project
-@DUMP@
-@GOLDEN@/tooling/strict-deny-ptrace.names
-1
-cache/seccomp

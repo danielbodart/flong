@@ -1,0 +1,2 @@
+allow read socket
+log connect

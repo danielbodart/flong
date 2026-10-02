@@ -1,14 +1,10 @@
 default 38
 allow _llseek
 allow _newselect
-allow accept
-allow accept4
 allow access
-allow adjtimex
 allow alarm
 allow arch_prctl
 allow arm_fadvise64_64
-allow bind
 allow brk
 allow cacheflush
 allow cachestat
@@ -18,21 +14,16 @@ allow chdir
 allow chmod
 allow chown
 allow chown32
-allow clock_adjtime
-allow clock_adjtime64
 allow clock_getres
 allow clock_getres_time64
 allow clock_gettime
 allow clock_gettime64
 allow clock_nanosleep
 allow clock_nanosleep_time64
-allow clock_settime
-allow clock_settime64
 allow clone
 allow clone3
 allow close
 allow close_range
-allow connect
 allow copy_file_range
 allow creat
 allow dup
@@ -104,7 +95,6 @@ allow getgid32
 allow getgroups
 allow getgroups32
 allow getitimer
-allow getpeername
 allow getpgid
 allow getpgrp
 allow getpid
@@ -118,8 +108,6 @@ allow getresuid32
 allow getrlimit
 allow getrusage
 allow getsid
-allow getsockname
-allow getsockopt
 allow gettid
 allow gettimeofday
 allow getuid
@@ -151,7 +139,6 @@ allow lchown32
 allow lgetxattr
 allow link
 allow linkat
-allow listen
 allow listmount
 allow listxattr
 allow listxattrat
@@ -235,11 +222,6 @@ allow readlink
 allow readlinkat
 allow readv
 allow reboot
-allow recv
-allow recvfrom
-allow recvmmsg
-allow recvmmsg_time64
-allow recvmsg
 allow remap_file_pages
 allow removexattr
 allow removexattrat
@@ -280,12 +262,8 @@ allow semget
 allow semop
 allow semtimedop
 allow semtimedop_time64
-allow send
 allow sendfile
 allow sendfile64
-allow sendmmsg
-allow sendmsg
-allow sendto
 allow set_mempolicy
 allow set_mempolicy_home_node
 allow set_robust_list
@@ -316,8 +294,6 @@ allow setreuid
 allow setreuid32
 allow setrlimit
 allow setsid
-allow setsockopt
-allow settimeofday
 allow setuid
 allow setuid32
 allow setxattr
@@ -326,7 +302,6 @@ allow shmat
 allow shmctl
 allow shmdt
 allow shmget
-allow shutdown
 allow sigaction
 allow sigaltstack
 allow signal
@@ -337,8 +312,6 @@ allow sigprocmask
 allow sigreturn
 allow sigsuspend
 allow socket
-allow socketcall
-allow socketpair
 allow splice
 allow stat
 allow stat64
@@ -393,8 +366,11 @@ allow waitpid
 allow write
 allow writev
 errno 1 _sysctl
+errno 1 accept
+errno 1 accept4
 errno 1 acct
 errno 1 add_key
+errno 1 adjtimex
 errno 1 afs_syscall
 errno 1 arc_gettls
 errno 1 arc_settls
@@ -402,11 +378,17 @@ errno 1 arc_usr_cmpxchg
 errno 1 atomic_barrier
 errno 1 atomic_cmpxchg_32
 errno 1 bdflush
+errno 1 bind
 errno 1 bpf
 errno 1 break
 errno 1 breakpoint
 errno 1 cachectl
 errno 1 chroot
+errno 1 clock_adjtime
+errno 1 clock_adjtime64
+errno 1 clock_settime
+errno 1 clock_settime64
+log connect
 errno 1 create_module
 errno 1 delete_module
 errno 1 dipc
@@ -429,7 +411,10 @@ errno 1 getdomainname
 errno 1 getdtablesize
 errno 1 gethostname
 errno 1 getpagesize
+errno 1 getpeername
 errno 1 getpmsg
+errno 1 getsockname
+errno 1 getsockopt
 errno 1 getxgid
 errno 1 getxpid
 errno 1 getxuid
@@ -445,6 +430,7 @@ errno 1 kern_features
 errno 1 kexec_file_load
 errno 1 kexec_load
 errno 1 keyctl
+errno 1 listen
 errno 1 listns
 errno 1 lock
 errno 1 lookup_dcookie
@@ -518,6 +504,11 @@ errno 1 putpmsg
 errno 1 query_module
 errno 1 quotactl
 errno 1 quotactl_fd
+errno 1 recv
+errno 1 recvfrom
+errno 1 recvmmsg
+errno 1 recvmmsg_time64
+errno 1 recvmsg
 errno 1 request_key
 errno 1 rseq_slice_yield
 errno 1 rtas
@@ -529,9 +520,18 @@ errno 1 s390_sthyi
 errno 1 sched_get_affinity
 errno 1 sched_set_affinity
 errno 1 security
+errno 1 send
+errno 1 sendmmsg
+errno 1 sendmsg
+errno 1 sendto
 errno 1 sethae
 errno 1 setpgrp
+errno 1 setsockopt
+errno 1 settimeofday
 errno 1 sgetmask
+errno 1 shutdown
+errno 1 socketcall
+errno 1 socketpair
 errno 1 spu_create
 errno 1 spu_run
 errno 1 ssetmask

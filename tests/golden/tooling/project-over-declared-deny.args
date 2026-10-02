@@ -1,0 +1,5 @@
+project
+@DUMP@
+@GOLDEN@/tooling/expand-strict-deny.stdout
+1
+cache/seccomp
