@@ -1274,6 +1274,9 @@ in
         # kept its errno.
         machine.fail(
             f"journalctl -k --since @{since} -o cat --no-pager | grep -F type=1326 | grep -q 'syscall=101 '")
+        # The allow it overrides is said, and the launch goes on.
+        out = machine.succeed(as_user("FLONG_TEST_POLICY='allow ptrace' denied 'echo payload-ran' 2>&1"))
+        assert out == "flong-seccomp-project: seccomp.deny refuses what the project allows: ptrace\npayload-ran\n", out
 
     @test("a launch with a project policy writes nothing to stderr", part="b")
     def _():

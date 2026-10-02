@@ -1406,16 +1406,24 @@ expansion subtracts those whatever order its lines come in, so no project
 `allow` puts back what `deny` took and no `log` logs it: `deny` overrides a
 project as it overrides the profile, the loosenings and `allow`. The
 declaration is Nix's, and its last word stands over a policy computed at
-launch from a checkout.
+launch from a checkout. Until 2026-10-02 a project's `allow` put back a call
+`deny` took, the names file having no word of it; such an `allow` is now said
+on stderr (`seccomp.deny refuses what the project allows: X…`) and the launch
+goes on with the call refused. A `log` naming one is not said, since `log
+@known` names every one. The binding is against the project's lines, not
+`seccomp.log`: under it every call of `@known` the filter refuses is rendered
+`log`, `deny`'s included, so a declaration that sets it has no hard `deny`.
 
 **Learning a policy at launch.** Three more lines make a filter that learns.
 `log X…` renders each call of `@known` it names that the filter would refuse
 as `log` in place of `errno` (allowed, and audited as `type=1326`), and
 `nolog X…` takes names back out of it, whatever order the two come in;
-neither touches what is allowed, and a call the declaration's `deny` took is
-neither allowed nor logged. `base none` applies the project's lines to no
+neither touches what is allowed. A project's own `deny` takes a call from
+what is allowed but not from what is logged, so a `log` naming it still lets
+it through unless `nolog` names it too; a call the declaration's `deny` took
+is neither allowed nor logged, but under `seccomp.log`. `base none` applies the project's lines to no
 names in place of the declaration's, so its `allow`s alone are what is
-allowed. Learning against a profile is `log @known`, beside the project's own
+allowed, and refuses a policy whose `allow`s leave nothing. Learning against a profile is `log @known`, beside the project's own
 `allow`s and `deny`s: whatever the launch's filter would have refused is
 allowed and logged instead. Learning from nothing is
 
@@ -1428,8 +1436,14 @@ log @known
 where the `allow` is a hot set, allowed silently so that the audit log carries
 the rest: every other call of `@known` is logged, so what the entrypoint used
 is seen whole, narrowing as well as widening. A call outside `@known` stays
-ENOSYS and unlogged, the fixed filters stay hard, and the kernel's audit rate
-limit can drop records in a burst, so a rare call can be missed. Under
+ENOSYS and unlogged, and the fixed filters stay hard. Where the records are
+read matters: with no auditd the kernel prints them to its log under printk's
+rate limit, which drops most of a burst (`journalctl -k` sees what is left),
+whereas journald's audit socket (`systemd-journald-audit.socket`,
+`_TRANSPORT=audit`) and auditd take them from the audit netlink, which printk's
+limit does not touch; `audit_rate_limit` is 0, unlimited, by default. The
+audit backlog (`audit_backlog_limit`) can still overflow in a large enough
+burst, so a rare call can be missed. Under
 `seccomp.log` everything refused is logged already. Without the three lines,
 the policy is the text `render` prints for the same names, byte for byte, as
 is its filter (`tests/golden/tooling/`).

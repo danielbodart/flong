@@ -17,7 +17,9 @@
 //! NAMES is the declaration's names, one a line, and then its `seccomp.deny`
 //! as `-X` lines (seccomp/policy.nix's projectNamesFor). Those subtractions
 //! bind every project line: no `allow` adds what they take, no `log` logs
-//! it, and `base none` keeps them. With none of the three lines, the policy
+//! it, and `base none` keeps them; a project `allow` they take is said on
+//! stderr, the launch going on. `base none` with nothing allowed is
+//! refused. With none of the three lines, the policy
 //! rendered, its key and its filter are the bash's, byte for byte.
 //!
 //! Step by step as the bash, each step citing its lines:
@@ -165,6 +167,30 @@ fn subtractions(gpa: std.mem.Allocator, text: []const u8) msg.Error![]const u8 {
     return out.items;
 }
 
+/// Says which calls a project's `allow`s name that the declaration's deny
+/// takes, so an `allow` the declaration overrides is not left refused
+/// quietly: a project that put back a denied call before the deny bound
+/// it launches as it did, with that call refused. A `log` naming one is
+/// not said: `log @known` names every one.
+fn sayBound(gpa: std.mem.Allocator, dump: *const expand.Dump, spec: []const u8, declared_denies: []const u8) msg.Error!void {
+    if (declared_denies.len == 0) return;
+    var a: expand.Expansion = .init(gpa, dump);
+    try a.lines(spec);
+    const allowed = try a.names();
+    if (allowed.len == 0) return;
+    try a.lines(declared_denies);
+    var kept: std.StringHashMapUnmanaged(void) = .empty;
+    for (try a.names()) |n| kept.put(gpa, n, {}) catch return nomem();
+    var bound: std.ArrayList(u8) = .empty;
+    for (allowed) |n| {
+        if (kept.contains(n)) continue;
+        bound.append(gpa, ' ') catch return nomem();
+        bound.appendSlice(gpa, n) catch return nomem();
+    }
+    if (bound.items.len > 0)
+        msg.say("seccomp.deny refuses what the project allows:{s}", .{bound.items});
+}
+
 /// `${dir%/*}`: DIR up to its last "/", or DIR when it has none.
 fn parentOf(dir: []const u8) []const u8 {
     const slash = std.mem.lastIndexOfScalar(u8, dir, '/') orelse return dir;
@@ -258,6 +284,12 @@ fn run(gpa: std.mem.Allocator, dump_path: [*:0]const u8, names_path: [*:0]const 
     try e.lines(if (lines.base_none) declared_denies else names_text);
     try e.lines(lines.spec.items);
     const list = try e.names();
+    // `base none` with nothing allowed would render `allow ` and fail in
+    // the compiler on a line of a policy nobody wrote (quirk 35, which only
+    // the bash's own case, NAMES empty, keeps).
+    if (lines.base_none and list.len == 0)
+        return msg.refuse("base none allows nothing: name at least one call with allow", .{});
+    try sayBound(gpa, &dump, lines.spec.items, declared_denies);
     // The logged: `log` less `nolog` and the declaration's denies; render
     // takes the allowed from them, and what is not in @known.
     const logged: []const []const u8 = if (lines.logged.items.len == 0) &.{} else blk: {

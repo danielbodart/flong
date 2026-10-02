@@ -706,14 +706,16 @@ Their outputs are concatenated, and read as lines, where each X is
 a syscall name or an `@group`:
 
 - `allow X...`, calls the filter allows;
-- `deny X...`, calls it does not, whatever allows them;
+- `deny X...`, calls it does not, whatever `allow`s them; a
+  `log` line still logs, and so lets through, those of them it
+  names, unless `nolog` names them too;
 - `log X...`, calls of `@known` the filter would refuse, allowed
   and logged instead (audit `type=1326`, with `syscall=NR`, which
   `flong-seccomp resolve ARCH NR` names);
 - `nolog X...`, calls `log` leaves refused, whatever logs them;
 - `base none`, the lines apply to no names in place of the
-  declaration's, so `allow` alone says what is allowed; with no
-  `allow`, nothing is, and the launch is refused.
+  declaration's, so `allow` alone says what is allowed; if that
+  is nothing, the launch is refused.
 
 `#` comments and blank lines are skipped. A non-zero exit refuses
 the launch, and so does a line that cannot be read or a name
@@ -725,14 +727,16 @@ per launch rather than per checkout.
 
 The project's lines apply to the declaration's allow-list: its
 allows are added and then its denies removed, whatever order
-they come in. `seccomp.deny` binds them too: a call it removes
-stays refused, and is not logged, whatever a project prints.
-So `log @known` logs every call of `@known` the filter would
-otherwise refuse but those, and `base none` with `allow` of a
-few calls and `log @known` logs every other. Calls outside
+they come in. `seccomp.deny` binds them too: no project `allow`
+or `log` puts back a call it removes, and a project `allow` it
+overrides is said on stderr as the launch goes on (until
+2026-10-02 such an `allow` put the call back). So `log @known` logs every call of `@known` the filter
+would otherwise refuse but those, and `base none` with `allow`
+of a few calls and `log @known` logs every other. Calls outside
 `@known` stay ENOSYS, and the fixed filters stay, the tty filter
 included. Under `seccomp.log` every refused call of `@known` is
-logged already, and `nolog` changes nothing.
+logged, `seccomp.deny`'s included, so neither `nolog` nor the
+binding keeps a call refused.
 
 The result is compiled at launch and cached under
 `$XDG_RUNTIME_DIR/flong/seccomp` by the hash of what is

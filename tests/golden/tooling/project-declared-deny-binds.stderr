@@ -1,0 +1,1 @@
+flong-seccomp-project: seccomp.deny refuses what the project allows: ptrace swapon
