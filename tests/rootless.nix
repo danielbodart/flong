@@ -376,6 +376,12 @@ in
           seccompPolicy = hook "policy" seccompPolicy;
           postStart = hook "poststart" ''echo "$machine" > /tmp/project-poststart'';
         };
+        # debug's ptrace taken back by deny, which a project's lines cannot
+        # undo.
+        denied = base // {
+          seccomp = { debug = true; deny = [ "ptrace" ]; };
+          seccompPolicy = hook "policy" seccompPolicy;
+        };
       };
 
     environment.systemPackages =
@@ -383,8 +389,10 @@ in
       ++ [
         # The driver reads a session's ruleset and links from outside.
         pkgs.nftables
-        # scmp_sys_resolver, which names the numbers a logging filter records.
+        # scmp_sys_resolver and flong-seccomp resolve, which name the numbers
+        # a logging filter records.
         (lib.getBin pkgs.libseccomp)
+        (import ../seccomp { inherit pkgs; })
 
         # The machine name of CONTAINER's session whose payload is asleep,
         # read from the cgroups, which only the launcher names.
@@ -1211,6 +1219,61 @@ in
         out = machine.succeed(as_user("FLONG_TEST_POLICY_FAIL=1 project true 2>&1; echo rc=$?"))
         assert "the policy snippet fails" in out and out.split()[-1] == "rc=1", out
         assert machine.succeed(f"ls {cache}").split() == cached
+
+    @test("a project's log lines allow and log, and resolve names what they log", part="b")
+    def _():
+        def records(since):
+            return (f"journalctl -k --since @{since} -o cat --no-pager | grep -F type=1326"
+                    " | grep -o 'arch=[0-9a-f]* syscall=[0-9]*' | sort -u")
+
+        def logged(since):
+            # Each record's arch and number, named by flong-seccomp resolve.
+            names = set()
+            for p in machine.succeed(records(since) + " || true").split("\n"):
+                if p:
+                    arch, nr = (f.split("=")[1] for f in p.split())
+                    names.add(machine.succeed(f"flong-seccomp resolve {arch} {nr}").strip())
+            return names
+
+        # The kernel prints audit records under printk's rate limit, which
+        # the logging subtest before this one spends, so a record is waited
+        # for by launching again until one is printed; which ones are is not
+        # asserted, only what is among them.
+        def until_logged(since, launch, grep):
+            machine.wait_until_succeeds(as_user(launch) + f" >/dev/null && {records(since)} | grep -q {grep}")
+
+        # Against the profile: what strict refuses, ptrace among it, is
+        # allowed and logged.
+        since = machine.succeed("sleep 1; date +%s").strip()
+        launch = "FLONG_TEST_POLICY='log @known' project 'strace true 2>&1; echo rc=$?'"
+        out = machine.succeed(as_user(launch))
+        assert "+++ exited with 0 +++" in out and out.split()[-1] == "rc=0", out
+        until_logged(since, launch, "'syscall=101$'")
+        assert "ptrace" in logged(since)
+        # nolog leaves it refused, whatever order the lines come in.
+        out = machine.succeed(as_user(
+            "FLONG_TEST_POLICY=$'nolog ptrace\\nlog @known' project 'strace true 2>&1; echo rc=$?'"))
+        assert "Operation not permitted" in out and out.split()[-1] != "rc=0", out
+
+        # From nothing: a hot set allowed, every other call of @known logged.
+        since = machine.succeed("sleep 1; date +%s").strip()
+        launch = "FLONG_TEST_POLICY=$'base none\\nallow read write close\\nlog @known' project 'echo from-nothing'"
+        out = machine.succeed(as_user(launch))
+        assert out.strip().endswith("from-nothing"), out
+        until_logged(since, launch, "syscall=")
+        names = logged(since)
+        assert names and not names & {"read", "write", "close"}, names
+
+    @test("a declaration's deny binds a project's allow and log", part="b")
+    def _():
+        since = machine.succeed("sleep 1; date +%s").strip()
+        out = machine.succeed(as_user(
+            "FLONG_TEST_POLICY=$'allow ptrace\\nlog @known' denied 'strace true 2>&1; echo rc=$?'"))
+        assert "Operation not permitted" in out and out.split()[-1] != "rc=0", out
+        # Nor is it logged, as far as the rate limit lets this see: ptrace
+        # kept its errno.
+        machine.fail(
+            f"journalctl -k --since @{since} -o cat --no-pager | grep -F type=1326 | grep -q 'syscall=101 '")
 
     @test("a launch with a project policy writes nothing to stderr", part="b")
     def _():

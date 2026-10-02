@@ -1,0 +1,2 @@
+allow ptrace swapon @clock
+log @known

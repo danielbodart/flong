@@ -112,13 +112,19 @@
       # Launch times, in one VM: built on
       # demand (`nix build .#bench`), never by `nix flake check`, because a
       # time is a number to report and not a test. The result holds
-      # numbers.md.
+      # numbers.md. And flong-seccomp, for its subcommands.
       packages = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system}; in
         {
           bench = pkgs.testers.runNixOSTest {
             imports = [ ./tests/bench.nix ];
           };
+
+          # flong-seccomp, the derivation checks.seccomp builds, for a
+          # caller that names syscalls by number: `flong-seccomp resolve
+          # ARCH NR` turns a `log` rule's audit record (type=1326,
+          # `arch=` and `syscall=`) into a name a policy can say.
+          seccomp = import ./seccomp { inherit pkgs; };
         });
 
       # golden-update rewrites tests/golden's .bpf files and LIBSECCOMP

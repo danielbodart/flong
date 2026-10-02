@@ -1,1 +1,1 @@
-flong-seccomp-project: line 3: not an allow or deny line: permit
+flong-seccomp-project: line 3: not an allow, deny, log, nolog or base line: permit

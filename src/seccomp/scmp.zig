@@ -1,7 +1,8 @@
 //! scmp.zig: the part of libseccomp 2.6.1 flong-seccomp calls, its eight
 //! functions and the constants and struct they take (seccomp.h), and the
-//! one bpfdump adds, seccomp_syscall_resolve_num_arch, with libc's free for
-//! the string it returns (tests/parity/bpfdump.c:293, 316). The only file
+//! one bpfdump and `flong-seccomp resolve` add,
+//! seccomp_syscall_resolve_num_arch, with libc's free for the string it
+//! returns (tests/parity/bpfdump.c:293, 316). The only file
 //! of flong-seccomp and bpfdump that names a C symbol; test-libc
 //! (tests/zig/libc_scmp.zig) holds every value and layout here equal to
 //! seccomp.h's, through translate-c.

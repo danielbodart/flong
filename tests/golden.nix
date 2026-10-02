@@ -114,6 +114,17 @@ let
     # has NAME.policy, the policy it renders, from which the check derives
     # its key, KEY, as the compiler does: the sha256 of its own store path,
     # a newline, and the policy without its trailing newline (quirk 36).
+    #
+    # Written for flong's own lines, which the bash never read, on
+    # 2026-10-02: project-log-*, project-nolog-*, project-base-* and
+    # project-declared-deny-* (a project's `log`, `nolog` and `base none`
+    # lines, and a declaration's deny binding them, over
+    # strict-deny-ptrace.names, the strict names and two `-X` lines), each
+    # policy checked when written against one built from `flong-seccomp
+    # expand` and its filter against compiling that policy directly; and
+    # resolve-*, `flong-seccomp resolve ARCH NR`. A refusal of a line names
+    # the five words since, in the four cases recorded with "not an allow
+    # or deny line".
     tooling = {
       program = "${seccomp}/bin/flong-seccomp";
       vars = {

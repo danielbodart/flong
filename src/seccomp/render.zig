@@ -68,21 +68,31 @@ pub fn mapfile(gpa: std.mem.Allocator, text: []const u8) error{OutOfMemory}![]co
 
 /// The policy: "default 38", an allow per name, then a DENY rule per @known
 /// name not among them, unless DENY is 38, the default already (:100-101).
-/// Returns false when comm would have found either list out of order, having
-/// said so as comm does.
-pub fn render(gpa: std.mem.Allocator, out: *std.ArrayList(u8), known: []const []const u8, names: []const []const u8, deny: Deny) error{OutOfMemory}!bool {
+/// A refused name in `logged`, which is sorted, gets `log` in place of DENY,
+/// 38 included: a project's `log` lines (project.zig). With `logged` empty
+/// the text is the one the bash printed, byte for byte. Returns false when
+/// comm would have found either list out of order, having said so as comm
+/// does.
+pub fn render(gpa: std.mem.Allocator, out: *std.ArrayList(u8), known: []const []const u8, names: []const []const u8, deny: Deny, logged: []const []const u8) error{OutOfMemory}!bool {
     try out.appendSlice(gpa, "default 38\n");
     for (names) |n| {
         try out.appendSlice(gpa, "allow ");
         try out.appendSlice(gpa, n);
         try out.append(gpa, '\n');
     }
-    if (deny == .enosys) return true;
+    if (deny == .enosys and logged.len == 0) return true;
     // `printf '%s\n' "${names[@]}"` with no names prints one empty line.
     const second: []const []const u8 = if (names.len == 0) &.{""} else names;
     var c: Comm = .{ .lists = .{ known, second } };
+    // comm's column 1 comes in @known's order, which is sorted, so `logged`
+    // is walked once beside it.
+    var l: usize = 0;
     while (c.next()) |n| {
-        try out.appendSlice(gpa, deny.rule());
+        while (l < logged.len and std.mem.order(u8, logged[l], n) == .lt) l += 1;
+        const log = l < logged.len and std.mem.eql(u8, logged[l], n);
+        // ENOSYS is the default's already.
+        if (!log and deny == .enosys) continue;
+        try out.appendSlice(gpa, if (log) Deny.log.rule() else deny.rule());
         try out.append(gpa, ' ');
         try out.appendSlice(gpa, n);
         try out.append(gpa, '\n');
@@ -183,7 +193,7 @@ fn run(gpa: std.mem.Allocator, dump_path: [*:0]const u8, names_path: [*:0]const 
         break :blk try expand.known(gpa, &dump);
     };
     var out: std.ArrayList(u8) = .empty;
-    const sorted = render(gpa, &out, known, names, deny) catch return nomem();
+    const sorted = render(gpa, &out, known, names, deny, &.{}) catch return nomem();
     try msg.check(fd.Stdio.out.writeAll(out.items), "writing the policy", .{});
     return if (sorted) 0 else 1;
 }
@@ -193,8 +203,12 @@ fn run(gpa: std.mem.Allocator, dump_path: [*:0]const u8, names_path: [*:0]const 
 const testing = std.testing;
 
 fn rendered(known: []const []const u8, names: []const []const u8, deny: Deny) ![]const u8 {
+    return renderedLogging(known, names, deny, &.{});
+}
+
+fn renderedLogging(known: []const []const u8, names: []const []const u8, deny: Deny, logged: []const []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
-    _ = try render(testing.allocator, &out, known, names, deny);
+    _ = try render(testing.allocator, &out, known, names, deny, logged);
     return out.toOwnedSlice(testing.allocator);
 }
 
@@ -219,13 +233,32 @@ test "a policy: the names allowed, the rest of @known denied" {
     try testing.expectEqualStrings("default 38\nallow \nerrno 1 brk\nerrno 1 exit\nerrno 1 read\nerrno 1 write\n", empty);
 }
 
+test "a logged name refused is logged, whatever DENY is" {
+    const known = [_][]const u8{ "brk", "exit", "read", "write" };
+    // An allowed name, and one outside @known, are never logged.
+    const logged = [_][]const u8{ "aaa", "exit", "read", "write" };
+    const eperm = try renderedLogging(&known, &.{"read"}, .eperm, &logged);
+    defer testing.allocator.free(eperm);
+    try testing.expectEqualStrings("default 38\nallow read\nerrno 1 brk\nlog exit\nlog write\n", eperm);
+    // Under 38 only the logged are written: the rest is the default's.
+    const enosys = try renderedLogging(&known, &.{"read"}, .enosys, &logged);
+    defer testing.allocator.free(enosys);
+    try testing.expectEqualStrings("default 38\nallow read\nlog exit\nlog write\n", enosys);
+    // Under log, the same text as without.
+    const log = try renderedLogging(&known, &.{"read"}, .log, &logged);
+    defer testing.allocator.free(log);
+    const plain = try rendered(&known, &.{"read"}, .log);
+    defer testing.allocator.free(plain);
+    try testing.expectEqualStrings(plain, log);
+}
+
 test "comm's merge of an unsorted NAMES, and its warning" {
     const known = [_][]const u8{ "a", "b", "c", "d" };
     // comm pairs "c", then meets "a" after "c": unpairable lines follow, and
     // it says file 2 is out of order, and gives what its merge gives.
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
-    const sorted = try render(testing.allocator, &out, &known, &.{ "c", "a" }, .eperm);
+    const sorted = try render(testing.allocator, &out, &known, &.{ "c", "a" }, .eperm, &.{});
     try testing.expect(!sorted);
     try testing.expectEqualStrings("default 38\nallow c\nallow a\nerrno 1 a\nerrno 1 b\nerrno 1 d\n", out.items);
 }

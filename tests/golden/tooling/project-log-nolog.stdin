@@ -1,0 +1,4 @@
+nolog ptrace @swap
+allow @clock
+log @known
+deny clock_settime

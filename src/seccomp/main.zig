@@ -8,6 +8,7 @@
 //!   flong-seccomp render DUMP NAMES 1|13|38|log    flong-seccomp-render
 //!   flong-seccomp project DUMP NAMES 1|13|38|log DIR < POLICY
 //!                                                  flong-seccomp-project
+//!   flong-seccomp resolve ARCH NR                  resolve.zig, flong's own
 //!
 //! Anything else is a usage error, exit 2, which names them all (quirk 16).
 //! Each subcommand prints its own usage line (quirk 38).
@@ -19,6 +20,7 @@ const compile = @import("compile.zig");
 const expand = @import("expand.zig");
 const render = @import("render.zig");
 const project = @import("project.zig");
+const resolve = @import("resolve.zig");
 const scmp = @import("scmp.zig");
 
 // No SIGSEGV handler and no ignored SIGPIPE: the start code would install
@@ -38,7 +40,7 @@ pub const panic = std.debug.FullPanic(msg.onPanic(1));
 var policy: compile.Policy = .{};
 
 const usage = "usage: flong-seccomp [expand DUMP SPEC... | render DUMP NAMES 1|13|38|log" ++
-    " | project DUMP NAMES 1|13|38|log DIR] < POLICY";
+    " | project DUMP NAMES 1|13|38|log DIR | resolve ARCH NR] < POLICY";
 
 pub fn main() noreturn {
     msg.prog = "flong-seccomp";
@@ -56,6 +58,8 @@ pub fn main() noreturn {
         render.main(gpa, args)
     else if (std.mem.eql(u8, sub, "project"))
         project.main(gpa, args)
+    else if (std.mem.eql(u8, sub, "resolve"))
+        resolve.main(args)
     else blk: {
         msg.bare(usage, .{});
         break :blk 2;

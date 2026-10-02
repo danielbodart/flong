@@ -1,0 +1,3 @@
+allow ptrace
+log @known
+nolog @swap

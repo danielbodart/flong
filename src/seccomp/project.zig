@@ -4,15 +4,33 @@
 //! stdin and prints the path of the tier filter they make of the
 //! declaration's NAMES, compiled once into DIR and then reused.
 //!
+//! Three more lines are flong's own, which the bash never read:
+//!
+//!   - `log X...`: the calls of @known that X names and the filter does not
+//!     allow are allowed and logged (the `log` action, audit type=1326) in
+//!     place of DENY;
+//!   - `nolog X...`: names `log` leaves to DENY, whatever order the two
+//!     come in;
+//!   - `base none`: the project's lines apply to no names in place of
+//!     NAMES' own, so `allow` alone says what is allowed.
+//!
+//! NAMES is the declaration's names, one a line, and then its `seccomp.deny`
+//! as `-X` lines (seccomp/policy.nix's projectNamesFor). Those subtractions
+//! bind every project line: no `allow` adds what they take, no `log` logs
+//! it, and `base none` keeps them. With none of the three lines, the policy
+//! rendered, its key and its filter are the bash's, byte for byte.
+//!
 //! Step by step as the bash, each step citing its lines:
 //!
 //!   1. the policy's lines, each refused as the bash refused it, with its
 //!      prefix, "flong-seccomp-project:", exit 1 (quirk 38);
 //!   2. the expansion of NAMES and those entries, the project's denies
 //!      winning; an unknown group or name prints the expander's unprefixed
-//!      line, exit 1 (:173-176);
+//!      line, exit 1 (:173-176); then the logged, `log`'s entries less
+//!      `nolog`'s and NAMES' subtractions, expanded in the same way;
 //!   3. the rendered policy, NAMES empty giving one empty name, `allow `
-//!      (quirk 35); a DENY render refuses is render's message, exit 2;
+//!      (quirk 35), and a logged name refused rendered `log`; a DENY render
+//!      refuses is render's message, exit 2;
 //!   4. the key, sha256 of the compiler's own store path, "\n", and the
 //!      policy without its trailing newline (quirk 36, :183-184);
 //!   5. DIR/KEY.bpf if it exists, else DIR's parent and DIR made 0700, the
@@ -68,11 +86,21 @@ fn wordOk(x: []const u8) bool {
     return true;
 }
 
-/// The policy's entries, each "X" or "-X" (:145-165): `read -r` drops NUL
-/// bytes; `read -r -a` splits on IFS; a line with no word or a first word
-/// starting with "#" is skipped; a last line with no newline is read when
-/// it is not empty.
-fn parse(gpa: std.mem.Allocator, input: []const u8, spec: *std.ArrayList(u8)) msg.Error!void {
+/// What a policy's lines say: the allowed entries and the logged ones, each
+/// a SPEC, "X" or "-X" a line, and whether a `base none` line said to start
+/// from no names.
+const Lines = struct {
+    spec: std.ArrayList(u8) = .empty,
+    logged: std.ArrayList(u8) = .empty,
+    base_none: bool = false,
+};
+
+/// The policy's entries (:145-165): `read -r` drops NUL bytes; `read -r -a`
+/// splits on IFS; a line with no word or a first word starting with "#" is
+/// skipped; a last line with no newline is read when it is not empty. An
+/// `allow` entry is "X" in `spec`, a `deny` one "-X"; a `log` entry is "X"
+/// in `logged`, a `nolog` one "-X".
+fn parse(gpa: std.mem.Allocator, input: []const u8, out: *Lines) msg.Error!void {
     var line_no: u32 = 0;
     var records: expand.Records = .{ .rest = input };
     var buf: std.ArrayList(u8) = .empty;
@@ -93,22 +121,48 @@ fn parse(gpa: std.mem.Allocator, input: []const u8, spec: *std.ArrayList(u8)) ms
         while (it.next()) |w| words.append(gpa, w) catch return nomem();
         if (words.items.len == 0 or words.items[0][0] == '#') continue;
         const w0 = words.items[0];
-        const sign: []const u8 = if (std.mem.eql(u8, w0, "allow"))
-            ""
-        else if (std.mem.eql(u8, w0, "deny"))
-            "-"
-        else
-            return msg.refuse("line {d}: not an allow or deny line: {s}", .{ line_no, w0 });
+        if (std.mem.eql(u8, w0, "base")) {
+            if (words.items.len != 2 or !std.mem.eql(u8, words.items[1], "none"))
+                return msg.refuse("line {d}: not base none", .{line_no});
+            out.base_none = true;
+            continue;
+        }
+        const Kind = struct { []const u8, bool, []const u8 };
+        const kinds = [_]Kind{
+            .{ "allow", false, "" },
+            .{ "deny", false, "-" },
+            .{ "log", true, "" },
+            .{ "nolog", true, "-" },
+        };
+        const kind: Kind = for (kinds) |k| {
+            if (std.mem.eql(u8, w0, k[0])) break k;
+        } else return msg.refuse("line {d}: not an allow, deny, log, nolog or base line: {s}", .{ line_no, w0 });
+        const list = if (kind[1]) &out.logged else &out.spec;
+        const sign = kind[2];
         if (words.items.len < 2)
             return msg.refuse("line {d}: {s} names nothing", .{ line_no, w0 });
         for (words.items[1..]) |x| {
             if (!wordOk(x))
                 return msg.refuse("line {d}: not a syscall or @group: {s}", .{ line_no, x });
-            spec.appendSlice(gpa, sign) catch return nomem();
-            spec.appendSlice(gpa, x) catch return nomem();
-            spec.append(gpa, '\n') catch return nomem();
+            list.appendSlice(gpa, sign) catch return nomem();
+            list.appendSlice(gpa, x) catch return nomem();
+            list.append(gpa, '\n') catch return nomem();
         }
     }
+}
+
+/// The records of a NAMES `text` whose first field starts with "-", as
+/// expand.zig reads a record: the declaration's `seccomp.deny`.
+fn subtractions(gpa: std.mem.Allocator, text: []const u8) msg.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var records: expand.Records = .{ .rest = text };
+    while (records.next()) |r| {
+        const f = std.mem.trimLeft(u8, r, " \t");
+        if (f.len == 0 or f[0] != '-') continue;
+        out.appendSlice(gpa, r) catch return nomem();
+        out.append(gpa, '\n') catch return nomem();
+    }
+    return out.items;
 }
 
 /// `${dir%/*}`: DIR up to its last "/", or DIR when it has none.
@@ -190,17 +244,28 @@ fn run(gpa: std.mem.Allocator, dump_path: [*:0]const u8, names_path: [*:0]const 
     // 1. The policy on stdin (:145-165).
     const input = msg.check(fd.readAll(fd.Stdio.in, gpa) catch return nomem(), "reading the policy", .{}) catch
         return error.Reported;
-    var spec: std.ArrayList(u8) = .empty;
-    try parse(gpa, input, &spec);
+    var lines: Lines = .{};
+    try parse(gpa, input, &lines);
 
     // 2. NAMES, then the entries, expanded and sorted (:169-176).
     // NAMES is awk's operand (:173), so a directory is skipped with its
     // warning. DUMP was built into the bash, so it has no awk precedent.
     const dump = expand.Dump.parse(gpa, (try expand.readOperand(gpa, dump_path)) orelse "") catch return nomem();
+    const names_text = (try expand.readOperand(gpa, names_path)) orelse "";
+    // The declaration's own denies, which bind the project's lines.
+    const declared_denies = try subtractions(gpa, names_text);
     var e: expand.Expansion = .init(gpa, &dump);
-    try e.lines((try expand.readOperand(gpa, names_path)) orelse "");
-    try e.lines(spec.items);
+    try e.lines(if (lines.base_none) declared_denies else names_text);
+    try e.lines(lines.spec.items);
     const list = try e.names();
+    // The logged: `log` less `nolog` and the declaration's denies; render
+    // takes the allowed from them, and what is not in @known.
+    const logged: []const []const u8 = if (lines.logged.items.len == 0) &.{} else blk: {
+        var l: expand.Expansion = .init(gpa, &dump);
+        try l.lines(lines.logged.items);
+        try l.lines(declared_denies);
+        break :blk try l.names();
+    };
 
     // 3. The policy (:177). `printf '%s\n' "$list"` of no names is one
     // empty line, which mapfile reads as one empty name.
@@ -214,7 +279,7 @@ fn run(gpa: std.mem.Allocator, dump_path: [*:0]const u8, names_path: [*:0]const 
     const known = try expand.known(gpa, &dump);
     var text: std.ArrayList(u8) = .empty;
     // Sorted by construction, so comm never warns.
-    _ = render.render(gpa, &text, known, names, deny) catch return nomem();
+    _ = render.render(gpa, &text, known, names, deny, logged) catch return nomem();
     const policy = std.mem.trimRight(u8, text.items, "\n");
 
     // 4. The key (:181-184).
@@ -291,15 +356,36 @@ test "a policy's lines become entries, denies with a minus" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var spec: std.ArrayList(u8) = .empty;
-    try parse(a, "# a comment\n\n  \t\n  #indented\n", &spec);
-    try testing.expectEqualStrings("", spec.items);
-    try parse(a, "allow read  write\ndeny\t@swap\nallow -ptrace\nallow a\x00b", &spec);
-    try testing.expectEqualStrings("read\nwrite\n-@swap\n-ptrace\nab\n", spec.items);
+    var lines: Lines = .{};
+    try parse(a, "# a comment\n\n  \t\n  #indented\n", &lines);
+    try testing.expectEqualStrings("", lines.spec.items);
+    try parse(a, "allow read  write\ndeny\t@swap\nallow -ptrace\nallow a\x00b", &lines);
+    try testing.expectEqualStrings("read\nwrite\n-@swap\n-ptrace\nab\n", lines.spec.items);
+    try testing.expectEqualStrings("", lines.logged.items);
+    try testing.expect(!lines.base_none);
     // An empty last line with no newline, NULs only, ends the policy.
-    spec.clearRetainingCapacity();
-    try parse(a, "allow read\n\x00", &spec);
-    try testing.expectEqualStrings("read\n", spec.items);
+    var last: Lines = .{};
+    try parse(a, "allow read\n\x00", &last);
+    try testing.expectEqualStrings("read\n", last.spec.items);
+}
+
+test "log, nolog and base none" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var lines: Lines = .{};
+    try parse(a, "log @known\nallow read\nnolog ptrace kill\n  base\tnone  \nbase none\n", &lines);
+    try testing.expectEqualStrings("read\n", lines.spec.items);
+    try testing.expectEqualStrings("@known\n-ptrace\n-kill\n", lines.logged.items);
+    try testing.expect(lines.base_none);
+}
+
+test "subtractions are NAMES' minus lines" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("", try subtractions(a, "read\nwrite\n"));
+    try testing.expectEqualStrings("-ptrace\n \t-@swap\n", try subtractions(a, "read\n-ptrace\nwrite\n \t-@swap"));
 }
 
 test "each refusal of a policy line" {
@@ -315,9 +401,15 @@ test "each refusal of a policy line" {
         "allow Read\n",
         "allow read\r\n",
         "Allow read\n",
+        "log\n",
+        "nolog Read\n",
+        "base\n",
+        "base all\n",
+        "base none none\n",
+        "base none # why\n",
     }) |input| {
-        var spec: std.ArrayList(u8) = .empty;
-        try testing.expectError(error.Reported, parse(a, input, &spec));
+        var lines: Lines = .{};
+        try testing.expectError(error.Reported, parse(a, input, &lines));
     }
 }
 

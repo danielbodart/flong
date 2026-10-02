@@ -1,1 +1,1 @@
-usage: flong-seccomp [expand DUMP SPEC... | render DUMP NAMES 1|13|38|log | project DUMP NAMES 1|13|38|log DIR] < POLICY
+usage: flong-seccomp [expand DUMP SPEC... | render DUMP NAMES 1|13|38|log | project DUMP NAMES 1|13|38|log DIR | resolve ARCH NR] < POLICY

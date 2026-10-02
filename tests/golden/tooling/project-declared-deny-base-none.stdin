@@ -1,0 +1,3 @@
+base none
+allow read write close futex mmap munmap brk epoll_wait epoll_pwait epoll_ctl
+log @known

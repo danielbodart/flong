@@ -520,7 +520,7 @@
           },
           "default": [],
           "required": false,
-          "doc": "Syscall names or `@groups` removed, after the profile, the\nloosenings and `allow`, which it overrides.",
+          "doc": "Syscall names or `@groups` removed, after the profile, the\nloosenings and `allow`, which it overrides, and after a\nproject's `seccompPolicy` lines, which it binds.",
           "merge": "ordered",
           "nixOption": true
         },
@@ -547,7 +547,7 @@
           },
           "default": false,
           "required": false,
-          "doc": "Allows the calls `errno` would refuse and has the kernel\nlog each (audit `type=1326`, with `syscall=NR`), to learn\na policy. `scmp_sys_resolver -a x86_64 NR` names a number;\nthe names become `allow` entries or `seccompPolicy` lines.\nNot for untrusted entrypoints, and it warns.",
+          "doc": "Allows the calls `errno` would refuse and has the kernel\nlog each (audit `type=1326`, with `syscall=NR`), to learn\na policy. `flong-seccomp resolve ARCH NR`, of flong's\n`packages.<system>.seccomp`, names a number;\nthe names become `allow` entries or `seccompPolicy` lines.\nNot for untrusted entrypoints, and it warns.",
           "merge": "single",
           "nixOption": true
         }
@@ -569,7 +569,7 @@
     },
     "default": [],
     "required": false,
-    "doc": "Commands printing a project's own changes to the `seccomp` filter,\nfor a policy that is only known at launch. Run as the invoking user\nafter `guard`, in order, with the launcher's arguments after their\nown, the invoking user's stdin and stderr, and `$workspace`,\n`$workspace_mode`, `$binds` and `$machine` in the environment.\nTheir outputs are concatenated, and read as lines of `allow X...`\nor `deny X...`, where each X is a syscall name or an `@group`.\n`#` comments and blank lines are skipped. A non-zero exit refuses\nthe launch, and so does a line that cannot be read or a name\nsystemd does not list.\n\n`$machine` is the container's name, the one `postStart` and\n`postStop` see, so anything it approves for them can be staged\nper launch rather than per checkout.\n\nThe project's lines apply to the declaration's allow-list: its\nallows are added and then its denies removed. The fixed filters\nstay, the tty filter included. The result is compiled at launch\nand cached under `$XDG_RUNTIME_DIR/flong/seccomp` by the hash of\nwhat is compiled, so a policy already seen costs a hash. Printing\nnothing compiles nothing. A relaunch runs them again.\n\nIt needs a profile (`seccomp.tier`) to act on, and it is a\nconsistency check in the way `guard` is: the invoking user can\nlaunch with any filter.",
+    "doc": "Commands printing a project's own changes to the `seccomp` filter,\nfor a policy that is only known at launch. Run as the invoking user\nafter `guard`, in order, with the launcher's arguments after their\nown, the invoking user's stdin and stderr, and `$workspace`,\n`$workspace_mode`, `$binds` and `$machine` in the environment.\nTheir outputs are concatenated, and read as lines, where each X is\na syscall name or an `@group`:\n\n- `allow X...`, calls the filter allows;\n- `deny X...`, calls it does not, whatever allows them;\n- `log X...`, calls of `@known` the filter would refuse, allowed\n  and logged instead (audit `type=1326`, with `syscall=NR`, which\n  `flong-seccomp resolve ARCH NR` names);\n- `nolog X...`, calls `log` leaves refused, whatever logs them;\n- `base none`, the lines apply to no names in place of the\n  declaration's, so `allow` alone says what is allowed; with no\n  `allow`, nothing is, and the launch is refused.\n\n`#` comments and blank lines are skipped. A non-zero exit refuses\nthe launch, and so does a line that cannot be read or a name\nsystemd does not list.\n\n`$machine` is the container's name, the one `postStart` and\n`postStop` see, so anything it approves for them can be staged\nper launch rather than per checkout.\n\nThe project's lines apply to the declaration's allow-list: its\nallows are added and then its denies removed, whatever order\nthey come in. `seccomp.deny` binds them too: a call it removes\nstays refused, and is not logged, whatever a project prints.\nSo `log @known` logs every call of `@known` the filter would\notherwise refuse but those, and `base none` with `allow` of a\nfew calls and `log @known` logs every other. Calls outside\n`@known` stay ENOSYS, and the fixed filters stay, the tty filter\nincluded. Under `seccomp.log` every refused call of `@known` is\nlogged already, and `nolog` changes nothing.\n\nThe result is compiled at launch and cached under\n`$XDG_RUNTIME_DIR/flong/seccomp` by the hash of what is\ncompiled, so a policy already seen costs a hash. Printing nothing\ncompiles nothing. A relaunch runs them again.\n\nIt needs a profile (`seccomp.tier`) to act on, and it is a\nconsistency check in the way `guard` is: the invoking user can\nlaunch with any filter.",
     "merge": "ordered",
     "nixOption": true
   },
@@ -821,7 +821,7 @@
           },
           "default": null,
           "required": true,
-          "doc": "The file of the declaration's own names -- its profile, its\nloosenings, `allow`, and `deny` as `-name` -- which a project's\nlines apply to.",
+          "doc": "The file of the declaration's own names, one a line -- its\nprofile, its loosenings and `allow`, less `deny` -- then each of\n`deny`'s entries as a `-X` line, which a project's lines apply\nto. The `-X` lines bind them: no `allow` adds back and no `log`\nlogs what they take, and `base none` keeps them.",
           "merge": "single",
           "nixOption": false
         },

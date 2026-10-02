@@ -95,7 +95,7 @@ pub fn build(b: *std.Build) void {
             const t = b.addTest(.{ .name = name, .root_module = m.get(name) });
             test_step.dependOn(&b.addRunArtifact(t).step);
         }
-        for ([_][]const u8{ "compile", "expand", "render", "project" }) |name| {
+        for ([_][]const u8{ "compile", "expand", "render", "project", "resolve" }) |name| {
             // Each file's own tests, in flong-seccomp's root module, linked
             // as it is.
             const root = seccompModule(b, target, optimize, "/nix/store/test-only");

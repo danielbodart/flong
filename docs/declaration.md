@@ -667,7 +667,8 @@ Syscall names or `@groups` added to the profile.
 - ordered
 
 Syscall names or `@groups` removed, after the profile, the
-loosenings and `allow`, which it overrides.
+loosenings and `allow`, which it overrides, and after a
+project's `seccompPolicy` lines, which it binds.
 
 ### `seccomp.errno`
 
@@ -685,7 +686,8 @@ an older kernel.
 
 Allows the calls `errno` would refuse and has the kernel
 log each (audit `type=1326`, with `syscall=NR`), to learn
-a policy. `scmp_sys_resolver -a x86_64 NR` names a number;
+a policy. `flong-seccomp resolve ARCH NR`, of flong's
+`packages.<system>.seccomp`, names a number;
 the names become `allow` entries or `seccompPolicy` lines.
 Not for untrusted entrypoints, and it warns.
 
@@ -700,8 +702,19 @@ for a policy that is only known at launch. Run as the invoking user
 after `guard`, in order, with the launcher's arguments after their
 own, the invoking user's stdin and stderr, and `$workspace`,
 `$workspace_mode`, `$binds` and `$machine` in the environment.
-Their outputs are concatenated, and read as lines of `allow X...`
-or `deny X...`, where each X is a syscall name or an `@group`.
+Their outputs are concatenated, and read as lines, where each X is
+a syscall name or an `@group`:
+
+- `allow X...`, calls the filter allows;
+- `deny X...`, calls it does not, whatever allows them;
+- `log X...`, calls of `@known` the filter would refuse, allowed
+  and logged instead (audit `type=1326`, with `syscall=NR`, which
+  `flong-seccomp resolve ARCH NR` names);
+- `nolog X...`, calls `log` leaves refused, whatever logs them;
+- `base none`, the lines apply to no names in place of the
+  declaration's, so `allow` alone says what is allowed; with no
+  `allow`, nothing is, and the launch is refused.
+
 `#` comments and blank lines are skipped. A non-zero exit refuses
 the launch, and so does a line that cannot be read or a name
 systemd does not list.
@@ -711,11 +724,20 @@ systemd does not list.
 per launch rather than per checkout.
 
 The project's lines apply to the declaration's allow-list: its
-allows are added and then its denies removed. The fixed filters
-stay, the tty filter included. The result is compiled at launch
-and cached under `$XDG_RUNTIME_DIR/flong/seccomp` by the hash of
-what is compiled, so a policy already seen costs a hash. Printing
-nothing compiles nothing. A relaunch runs them again.
+allows are added and then its denies removed, whatever order
+they come in. `seccomp.deny` binds them too: a call it removes
+stays refused, and is not logged, whatever a project prints.
+So `log @known` logs every call of `@known` the filter would
+otherwise refuse but those, and `base none` with `allow` of a
+few calls and `log @known` logs every other. Calls outside
+`@known` stay ENOSYS, and the fixed filters stay, the tty filter
+included. Under `seccomp.log` every refused call of `@known` is
+logged already, and `nolog` changes nothing.
+
+The result is compiled at launch and cached under
+`$XDG_RUNTIME_DIR/flong/seccomp` by the hash of what is
+compiled, so a policy already seen costs a hash. Printing nothing
+compiles nothing. A relaunch runs them again.
 
 It needs a profile (`seccomp.tier`) to act on, and it is a
 consistency check in the way `guard` is: the invoking user can
@@ -937,9 +959,11 @@ project's lines mean.
 - required
 - computed
 
-The file of the declaration's own names -- its profile, its
-loosenings, `allow`, and `deny` as `-name` -- which a project's
-lines apply to.
+The file of the declaration's own names, one a line -- its
+profile, its loosenings and `allow`, less `deny` -- then each of
+`deny`'s entries as a `-X` line, which a project's lines apply
+to. The `-X` lines bind them: no `allow` adds back and no `log`
+logs what they take, and `base none` keeps them.
 
 ### `seccompProject.deny`
 

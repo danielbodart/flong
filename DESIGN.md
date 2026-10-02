@@ -1377,9 +1377,11 @@ Loosenings, combinable:
   sandbox, `codex sandbox` and a nested bwrap need all three together, and ran
   with 16.
 - **`allow`** adds names or groups; **`deny`** removes them, after everything
-  else, which it overrides.
+  else, which it overrides, a project's policy included.
 - **`log`** allows the calls `errno` would refuse and has the kernel log each
-  (audit `type=1326`), to learn a policy. It warns.
+  (audit `type=1326`), to learn a policy. It warns. `flong-seccomp resolve
+  ARCH NR` names a record's `arch=` and `syscall=` by libseccomp's tables, an
+  x32 call (x86_64's arch, `0x40000000` in its number) as x32's.
 
 Headless Chromium works under `strict` with `--no-sandbox`, Playwright's
 default. The nixpkgs chromium wrapper looks for a setuid sandbox in
@@ -1395,6 +1397,42 @@ lines, applied to the declaration's names (its allows added, then its denies
 removed). chase evaluates a project's envelope there, sends any loosening
 through its approver, and prints the result. The fixed filters stay, the tty
 filter included.
+
+**The declaration's `deny` binds a project.** `flong-seccomp project` is given
+the declaration's names expanded, which cannot say what `deny` took out, so
+its NAMES file is the names and then each `deny` entry as a `-X` line
+(policy.nix's `projectNamesFor`; with no `deny`, the names file itself). The
+expansion subtracts those whatever order its lines come in, so no project
+`allow` puts back what `deny` took and no `log` logs it: `deny` overrides a
+project as it overrides the profile, the loosenings and `allow`. The
+declaration is Nix's, and its last word stands over a policy computed at
+launch from a checkout.
+
+**Learning a policy at launch.** Three more lines make a filter that learns.
+`log X…` renders each call of `@known` it names that the filter would refuse
+as `log` in place of `errno` (allowed, and audited as `type=1326`), and
+`nolog X…` takes names back out of it, whatever order the two come in;
+neither touches what is allowed, and a call the declaration's `deny` took is
+neither allowed nor logged. `base none` applies the project's lines to no
+names in place of the declaration's, so its `allow`s alone are what is
+allowed. Learning against a profile is `log @known`, beside the project's own
+`allow`s and `deny`s: whatever the launch's filter would have refused is
+allowed and logged instead. Learning from nothing is
+
+```
+base none
+allow read write close futex mmap munmap brk epoll_wait epoll_pwait epoll_ctl
+log @known
+```
+
+where the `allow` is a hot set, allowed silently so that the audit log carries
+the rest: every other call of `@known` is logged, so what the entrypoint used
+is seen whole, narrowing as well as widening. A call outside `@known` stays
+ENOSYS and unlogged, the fixed filters stay hard, and the kernel's audit rate
+limit can drop records in a burst, so a rare call can be missed. Under
+`seccomp.log` everything refused is logged already. Without the three lines,
+the policy is the text `render` prints for the same names, byte for byte, as
+is its filter (`tests/golden/tooling/`).
 
 The result is compiled at launch by `flong-seccomp project`, in one process,
 and cached under `$XDG_RUNTIME_DIR/flong/seccomp/<hash>.bpf`, keyed by exactly
@@ -1958,7 +1996,7 @@ does, when it is called and how it fails.
 | `src/launch/` | the launch's pieces, each tested alone: `assemble.zig` (the prologue's work, building the spec) and its pieces `caller.zig`, `workspace.zig`, `cmd.zig`, `binds.zig`, `refuse.zig`, `depth.zig`, `subid.zig`, `prepare.zig`, `identity.zig`, `groups.zig`, `hometmp.zig` and `resolv.zig`; `lookup.zig` (a name's declaration); `prologue.zig` (the cache lock, the relaunch, the close of what was inherited, the protected paths), `bwrap.zig` (its spawn), `childpid.zig` (`--info-fd`), `hook.zig` (`postStart`), `pasta.zig` |
 | `src/init.zig` | `flong init`: groups, capabilities, the controlling tty, the ready byte, the gate, the seeded files, chdir, exec tini; no allocator; checkpoint 9 |
 | `src/sweeper.zig` | `flong sweeper`: the state directory, its holder, then the watch; no allocator |
-| `src/seccomp/` | `flong-seccomp`: `main.zig` the root, `compile.zig` the policy compiler, `expand.zig`, `render.zig`, `project.zig` the subcommands, `scmp.zig` libseccomp's externs |
+| `src/seccomp/` | `flong-seccomp`: `main.zig` the root, `compile.zig` the policy compiler, `expand.zig`, `render.zig`, `project.zig`, `resolve.zig` the subcommands, `scmp.zig` libseccomp's externs |
 | `src/fixtures/` | the tests' programs: `bpfdump`, `syscall-probe`, `swapper`, `ioctl-probe` |
 | `tools/fdlint.zig` | the lint |
 

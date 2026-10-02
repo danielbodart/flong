@@ -99,7 +99,7 @@ The profile's base is `seccomp.tier`:
 Then `debug` adds `ptrace`; `nestedSandbox` allows user namespaces and
 mounts, for Chromium's sandbox or a nested bwrap; `allow` adds names or
 systemd `@groups` (`systemd-analyze syscall-filter`); `deny` removes them,
-last. A refused call returns `errno`: `EPERM` (default), `EACCES` or
+last, and a project's `seccompPolicy` cannot add them back. A refused call returns `errno`: `EPERM` (default), `EACCES` or
 `ENOSYS`. Whatever the tier, the container cannot inject keystrokes into your terminal
 (`TIOCSTI` and friends), open audit sockets, or, without `nestedSandbox`,
 make namespaces. Filters apply on x86_64, i386 and x32.
@@ -108,12 +108,20 @@ To find what a program needs, run it once with `log = true` and read the
 kernel log:
 
 ```sh
-journalctl -k --grep 'type=1326' | grep -o 'syscall=[0-9]*' | sort -u
-scmp_sys_resolver -a x86_64 425     # -> io_uring_setup
+journalctl -k --grep 'type=1326' | grep -o 'arch=[0-9a-f]* syscall=[0-9]*' | sort -u
+flong-seccomp resolve c000003e 425     # -> io_uring_setup
 ```
 
+`flong-seccomp` is flong's `packages.<system>.seccomp`. ARCH is the
+record's `arch=` (`c000003e` x86_64, `40000003` i386; an x32 call is
+x86_64's with `0x40000000` in its number).
+
 A per-project profile goes in `seccompPolicy`, which prints `allow NAME...`
-and `deny NAME...` lines. They are compiled at launch and cached by content.
+and `deny NAME...` lines, and `log NAME...` and `nolog NAME...` to allow and
+log, for one launch, calls the profile refuses: `log @known` learns a
+project's whole policy against its profile, and `base none`, a few `allow`s
+and `log @known` learns it from nothing. They are compiled at launch and
+cached by content.
 Keep policy files where only you write, never in the working directory,
 which the container can write to:
 
