@@ -30,18 +30,24 @@ sentence in the README saying when to choose it.
   evaluation, so a per-container overlay of the working directory cannot be
   expressed.
 
-## 3. `nix` inside a container, only if asked for
+## 3. `nix` inside a container
 
-Nothing flong is built for needs this. A container's tools belong in its
-`containers.<name>` declaration, which is already a Nix closure. The one
-repository that does want `nix` against the host, a machine's own configuration, cannot
-run in a sandbox at all: `nixos-rebuild switch` needs a real `sudo`, and
-`no_new_privs` refuses it.
+A container's tools belong in its `containers.<name>` declaration, which is
+already a Nix closure. The one repository that does want `nix` against the
+host, a machine's own configuration, cannot run in a sandbox at all:
+`nixos-rebuild switch` needs a real `sudo`, and `no_new_privs` refuses it.
 
-The case it would serve is a container used as a development environment for a
+The case it serves is a container used as a development environment for a
 checkout whose own flake defines the toolchain, where `nix develop`,
-`nix build` and `nix-shell` are how the project is worked on. That is a
-reasonable request, and not one to build before someone makes it.
+`nix build` and `nix-shell` are how the project is worked on. chase has asked
+for that. Its first step needs nothing of flong: the launcher realises the
+checkout's devShell on the host and the session loads the result from the
+store it can already read (chase's PLAN, decision 21). What it leaves out is
+an agent changing the flake and entering it again, which needs `nix` in the
+container, by one of two routes. The second is to be spiked first: it is the
+one whose fetches the container's own network sees.
+
+### The host's daemon
 
 The cost is why it stays off. Using it means binding
 `/nix/var/nix/daemon-socket`, and per-container `profiles` and `gcroots` for a
@@ -62,6 +68,68 @@ directory you own, kept per container, such as
 `$XDG_STATE_HOME/flong/<container>/profiles`, at `/nix/var/nix/profiles`,
 plus the matching `gcroots`, created by the launcher as you so a warm
 toolchain survives.
+
+### A store of the container's own, over the host's
+
+Nix's `local-overlay` store (experimental feature `local-overlay-store`)
+reads a lower store it never writes and keeps what it adds in an overlayfs
+upper layer. The host's `/nix/store` is the lower, as it is already bound;
+the upper and the store's own database are the container's, in a directory
+the launcher keeps per container or per cache. `nix` in the container then
+runs single-user against that store, with no daemon: a build or a fetch is
+the container's own process, in its own network namespace, under its
+filter, its limits and its seccomp, and frisket sees every name it looks up.
+Nothing it does reaches the host's store or database.
+
+Spiked (Determinate Nix 2.35.2, Linux 6.18), outside flong: `unshare -Urm`
+for the mount, then a nested namespace mapping 1000 back, since the
+entrypoint is never root. What was found:
+
+- **It works.** An overlay with `userxattr`, the host's `/nix/store` as its
+  lower, mounted at `/nix/store`, and
+  `local-overlay://?real=/nix/store&state=<state>&lower-store=local%3Froot%3D<host>%26read-only%3Dtrue&upper-layer=<upper>`,
+  with the experimental features `local-overlay-store` and
+  `read-only-local-store`. `nix path-info` reads the host's paths from its
+  database; `nix build nixpkgs#hello` fetched hello alone into the upper,
+  its glibc read from the lower; a local build ran; `nix develop` of
+  chase's flake put its Go on `PATH`. The upper and its database, kept,
+  served the next mount as they were.
+- **Nix must not think it is root.** As namespace root it is multi-user,
+  and fails chowning the store to `nixbld`. As your uid, as the entrypoint
+  is, it is single-user and trusted on its own store. `NIX_LOG_DIR` must
+  move into the state: the host's `/nix/var/log` is not writable.
+- **The build sandbox is off.** `sandbox = false`: a build is a process of
+  the container, confined by the container. With the sandbox on it needs a
+  namespace of its own, which flong's filter refuses.
+- **The host adding paths is fine.** A path built on the host while the
+  overlay was mounted was readable inside at once, known to the lower's
+  database, and an upper build depending on it succeeded. overlayfs calls a
+  changing lower undefined; adding to it was not seen to matter.
+- **The host collecting paths is not.** Nix requires the lower only grow.
+  Collect a lower path an upper path refers to, and the upper's database
+  still lists it valid, and `nix build` reuses the dependent path whose
+  dependency is gone: only `nix store verify` sees it. `nix store repair`
+  fetched it back into the upper from the cache, and verify passed after.
+  The fix is to keep the host from collecting it: the launcher, as you,
+  holds an indirect GC root on the host for every lower path the upper's
+  database lists, refreshed at each launch and kept while the store is.
+  Nothing the container's own `nix store gc` does reaches the lower.
+- **Warmth is the host's.** chase's devShell, not built on the host, fetched
+  53 MB into the upper; one the host has costs nothing.
+
+What it would take in flong: an overlay whose upper is a host directory
+kept across launches (a cache's, `rw`), not the tmpfs every `overlays`
+upper is now, with its target allowed over `/nix/store`; the store's state
+directory bound beside it; and the settings above in the container's
+`nix.conf`. Whether a store is kept per session or shared is the
+consumer's: a store shared by a tier's checkouts is one each can write
+paths into that the next one trusts, so a tier for other people's code
+keeps it per session, as it keeps its other caches.
+
+Untested: `read-only-local-store` opens the host's database as immutable,
+which reads without the lock; a host write landing mid-read was not tried.
+Nor was it tried under flong's own filter, which may refuse a call
+single-user Nix makes.
 
 ## 4. Loose ends
 
