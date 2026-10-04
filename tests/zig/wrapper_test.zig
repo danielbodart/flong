@@ -613,7 +613,9 @@ const Parse = struct {
         const a = std.heap.page_allocator;
         const got = try binds.parse(a, try a.dupe(u8, self.raw), self.ws, self.dests);
         say("{s}\n{s}\n", .{ @tagName(got.workspace_mode), got.text });
-        for (got.list) |b| say("{s} {s}\n", .{ b.path, @tagName(b.mode) });
+        for (got.list) |b| {
+            if (b.layers) |l| say("{s} overlay {s}\n", .{ b.path, l }) else say("{s} {s}\n", .{ b.path, @tagName(b.mode) });
+        }
     }
 };
 
@@ -676,6 +678,61 @@ test "binds.parse: the wrapper's refusals, the path named without its suffix" {
     const dest = try s.absAt(&r, "dir");
     try capture(&c, Parse{ .raw = try std.fmt.bufPrint(&b, "{s}/link:ro", .{s.abs}), .ws = ws, .dests = &.{dest} }, Parse.body);
     try expectRefused(&c, try std.fmt.bufPrint(&w, "bind {s} is where the declaration already mounts something", .{dest}));
+}
+
+test "binds.parse: PATH:overlay:LAYERS, shown as PATH:overlay, named once; its refusals" {
+    var s: Scratch = .{};
+    try makeTree(&s, "bindsov");
+    defer s.remove();
+    var b: [8][4096]u8 = undefined;
+    var w: [4096]u8 = undefined;
+    try mkdir(try s.absAt(&b[7], "other"));
+    const dir = try s.absAt(&b[0], "dir");
+    const other = try s.absAt(&b[1], "other");
+    const l = try s.absAt(&b[2], "l");
+    const ws: workspace.Workspace = .{ .path = "/nonexistent-flong-ws", .mode = .rw };
+    var c: Captured = .{};
+
+    // Resolved as a bind is, through the link; LAYERS taken as written,
+    // and kept out of $binds. The same line twice is one overlay.
+    try capture(&c, Parse{ .raw = try std.fmt.bufPrint(&b[3], "{s}/link:overlay:{s}\n{s}:overlay:{s}\n{s}:ro\n", .{ s.abs, l, dir, l, other }), .ws = ws }, Parse.body);
+    try expectOk(&c);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&w, "rw\n{s}:overlay\n{s}:ro\n{s} overlay {s}\n{s} ro\n", .{ dir, other, dir, l, other }), c.out);
+
+    const Case = struct { raw: []const u8, ws: workspace.Workspace, want: []const u8 };
+    const cases = [_]Case{
+        .{ .raw = try std.fmt.bufPrint(&b[3], "{s}:overlay:l", .{dir}), .ws = ws, .want = try std.fmt.bufPrint(&b[4], "overlay {s}: its layers are not an absolute path: l", .{dir}) },
+        .{ .raw = try std.fmt.bufPrint(&b[5], "{s}:overlay:{s}/./x", .{ dir, l }), .ws = ws, .want = try std.fmt.bufPrint(&b[6], "overlay {s}: its layers have an empty, '.' or '..' component: {s}/./x", .{ dir, l }) },
+    };
+    for (cases) |x| {
+        try capture(&c, Parse{ .raw = x.raw, .ws = x.ws }, Parse.body);
+        try expectRefused(&c, x.want);
+    }
+    // At, inside or around its own PATH, which overlayfs refuses as ELOOP.
+    for ([_][]const u8{ dir, try std.fmt.bufPrint(&b[4], "{s}/x", .{dir}), s.abs }) |at| {
+        try capture(&c, Parse{ .raw = try std.fmt.bufPrint(&b[3], "{s}:overlay:{s}", .{ dir, at }), .ws = ws }, Parse.body);
+        try expectRefused(&c, try std.fmt.bufPrint(&w, "overlay {s}: LAYERS lies inside PATH: its layers {s} are, hold or lie inside it", .{ dir, at }));
+    }
+    // Where the payload could write the upper behind overlayfs's back: in
+    // the workspace, or in a bind named before or after.
+    try capture(&c, Parse{ .raw = try std.fmt.bufPrint(&b[3], "{s}:overlay:{s}/l", .{ dir, other }), .ws = .{ .path = other, .mode = .ro } }, Parse.body);
+    try expectRefused(&c, try std.fmt.bufPrint(&w, "overlay {s}: its layers {s}/l lie in the workspace {s}, which the container can write", .{ dir, other, other }));
+    try capture(&c, Parse{ .raw = try std.fmt.bufPrint(&b[3], "{s}:overlay:{s}/l\n{s}:ro", .{ dir, other, other }), .ws = ws }, Parse.body);
+    try expectRefused(&c, try std.fmt.bufPrint(&w, "overlay {s}: its layers {s}/l lie in {s}, which the container is given", .{ dir, other, other }));
+    // The workspace itself, a bind's path, another overlay's layers.
+    try capture(&c, Parse{ .raw = try std.fmt.bufPrint(&b[3], "{s}:overlay:{s}", .{ dir, l }), .ws = .{ .path = dir, .mode = .rw } }, Parse.body);
+    try expectRefused(&c, try std.fmt.bufPrint(&w, "overlay {s} is the workspace, which is bound", .{dir}));
+    try capture(&c, Parse{ .raw = try std.fmt.bufPrint(&b[3], "{s}\n{s}:overlay:{s}", .{ dir, dir, l }), .ws = ws }, Parse.body);
+    try expectRefused(&c, try std.fmt.bufPrint(&w, "{s} is named both as a bind and as an overlay", .{dir}));
+    try capture(&c, Parse{ .raw = try std.fmt.bufPrint(&b[3], "{s}:overlay:{s}\n{s}:rw", .{ dir, l, dir }), .ws = ws }, Parse.body);
+    try expectRefused(&c, try std.fmt.bufPrint(&w, "{s} is named both as a bind and as an overlay", .{dir}));
+    try capture(&c, Parse{ .raw = try std.fmt.bufPrint(&b[3], "{s}:overlay:{s}\n{s}:overlay:{s}/2", .{ dir, l, dir, l }), .ws = ws }, Parse.body);
+    try expectRefused(&c, try std.fmt.bufPrint(&w, "overlay {s} is named twice, with layers {s} and {s}/2", .{ dir, l, l }));
+    try capture(&c, Parse{ .raw = try std.fmt.bufPrint(&b[3], "{s}:overlay:{s}\n{s}:overlay:{s}/2", .{ dir, l, other, l }), .ws = ws }, Parse.body);
+    try expectRefused(&c, try std.fmt.bufPrint(&w, "overlay {s}: its layers {s} meet {s}'s, {s}/2", .{ dir, l, other, l }));
+    // PATH is refused as a bind's is.
+    try capture(&c, Parse{ .raw = try std.fmt.bufPrint(&b[3], "{s}/file:overlay:{s}", .{ s.abs, l }), .ws = ws }, Parse.body);
+    try expectRefused(&c, try std.fmt.bufPrint(&w, "overlay is not a directory: {s}/file", .{s.abs}));
 }
 
 // ---- identity ----

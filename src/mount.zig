@@ -40,6 +40,10 @@ pub const Kind = enum {
     tmpfs,
     /// a lower directory under a writable layer that is thrown away
     overlay,
+    /// a lower directory under a writable layer the caller keeps: `binds`'
+    /// PATH:overlay:LAYERS, whose upper and work directories are LAYERS'
+    /// `upper` and `work`, opened and locked by the launcher
+    overlay_kept,
     /// a mode-0 read-only node of the destination's own kind
     mask,
 };
@@ -49,8 +53,11 @@ pub const Mount = struct {
     kind: Kind,
     /// absolute, inside the session, plain components (spec.validate)
     dest: [:0]const u8,
-    /// binds and dev: the host source; overlay: the lower
+    /// binds and dev: the host source; overlay and overlay_kept: the lower
     src: ?[:0]const u8 = null,
+    /// overlay_kept: LAYERS, the caller's directory holding `upper` and
+    /// `work`, canonical
+    layers: ?[:0]const u8 = null,
     /// tmpfs: octal digits ("0700")
     mode: ?[:0]const u8 = null,
     /// tmpfs: tmpfs's size= value
@@ -78,12 +85,18 @@ pub const Job = struct {
     /// a networked session's net.ipv4.ping_group_range, as U1's gids
     /// (ns.pingGroups); null: left as the kernel made it
     ping_groups: ?[2]u64 = null,
+    /// each overlay_kept mount's LAYERS, at its index in `mounts`, as the
+    /// launcher opened and locked it (prologue.openLayers); null for every
+    /// other kind, and the slice may be shorter than `mounts`
+    layers: []const ?fd.Dir = &.{},
 };
 
 /// One mount, from its spec to the detached tree attached in the session
 /// (flong-mount.c:31-38).
 const Src = struct {
     m: *const Mount,
+    /// overlay_kept: LAYERS, open and locked (Job.layers)
+    layers: ?fd.Dir = null,
     /// a detached mount; null for a mask until attach makes it
     tree: ?fd.Fd(.tree) = null,
     /// the tree's unique mount id, once made
@@ -171,8 +184,8 @@ fn checkProtected(job: *const Job, h: anytype, src: [:0]const u8) Error!void {
 /// it now is a race and ends the launch; any other follows symlinks, as its
 /// author intended.
 fn openSource(job: *const Job, m: *const Mount, comptime k: fd.Kind) Error!fd.Fd(k) {
-    const exact = m.kind == .bind_ro_exact or m.kind == .bind_rw_exact;
-    const src = m.src.?; // spec.validate refuses a bind, dev or overlay without a source
+    const exact = m.kind == .bind_ro_exact or m.kind == .bind_rw_exact or m.kind == .overlay_kept;
+    const src = m.src.?; // spec.validate refuses a bind, dev or either overlay without a source
     const Open = struct {
         src: [:0]const u8,
         exact: bool,
@@ -336,6 +349,193 @@ fn failed(r: sys.Result(void)) ?Failed {
     return switch (r) {
         .ok => null,
         .err => |e| .{ .errno = e },
+    };
+}
+
+// ---- a kept overlay ----
+
+/// LAYERS opened again, exactly, as the payload, in the helper's own mount
+/// namespace: overlayfs clones each layer's mount privately, and refuses
+/// (EINVAL, "failed to clone upperpath") a mount in no namespace of the
+/// caller's, which the launcher's descriptor, opened before the helper's
+/// unshare, is on. It must be the directory the launcher locked: the same
+/// device and inode, or the launch is refused.
+fn reopenLayers(job: *const Job, m: *const Mount, locked: fd.Dir) Error!fd.Dir {
+    const Open = struct {
+        path: [:0]const u8,
+        fn open(o: @This()) fd.Error!sys.Result(fd.Dir) {
+            return fd.openExact(.dir, o.path);
+        }
+    };
+    const layers = m.layers.?; // spec.validate refuses an overlay_kept without them
+    const r = (try asPayload(job, fd.Error!sys.Result(fd.Dir), Open{ .path = layers }, Open.open)).r;
+    const h = switch (r catch return msg.refuse("overlay {s}: too many open descriptors", .{m.dest})) {
+        .ok => |h| h,
+        .err => |e| {
+            if (e == .LOOP) return msg.refuse("overlay {s}: a symlink is on the way to its layers {s}", .{ m.dest, layers });
+            return msg.fail(e, "overlay {s}: its layers {s}", .{ m.dest, layers });
+        },
+    };
+    const same: Error!bool = same: {
+        const a = msg.check(h.fstat(), "overlay {s}: its layers {s}", .{ m.dest, layers }) catch |e| break :same e;
+        const b = msg.check(locked.fstat(), "overlay {s}: its layers {s}", .{ m.dest, layers }) catch |e| break :same e;
+        break :same a.dev == b.dev and a.ino == b.ino;
+    };
+    if (same) |yes| {
+        if (yes) return h;
+        h.close();
+        return msg.refuse("overlay {s}: its layers {s} are not the directory the launcher locked", .{ m.dest, layers });
+    } else |e| {
+        h.close();
+        return e;
+    }
+}
+
+/// What the payload makes in LAYERS: `work`, 0700, unless it is there.
+/// Made with the payload's file ids, it is the caller's on the host, so the
+/// caller can remove it; one container root made would be a subordinate
+/// id's, which the caller cannot (PLAN.md §3).
+fn makeWork(layers: fd.Dir) sys.Result(void) {
+    return switch (layers.mkdirat("work", 0o700)) {
+        .ok => .ok,
+        .err => |e| if (e == .EXIST) .ok else .{ .err = e },
+    };
+}
+
+/// `work` under LAYERS, never through a symlink, as the payload.
+fn openWork(layers: fd.Dir) fd.Error!sys.Result(fd.Dir) {
+    return fd.openDirNoFollow(layers, "work");
+}
+
+/// LAYERS' `upper`, made by container root when it is missing, and given
+/// the lower root's shape: container root's, the payload's group, and the
+/// lower root's mode (`/nix/store` is 1775). Its every launch's, whoever
+/// made it. With the root the payload's, the payload could unlink any
+/// entry of the lower's root and put its own at the name, and in a kept
+/// upper the plant would outlive the container; with the lower's sticky
+/// bit and another's ownership the unlink is EPERM, and the payload still
+/// makes and removes its own entries through the group. The caller, in
+/// that group on the host and owner of everything the payload made,
+/// still removes the lot, and the empty root with it, from LAYERS.
+fn shapeUpper(job: *const Job, layers: fd.Dir, mode: sys.mode_t, dest: [:0]const u8) Error!fd.Dir {
+    switch (layers.mkdirat("upper", 0o700)) {
+        .ok => {},
+        .err => |e| if (e != .EXIST) return msg.fail(e, "overlay {s}: its upper directory", .{dest}),
+    }
+    const up = switch (fd.openDirNoFollow(layers, "upper") catch return msg.refuse("overlay {s}: too many open descriptors", .{dest})) {
+        .ok => |h| h,
+        .err => |e| {
+            if (e == .LOOP or e == .NOTDIR) return msg.refuse("overlay {s}: its upper directory is not a directory", .{dest});
+            return msg.fail(e, "overlay {s}: its upper directory", .{dest});
+        },
+    };
+    const shaped: sys.Result(void) = switch (up.fchownat("", 0, job.gid, sys.AT.EMPTY_PATH)) {
+        .ok => up.fchmod(mode),
+        .err => |e| .{ .err = e },
+    };
+    switch (shaped) {
+        .ok => return up,
+        .err => |e| {
+            const x = msg.fail(e, "overlay {s}: shaping its upper directory", .{dest});
+            up.close();
+            return x;
+        },
+    }
+}
+
+/// The ids and capabilities a kept overlay is mounted with: the caller's
+/// ids, which overlayfs records as its creator's and makes every upper
+/// file with, so `work/work`, copy-ups, whiteouts and xattrs are the
+/// caller's on the host; and of container root's capabilities only the
+/// two the mount needs, CAP_SYS_ADMIN for the mount itself and
+/// CAP_DAC_OVERRIDE for the work directory, which overlayfs makes mode 0
+/// ("upper fs does not support tmpfile" without it). SECBIT_NO_SETUID_FIXUP
+/// keeps them across the change of uid. Nothing becomes reachable that was
+/// not: U1 maps only the caller and its subordinate ids.
+const kept_caps: u64 = (1 << sys.CAP_SYS_ADMIN) | (1 << sys.CAP_DAC_OVERRIDE);
+
+/// The capabilities as they were, for `asRoot`.
+const Caps = [sys.cap_u32s_3]sys.CapData;
+
+fn asCaller(job: *const Job, dest: [:0]const u8) Error!Caps {
+    var caps: Caps = undefined;
+    _ = try msg.check(sys.capget(&caps), "overlay {s}: capget", .{dest});
+    _ = try msg.check(sys.prctl(sys.PR.SET_SECUREBITS, sys.SECBIT_NO_SETUID_FIXUP | sys.SECBIT_KEEP_CAPS), "overlay {s}: securebits", .{dest});
+    _ = try msg.check(sys.setresgid(job.gid, job.gid, job.gid), "overlay {s}: setresgid {d}", .{ dest, job.gid });
+    _ = try msg.check(sys.setresuid(job.uid, job.uid, job.uid), "overlay {s}: setresuid {d}", .{ dest, job.uid });
+    var cut = caps;
+    cut[0].effective &= @truncate(kept_caps);
+    cut[1].effective &= @truncate(kept_caps >> 32);
+    _ = try msg.check(sys.capset(&cut), "overlay {s}: capset", .{dest});
+    return caps;
+}
+
+/// Container root again, with every capability it had, before the walk.
+fn asRoot(caps: *const Caps, dest: [:0]const u8) Error!void {
+    _ = try msg.check(sys.capset(caps), "overlay {s}: capset", .{dest});
+    _ = try msg.check(sys.setresuid(0, 0, 0), "overlay {s}: setresuid 0", .{dest});
+    _ = try msg.check(sys.setresgid(0, 0, 0), "overlay {s}: setresgid 0", .{dest});
+    _ = try msg.check(sys.prctl(sys.PR.SET_SECUREBITS, 0), "overlay {s}: securebits", .{dest});
+}
+
+/// An overlay whose writes the caller keeps (`binds`' PATH:overlay:LAYERS):
+/// the lower read with the payload's reach, exact, as every bind of the
+/// caller's is; `work` made and opened as the payload; `upper` shaped as
+/// the lower root (`shapeUpper`); both on one filesystem; the overlay made
+/// as the caller (`asCaller`), passed every layer as a descriptor, and
+/// mounted nosuid and nodev. The launcher opened LAYERS and holds its lock
+/// for the container's life (prologue.openLayers).
+fn prepareOverlayKept(job: *const Job, s: *Src) Error!void {
+    const m = s.m;
+    const locked = s.layers orelse return msg.refuse("overlay {s}: its layers were not opened", .{m.dest});
+    const layers = try reopenLayers(job, m, locked);
+    defer layers.close();
+    const lower = try openSource(job, m, .dir);
+    defer lower.close();
+    const lst = try msg.check(lower.fstat(), "overlay {s}: its lower directory", .{m.dest});
+
+    _ = try msg.check((try asPayload(job, sys.Result(void), layers, makeWork)).r, "overlay {s}: its work directory", .{m.dest});
+    const wk = switch ((try asPayload(job, fd.Error!sys.Result(fd.Dir), layers, openWork)).r catch return msg.refuse("overlay {s}: too many open descriptors", .{m.dest})) {
+        .ok => |h| h,
+        .err => |e| {
+            if (e == .LOOP or e == .NOTDIR) return msg.refuse("overlay {s}: its work directory is not a directory", .{m.dest});
+            return msg.fail(e, "overlay {s}: its work directory", .{m.dest});
+        },
+    };
+    defer wk.close();
+    const up = try shapeUpper(job, layers, @intCast(lst.mode & 0o7777), m.dest);
+    defer up.close();
+    const up_id = try msg.check(up.mountId(), "overlay {s}: its upper directory", .{m.dest});
+    const wk_id = try msg.check(wk.mountId(), "overlay {s}: its work directory", .{m.dest});
+    if (up_id != wk_id) return msg.refuse("overlay {s}: LAYERS must be one filesystem: {s}/upper and {s}/work are on different mounts", .{ m.dest, m.layers.?, m.layers.? });
+
+    const caps = try asCaller(job, m.dest);
+    var fs: ?fd.Fd(.fsctx) = null;
+    const chain: ?Failed = chain: {
+        if (openInto(fd.Fd(.fsctx), &fs, fd.fsopen("overlay"))) |f| break :chain f;
+        const ctx = fs.?;
+        if (failed(ctx.setFd("lowerdir+", lower))) |f| break :chain f;
+        if (failed(ctx.setFd("upperdir", up))) |f| break :chain f;
+        if (failed(ctx.setFd("workdir", wk))) |f| break :chain f;
+        if (failed(ctx.setFlag("userxattr"))) |f| break :chain f;
+        // No uuid kept in the upper's root, which is container root's, not
+        // the caller's, so its xattr could not be set ("failed to set
+        // uuid ... falling back to uuid=null", every mount): nothing here
+        // decodes a file handle, `userxattr` having turned `index` off.
+        if (failed(ctx.setString("uuid", "null"))) |f| break :chain f;
+        if (failed(ctx.create())) |f| break :chain f;
+        break :chain openInto(fd.Fd(.tree), &s.tree, fd.fsmount(ctx, sys.MOUNT_ATTR.NOSUID | sys.MOUNT_ATTR.NODEV));
+    };
+    if (fs) |h| h.close();
+    try asRoot(&caps, m.dest);
+    if (chain) |f| return switch (f) {
+        .errno => |e| switch (e) {
+            .XDEV => msg.refuse("overlay {s}: LAYERS must be one filesystem: {s}", .{ m.dest, m.layers.? }),
+            .OPNOTSUPP => msg.refuse("overlay {s}: LAYERS' filesystem has no user xattrs: {s}", .{ m.dest, m.layers.? }),
+            .LOOP, .BUSY => msg.refuse("overlay {s}: LAYERS lies inside PATH: {s}", .{ m.dest, m.layers.? }),
+            else => msg.fail(e, "overlay {s}", .{m.dest}),
+        },
+        .table_full => msg.refuse("overlay {s}: too many open descriptors", .{m.dest}),
     };
 }
 
@@ -611,7 +811,7 @@ pub fn run(job: *const Job) Error!void {
 
     // Parents first, and the same destination twice is refused, before any
     // work, so a bad spec costs nothing.
-    for (job.mounts, srcs) |*m, *s| s.* = .{ .m = m };
+    for (job.mounts, srcs, 0..) |*m, *s, i| s.* = .{ .m = m, .layers = if (i < job.layers.len) job.layers[i] else null };
     try sortRefusingTwice(srcs);
 
     // 1. The leader's namespaces, through the pidfd the launcher opened at
@@ -648,6 +848,7 @@ pub fn run(job: *const Job) Error!void {
             .bind_ro, .bind_rw, .bind_ro_exact, .bind_rw_exact, .dev => try prepareBind(job, s),
             .tmpfs => try prepareTmpfs(job, s),
             .overlay => try prepareOverlay(job, s, &scratch, i),
+            .overlay_kept => try prepareOverlayKept(job, s),
             .mask => {},
         }
         if (s.tree) |t| s.id = try mountId(t);

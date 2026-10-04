@@ -26,14 +26,14 @@ launch can know (`src/launch/assemble.zig`):
 
 1. Refuse a user of uid 0 or of primary group 0. Use `/run/user/$UID`, which
    must exist and be yours.
-2. `workspace`, then `binds`, then `guard`, each as you.
-3. Block the launch's signals and read them from a signalfd. Name the
+2. Block the launch's signals and read them from a signalfd. Name the
    container `<name>-<launcher pid>-<64 random bits, in hex>`, a name no other
-   container has had; this is `$machine`. Run `seccompPolicy` and compile what
-   it prints; then `exec`, when the declaration has it, and read the
-   entrypoint it prints. From here, a prologue or launch that fails before the
-   container's record exists runs `postStop` for the name itself
-   ([Teardown](#teardown)).
+   container has had; this is `$machine`. From here, a prologue or launch that
+   fails before the container's record exists runs `postStop` for the name
+   itself ([Teardown](#teardown)).
+3. `workspace`, then `binds`, then `guard`, each as you. Run `seccompPolicy`
+   and compile what it prints; then `exec`, when the declaration has it, and
+   read the entrypoint it prints.
 4. Check the depth rule against your writable binds.
 5. Build the id maps from `/etc/subuid` and `/etc/subgid`.
 6. Build the rootfs if this closure, build program and map have none cached.
@@ -453,7 +453,8 @@ so there is no other to choose.
 configures the container enters its namespaces (see
 [postStart](#poststart-the-gate-and-readiness)); nothing is done as host root.
 
-`workspace` runs first, in the directory you chose. A project's command
+`workspace` runs first, in the directory you chose, with `$machine`, the
+container's name, which every command sees from here on. A project's command
 commonly runs `git` there, which reads configuration from the repository it is
 pointed at; as you, that grants nothing you lacked. The default, `null`, is
 taken without a fork. The printed path is resolved to its physical path before
@@ -462,7 +463,11 @@ same way, with `$workspace` exported so it can name what travels with that
 directory.
 
 Your paths travel as `PATH:MODE`, one per line: in what the hooks print, in
-`$binds` for the guard, and in `FLONG_BINDS` for the entrypoint. So `:` and
+`$binds` for the guard, and in `FLONG_BINDS` for the entrypoint. `binds` may
+also print `PATH:overlay:LAYERS`, an overlay whose writes you keep ([What
+each kind mounts](#what-each-kind-mounts)), which the guard and the
+entrypoint see as `PATH:overlay`: that the path is an overlay, not where its
+layers are. So `:` and
 newlines are refused in such a path, which keeps those lists unambiguous to
 anything that splits them naively. A trailing `:ro` or `:rw` is always a mode.
 `/` is refused, and so is a path the declaration already mounts something at.
@@ -486,24 +491,29 @@ checks do, and like them it is not warned about. It runs in a process of its
 own, so `exit 0` allows the launch rather than ending the launcher, and
 nothing it assigns reaches the launcher.
 
-**`seccompPolicy` runs after the guard**, with what the guard sees and with
-`$machine`, the name `postStart` and `postStop` will see: what it approves for
-them can be staged per launch rather than per checkout, where two launches of
-one checkout at once would each apply the other's approval. See
+**`seccompPolicy` runs after the guard**, with what the guard sees,
+`$machine` among it, the name `postStart` and `postStop` will see: what it
+approves for them can be staged per launch rather than per checkout, where
+two launches of one checkout at once would each apply the other's approval. See
 [Seccomp](#seccomp). **`exec` runs after it**, with the same, and prints the
 entrypoint ([`exec`](#exec-an-entrypoint-only-the-launch-can-decide)).
 
-**What those two stage, `postStop` releases, whichever way the launcher ends
-the launch.** From the moment the container is named, before `seccompPolicy`,
-every end the launcher sees runs `postStop` for `$machine` exactly once: the
+**What the commands stage, `postStop` releases, whichever way the launcher
+ends the launch.** From the moment the container is named, before
+`workspace`, every end the launcher sees runs `postStop` for `$machine`
+exactly once: the
 container's teardown or the sweep, from its record, once the record exists;
 before that, the launch itself (`assemble.Early`), whether the prologue
 refuses, the spec is refused, the cache is swept and flong relaunches under a
 new name, or the launch fails before its record (the holder cannot start,
 say). The prologue blocks the launch's signals and opens its signalfd just
-before it names the container, so a terminating signal while `seccompPolicy`
-or `exec` runs, or the rootfs is built, ends that wait as an event, kills the
-command and runs `postStop`. One that is queued, unread, when the cache is
+before it names the container, so a terminating signal while any command
+runs, or the rootfs is built, ends that wait as an event, kills the command
+and runs `postStop`. The name comes before `workspace`, where the wrapper
+gave it after `guard`, so a consumer keys what it makes for one launch by
+`$machine` from its first command, a kept overlay's layers among it, and
+finds it again in `postStop`, rather than inventing a name of its own and
+sweeping the orphans a crash leaves. One that is queued, unread, when the cache is
 found swept ends the launch there, 128+n, after `postStop`, rather than being
 taken off the signalfd and lost to a relaunch that would run every command
 again.
@@ -574,7 +584,8 @@ bwrap mounts only fixed destinations, in fresh filesystems: the overlay root,
 `/run/user/<uid>`, a fresh 1777 `/tmp`, and the container's `/etc/resolv.conf`
 as data. Everything else goes through flong's own mount helper: the
 declaration's `bindMounts`, `tmpfs`, `allowedDevices`, `overlays` and `masks`,
-the working directory, the binds from `binds`, `$HOME/tmp` and `/sys`.
+the working directory, the binds and kept overlays from `binds`, `$HOME/tmp`
+and `/sys`.
 
 ### The walker
 
@@ -658,6 +669,58 @@ It costs about 1 ms for 3 mounts and 1.5 ms for 12.
   the upper is the user's. Every layer is passed to overlayfs as a descriptor.
   overlayfs reports changing device and inode numbers as a file is written, so
   an overlay must not cover a sqlite database.
+- **Kept overlays** are `binds`' `PATH:overlay:LAYERS`: `PATH` the lower and
+  the destination, and the writes in `LAYERS/upper`, a directory of yours
+  kept across launches, which is how a container gets a Nix store of its own
+  over the host's (PLAN.md §3). flong knows nothing of Nix; when the upper
+  goes, and how large it may grow, is the consumer's.
+  - **Opened as you, exactly, and checked.** The launcher opens `LAYERS`
+    with `RESOLVE_NO_SYMLINKS`, refuses it unless you own it or when it
+    reaches a protected path, and the prologue refuses it lexically when it
+    is, holds or lies inside `PATH` (overlayfs's `ELOOP`), lies inside the
+    working directory or another path `binds` printed, where the entrypoint
+    would write the upper behind overlayfs's back, or meets another
+    overlay's; a declared bind's source is kept from it by `protect`. The helper
+    opens it again, as the entrypoint, in its own mount namespace, and
+    refuses it unless it is the directory the launcher locked: overlayfs
+    clones each layer's mount privately, which it refuses (`EINVAL`, "failed
+    to clone upperpath") for a mount in another namespace, as the launcher's
+    is. `work` is made there as the entrypoint, so it is yours on the host;
+    one container root made would be a subordinate id's, which you cannot
+    remove. Upper and work must be one filesystem, and one with user xattrs.
+  - **The upper's root takes the lower root's shape**: container root's,
+    the entrypoint's group, and the lower root's mode, `1775` for
+    `/nix/store`. With the root the entrypoint's, it could unlink any entry
+    of the lower's root and put its own at the name, a planted store path
+    that would outlive the container in a kept upper; under the sticky bit
+    and another's ownership the unlink is `EPERM`, and through the group it
+    still makes and removes its own entries. You, in that group and owner of
+    everything else under it, still remove the lot.
+  - **Mounted as you.** Around `fsopen` to `fsmount` the helper takes your
+    ids with `SECBIT_NO_SETUID_FIXUP`, keeping of container root's
+    capabilities only `CAP_SYS_ADMIN` and `CAP_DAC_OVERRIDE` (without the
+    second, "upper fs does not support tmpfile": the work directory is mode
+    0). overlayfs makes every upper file with its creator's credentials, so
+    `work/work`, copy-ups, whiteouts and xattrs are yours. It keeps no uuid
+    (`uuid=null`): the upper's root is not its creator's, so the xattr could
+    not be set, and with `userxattr` turning `index` off nothing decodes a
+    file handle. Then it is container root again for the walk. Nothing
+    becomes reachable that was not: U1 maps only you and your subordinate
+    ids.
+  - **One holder, for the cgroup's life.** The launcher locks `LAYERS`
+    exclusively before bwrap, refusing a second container ("in use by
+    another container"): one upper behind two mounts gave a path nix called
+    valid that `cat` could not open, and overlayfs only warns of it, since
+    `userxattr` forces `index=off`. Once bwrap is in the container's cgroup,
+    a keeper forked outside it holds the same open file descriptions until
+    that cgroup is empty, so a SIGKILLed launcher leaves the lock held until
+    the sweep has ended the last process that could write through the
+    overlay; a launch meanwhile is refused, or, sweeping inline, ends it
+    first. The entrypoint never holds the lock.
+  - **The walk** attaches it over whatever is at `PATH`; for `/nix/store`,
+    that is bwrap's fixed read-only bind, and the fixed `/nix/var/nix/db`
+    bind is unchanged. Its upper is your disk, not RAM, and nothing in it is
+    more trustworthy than the containers that wrote it.
 - **Masks are a last resort.** `masks` over-mounts a path with a mode-0,
   read-only, `noexec` node of its own kind: an empty tmpfs for a directory, a
   mode-0 file for anything else. The mask belongs to U1's mount namespace, so
@@ -1229,8 +1292,11 @@ One function, run whatever stage the launch reached, in this order:
    exiting and the cgroup cannot go yet, the record is closed, not removed,
    without `poststop=`, and the sweeper (woken by that close) or the next
    launch removes the cgroup and the record. The sweep looks only at records,
-   never at cgroupfs.
-9. The cache lock goes with the process.
+   never at cgroupfs. With the cgroup gone, reap the kept overlays' keeper,
+   which has seen it empty; otherwise it outlives the launcher, the layers'
+   locks with it, until the sweep empties the cgroup.
+9. The cache lock goes with the process, and so do the launcher's own copies
+   of the layers' locks.
 
 Each step happens only for what exists: no cgroup, nothing to kill or wait
 for; no record, and `postStop` runs from the spec instead, once, since a
@@ -1869,7 +1935,8 @@ Every installed artifact is ReleaseSafe, stripped by the build,
 `native-test-release` (`test test-libc`), `native-lint` (`lint compile-fail
 fmt`), `native-analyze`, `cross-aarch64` (on x86_64), `launcher`, `seccomp`,
 `golden`, `integration`, the VM tests `native`, `basic-a`, `basic-b`,
-`rootless-a`, `rootless-b` and `parity`, the six `assertions-N` shards,
+`rootless-a`, `rootless-b`, `kept-overlay` and `parity`, the six
+`assertions-N` shards,
 `assertions-decl`, `decl-options-fresh`, `reference-fresh` and `shellcheck`.
 `native` boots one node with a lingering user, subordinate ranges and a
 delegated user manager, for what the build sandbox cannot do: `clone3` into a
@@ -2173,7 +2240,7 @@ syscall table, `include/uapi/linux/`, or the code that parses the parameter):
 | 5.14 | `cgroup.kill` | ending a container |
 | 6.8 | `statmount` with `STATMOUNT_MNT_BASIC`, `STATX_MNT_ID_UNIQUE` | the walker telling a host bind's mounts from the container's (`mount.zig:345-358`) |
 | 6.11 | `PIDFD_GET_{CGROUP,MNT,NET}_NAMESPACE` | the helper entering the container's namespaces through the leader's pidfd (`fd.zig:701-710`) |
-| 6.13 | overlay layers by descriptor: `lowerdir+` through `FSCONFIG_SET_FD` (`fsparam_file_or_string` in `fs/overlayfs/params.c`; 6.8 to 6.12 take `lowerdir+` as a string only) | overlay mounts (`mount.zig:299-306`) |
+| 6.13 | overlay layers by descriptor: `lowerdir+` through `FSCONFIG_SET_FD` (`fsparam_file_or_string` in `fs/overlayfs/params.c`; 6.8 to 6.12 take `lowerdir+` as a string only), `upperdir` and `workdir` with it | overlay mounts, kept ones too (`mount.zig`, `prepareOverlay`, `prepareOverlayKept`) |
 
 The VM tests run 6.18.51. The ABI is Zig's bundled uapi headers (6.13.4), not
 the host's: `abi` holds every struct and constant `sys.zig` declares equal to
@@ -2219,7 +2286,7 @@ how the tests quote them. A list is empty when the launch has none.
 | `uid`, `gid`, `home` (`user's uid`, ...) | the entrypoint's container uid, gid and home, each id in its map |
 | `groups` (`group`) | supplementary groups, each in the gid map |
 | `chdir` | where the entrypoint starts (the working directory); `/` by default |
-| `mounts` (`mount KIND destination`, `source`) | `bind-ro`, `bind-rw`: a declared bind, the source following symlinks; `bind-ro-exact`, `bind-rw-exact`: a bind from `binds` or the working directory, the source canonical, a symlink on it refused; `dev`: an `allowedDevices` node, a read-write bind that is not `nodev`; `tmpfs`: an octal mode, tmpfs's `size=` or none, owned by root or the user; `overlay`: reads the lower, writes go with the container; `mask`: a mode-0 read-only node over an existing destination |
+| `mounts` (`mount KIND destination`, `source`) | `bind-ro`, `bind-rw`: a declared bind, the source following symlinks; `bind-ro-exact`, `bind-rw-exact`: a bind from `binds` or the working directory, the source canonical, a symlink on it refused; `dev`: an `allowedDevices` node, a read-write bind that is not `nodev`; `tmpfs`: an octal mode, tmpfs's `size=` or none, owned by root or the user; `overlay`: reads the lower, writes go with the container; `overlay-kept` (`mount overlay-kept layers`): a kept overlay from `binds`, its source and layers canonical, its writes in the layers' `upper`; `mask`: a mode-0 read-only node over an existing destination |
 | `protect` | no mount source may equal, lie inside or contain it, compared canonicalised (a part that does not exist yet is appended, as spelt, to the canonical path of its longest existing prefix) |
 | `seccomp` | compiled BPF programs; each becomes one `--add-seccomp-fd`, in order |
 | `nested_userns` (`nested-userns`) | `nestedSandbox`: U2's `max_user_namespaces`, and `--assert-userns-disabled` goes; 0 is off |
@@ -2293,7 +2360,7 @@ is what that step calls.
 | 9 | the record, locked, with `poststop=` and `cgroup=` | `cgroup.sessionPath`, `record.create` | `recorded` |
 | 10 | U1, then U2 | `ns.create` | `U1-mapped`, `U2-made` |
 | 11 | the container's cgroup, limits, leaves | `cgroup.sessionCreate` | `cgroup-made` |
-| 12 | the protected paths made canonical; open the seccomp files; the info, ready and gate pipes; bwrap in the sandbox leaf | `prologue.protectPaths`, `bwrap.spawn` | |
+| 12 | the protected paths made canonical; each kept overlay's layers opened and locked; open the seccomp files; the info, ready and gate pipes; bwrap in the sandbox leaf; with kept overlays, their keeper forked outside the cgroup, holding the locks until it is empty | `prologue.protectPaths`, `prologue.openLayers`, `bwrap.spawn`, `proc.fork` | |
 | 13 | read `--info-fd` until `child-pid`; hold the leader's pidfd and network namespace; append `leader=` | `childpid.wait`, `fd.pidfdOpen`, `fd.openNetns`, `Record.setLeader` | `bwrap-child` |
 | 14 | fork the mount helper, which prepares sources, waits for the ready byte, then mounts `/sys`, the declared mounts and `/run` read-only; wait for it or bwrap | `proc.fork` with `mount.run`, `sig.awaitFdOrExit`, `Child.await` | `sandbox-ready`, `mounts-done` |
 | 15 | `postStart`'s commands in the hooks leaf, in order, each waited for, the first failure ending the launch; one environment, built once | `hook.build`, `Spawn.start`, `Child.await`, `hook.done` | `hook-done`, per command |
@@ -2329,7 +2396,7 @@ the exec, since the relaunch names another container.
 | 125 | the entrypoint never ran: a refusal of the spec, a failed step, a failing hook, pasta failing (a host port in use), bwrap failing, flong init's gate EOF, a relaunch that could not exec. stderr says which |
 | 1 | the prologue refused, before the spec: the declaration, the user, the working directory, a hook, `exec`'s output, the maps, the rootfs |
 | 2 | a usage error, or a name with no declaration |
-| 128+n | a terminating signal n reached the launcher before the gate, from the moment the prologue names the container: the launch was aborted, `postStop` run and the rest torn down. Before then, while `workspace`, `binds` and `guard` run, a signal ends the launcher as its default action |
+| 128+n | a terminating signal n reached the launcher before the gate, from the moment the prologue names the container, before `workspace`: the launch was aborted, `postStop` run and the rest torn down |
 
 After the gate a signal is forwarded, not acted on, so the entrypoint's status
 tells what happened: `^C` is 130 under a pty and in a pipeline, `^]^]^]` is

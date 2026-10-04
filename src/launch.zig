@@ -118,6 +118,12 @@ const Launch = struct {
     /// the spec's protect paths, the state directory and the holder, made
     /// canonical
     protect: []const [:0]const u8 = &.{},
+    /// each kept overlay's LAYERS, open and locked, at its mount's index
+    /// (prologue.openLayers): the launcher's copies, closed when it exits
+    layers: []const ?fdt.Dir = &.{},
+    /// the layers' keeper, holding the same locks until the container's
+    /// cgroup is empty (`keeper`)
+    keeper: ?proc.Child = null,
 
     /// read end of bwrap's --info-fd, open until exit (quirk 31)
     info: ?fdt.Held(.pipe_r) = null,
@@ -334,6 +340,53 @@ fn mountHelper(job: mount.Job) noreturn {
     proc.exit(0);
 }
 
+/// The layers' keeper: kept overlays' LAYERS, whose locks it holds, and
+/// the container's cgroup, whose emptying it waits for.
+const Keeper = struct {
+    cg: fdt.Fd(.cgroup),
+};
+
+/// The keeper's life, in a fork child outside the container's cgroup, so
+/// the container's kill does not reach it: it holds the open file
+/// descriptions the launcher locked LAYERS with, and lets them go when the
+/// container's cgroup is empty, every leaf, the hooks' and pasta's too, or
+/// gone, and not before. So a launcher killed outright, which takes its
+/// own copies with it, leaves the layers locked until the sweep has
+/// released the last process that could still write through the overlay,
+/// and a launch of the same layers meanwhile is refused as another
+/// container's. The signals stay as the launcher blocked them; 0 to 2 are
+/// /dev/null, so a caller reading the launcher's output sees EOF when the
+/// launcher exits, not when the keeper does. A failure ends it, and the
+/// lock with it, saying nothing: there is no one to say it to.
+///
+/// It reads cgroup.events again every `keeper_recheck_ms` as well as on its
+/// POLLPRI, unlike cgroup.waitEmpty: cgroupfs defers a notification that
+/// comes within 20 ms of the last, and drops it if the cgroup is removed
+/// first, so a container that ends that quickly, removed by the sweep,
+/// would leave a keeper waiting on nothing. The launcher's own teardown
+/// does not wait for it: once the cgroup is gone it kills it.
+fn keeper(k: Keeper) noreturn {
+    const ev = switch (fdt.openFile(k.cg, "cgroup.events", .{ .NOFOLLOW = true }, 0) catch proc.exit(1)) {
+        .ok => |h| h,
+        .err => proc.exit(0),
+    };
+    while (true) {
+        var buf: [256]u8 = undefined;
+        const n = switch (ev.pread(buf[0..255], 0)) {
+            .ok => |n| n,
+            .err => proc.exit(0),
+        };
+        if (cgroup.populated(buf[0..n]) != .busy) proc.exit(0);
+        var p = [1]sys.pollfd{fdt.pollEntry(ev, sys.POLL.PRI)};
+        _ = sys.poll(&p, keeper_recheck_ms);
+    }
+}
+
+/// How often the keeper reads its cgroup's cgroup.events with no POLLPRI
+/// (`keeper`): a lock held at most this long past a sweep that came
+/// within 20 ms of the container's start.
+const keeper_recheck_ms = 1000;
+
 /// Steps 6 to 18 of DESIGN.md, "The launch, in order" (flong-launch.c:
 /// 709-767): bwrap's status once the gate has opened, or the first failure,
 /// said where it happened (error.Reported), or a terminating signal
@@ -379,6 +432,9 @@ fn run(l: *Launch) sig.Error!u8 {
     // 12a. The protected paths, before bwrap, so nothing between child-pid
     // and the helper's fork but the fork itself (:740-743).
     l.protect = try prologue.protectPaths(l.arena, s.protect, s.state, holder.path.slice());
+    // 12a'. Each kept overlay's layers, opened as the caller and locked,
+    // before anything could mount them (prologue.openLayers).
+    l.layers = try prologue.openLayers(l.arena, s.mounts, l.protect);
 
     // 12b. bwrap, in the sandbox leaf (:745-746), with ordering checkpoint 2.
     var ends: bwrap.ChildEnds = .{ .u2 = two.u2 };
@@ -414,6 +470,17 @@ fn run(l: *Launch) sig.Error!u8 {
     _ = try spawned;
     const bw = l.bwrap.?;
 
+    // 12c. With bwrap in it, the container's cgroup is populated: the
+    // layers' keeper holds their locks from here until it is empty again
+    // (`keeper`). Forked in the launcher's own cgroup, outside the one it
+    // watches.
+    var keep: std.ArrayList(fdt.AnyFd) = .empty;
+    for (l.layers) |x| if (x) |h| keep.append(l.arena, h.any()) catch return msg.fail(.NOMEM, "malloc", .{});
+    if (keep.items.len > 0) {
+        keep.append(l.arena, cg.fd.any()) catch return msg.fail(.NOMEM, "malloc", .{});
+        l.keeper = try proc.fork(.{ .keep = keep.items, .null_stdio = true }, Keeper{ .cg = cg.fd }, keeper);
+    }
+
     // 13. --info-fd until child-pid; bwrap's exit also ends the wait. The
     // leader's pidfd and network namespace are held, and leader= appended
     // to the record (:748-750, 485-523).
@@ -443,7 +510,10 @@ fn run(l: *Launch) sig.Error!u8 {
     // pidfd and nothing else: a copy of the record's lock there would keep
     // a dead session alive for the sweep (:527-557).
     const ready = l.ready.?;
-    l.helper = try proc.fork(.{ .cgroup = cg.leaf[sandbox].?, .keep = &.{ outer.any(), ready.any(), leader.any() } }, mount.Job{
+    var helper_keep: std.ArrayList(fdt.AnyFd) = .empty;
+    helper_keep.appendSlice(l.arena, &.{ outer.any(), ready.any(), leader.any() }) catch return msg.fail(.NOMEM, "malloc", .{});
+    for (l.layers) |x| if (x) |h| helper_keep.append(l.arena, h.any()) catch return msg.fail(.NOMEM, "malloc", .{});
+    l.helper = try proc.fork(.{ .cgroup = cg.leaf[sandbox].?, .keep = helper_keep.items }, mount.Job{
         .u1 = two.u1,
         .leader = leader_fd,
         .ready = ready,
@@ -453,6 +523,7 @@ fn run(l: *Launch) sig.Error!u8 {
         .home = s.home,
         .protect = l.protect,
         .ping_groups = if (s.network) ns.pingGroups(s.gidmap) else null,
+        .layers = l.layers,
     }, mountHelper);
     // Checkpoint 3: the helper holds the only read end now, so it alone
     // sees the ready byte, or EOF when bwrap dies first (:554-556).
@@ -612,6 +683,14 @@ fn teardown(l: *Launch, result: sig.Error!u8) u8 {
     // sweep; then the session's descriptors.
     var removed = true;
     if (l.cg) |*cg| removed = settled and (cgroup.remove(cg) catch .busy) == .gone;
+    // With the cgroup gone nothing writes through the overlay: the
+    // layers' keeper is killed and reaped, rather than waited for.
+    // Otherwise it outlives the launcher, the locks with it, until the
+    // sweep empties the cgroup.
+    if (removed) if (l.keeper) |k| {
+        _ = k.pidfd.sendSignal(sys.SIGKILL);
+        _ = reap(&l.keeper);
+    };
     if (l.rec) |*rec| {
         if (removed) rec.remove() else rec.closeKeeping();
     }

@@ -39,6 +39,14 @@
           rootless-a = vmTestPart ./tests/rootless.nix "a";
           rootless-b = vmTestPart ./tests/rootless.nix "b";
 
+          # A kept overlay over /nix/store, `binds`' PATH:overlay:LAYERS:
+          # writes kept, the upper's root shaped as the lower's, one holder,
+          # the refusals, and single-user nix over a local-overlay store
+          # under the strict filters.
+          kept-overlay = pkgs.testers.runNixOSTest {
+            imports = [ ./tests/kept-overlay.nix ];
+          };
+
           # The seccomp stacks of two tiers, live in one VM: the filters
           # dumped and matched with the build's, and a syscall probe.
           parity = pkgs.testers.runNixOSTest {

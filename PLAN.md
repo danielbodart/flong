@@ -101,10 +101,21 @@ entrypoint is never root. What was found:
 - **The build sandbox is off.** `sandbox = false`: a build is a process of
   the container, confined by the container. With the sandbox on it needs a
   namespace of its own, which flong's filter refuses.
-- **The host adding paths is fine.** A path built on the host while the
-  overlay was mounted was readable inside at once, known to the lower's
-  database, and an upper build depending on it succeeded. overlayfs calls a
-  changing lower undefined; adding to it was not seen to matter.
+- **The host adding paths is fine, read as `mode=ro`.** A path built on the
+  host while the overlay was mounted was readable inside at once, known to
+  the lower's database, and an upper build depending on it succeeded.
+  overlayfs calls a changing lower undefined; adding to it was not seen to
+  matter. But `read-only-local-store` opens the host's database
+  `immutable=1`, and an immutable read misses what the host's WAL holds
+  (the design's experiment 5a) and fails while the host checkpoints it
+  (5b); opened `mode=ro` over the same read-only bind it did neither, 0
+  errors. A copy of the database instead goes stale: a path the host adds
+  after the copy cannot be realised inside (`fchmodat2 … EPERM`, the
+  critique's C2). So the container's nix carries a patch opening the lower
+  `mode=ro`, until upstream takes it. The read-only store also wants its
+  state's `gcroots/per-user`, `profiles/per-user` and `temproots` to exist
+  (5c): a state directory of empty ones with `db` a symlink to the bound
+  host database serves.
 - **The host collecting paths is not.** Nix requires the lower only grow.
   Collect a lower path an upper path refers to, and the upper's database
   still lists it valid, and `nix build` reuses the dependent path whose
@@ -117,19 +128,42 @@ entrypoint is never root. What was found:
 - **Warmth is the host's.** chase's devShell, not built on the host, fetched
   53 MB into the upper; one the host has costs nothing.
 
-What it would take in flong: an overlay whose upper is a host directory
-kept across launches (a cache's, `rw`), not the tmpfs every `overlays`
-upper is now, with its target allowed over `/nix/store`; the store's state
-directory bound beside it; and the settings above in the container's
-`nix.conf`. Whether a store is kept per session or shared is the
-consumer's: a store shared by a tier's checkouts is one each can write
-paths into that the next one trusts, so a tier for other people's code
-keeps it per session, as it keeps its other caches.
+- **One upper, one mount.** The same upper behind two mounts at once gave a
+  path nix called valid that `cat` could not open (experiment 6); overlayfs
+  only warns of it, since `userxattr` forces `index=off`. So one container
+  holds an upper at a time.
+- **Rooting is cheap.** waydriver's devShell had 8,521 lower paths for the
+  host to root; a `nix build` of one `builtins.toFile` of their names,
+  each through `builtins.storePath`, realised and rooted them in about
+  0.2 s (experiment 7). The names go to Nix as JSON, never as its source.
+- **The payload must not own the upper's root** (the critique's C1). With a
+  root of the caller's, the payload unlinked a store file of the lower's
+  root and planted its own at the name, which a kept upper would keep. A
+  root of the container's root, the payload's group and the lower root's
+  `1775` refuses the unlink (`EPERM`), and single-user nix still adds,
+  deletes and builds.
+- **Made as container root, layers are not yours.** Directories namespace
+  root makes are its subordinate id's, which you cannot remove (experiment
+  4): the overlay is mounted as you, so overlayfs makes its upper files as
+  you.
 
-Untested: `read-only-local-store` opens the host's database as immutable,
-which reads without the lock; a host write landing mid-read was not tried.
-Nor was it tried under flong's own filter, which may refuse a call
-single-user Nix makes.
+Built in flong: `binds`' `PATH:overlay:LAYERS`, a kept overlay (DESIGN.md,
+"What each kind mounts"), allowed over `/nix/store`, one holder per
+`LAYERS` for the cgroup's life, `$machine` seen from `workspace` on so a
+consumer keys a store per launch by it, and the `kept-overlay` VM test,
+where single-user nix builds into such a store under the strict tier and
+the three fixed filters. The store's state is bound beside it with an
+ordinary `:rw` line, and its lower's read-only; the settings above go in
+the container's `nix.conf`. Whether a store is kept per session or shared
+is the consumer's: a store shared by a tier's checkouts is one each can
+write paths into that the next one trusts, so a tier for other people's
+code keeps it per session, as it keeps its other caches.
+
+Left to the consumer (chase's PLAN): the patched nix and its schema check,
+the indirect GC roots on the host for the lower paths the store's database
+lists, a bound on the upper's bytes and inodes, and removing the layers in
+`postStop`. Untested here: the host collecting a path mid-session with and
+without those roots, and fetches through a filtering proxy.
 
 ## 4. Loose ends
 

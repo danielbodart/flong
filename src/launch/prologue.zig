@@ -2,7 +2,8 @@
 //! checkpoint 1 (DESIGN.md; launcher/flong-launch.c:847-925 of 5f1f08e), but
 //! not the prologue itself: the relaunch of a swept launch (quirk 2), the
 //! cache's shared lock, the close of what the launch inherited, and the
-//! protected paths made canonical (quirk 21). launch.zig's `launch` calls
+//! protected paths made canonical (quirk 21), and a kept overlay's layers,
+//! opened and locked (`openLayers`). launch.zig's `launch` calls
 //! them in the C's order, one linear function; none of them decides that
 //! order. The part of the prologue that does rootless-wrapper.bash's work
 //! (launch/assemble.zig, DESIGN.md, "Launch sequence") shares three
@@ -32,6 +33,7 @@ const msg = @import("msg");
 const sig = @import("sig");
 const proc = @import("proc");
 const record = @import("record");
+const mount = @import("mount");
 
 const Allocator = std.mem.Allocator;
 const path_max = sys.path_max;
@@ -301,4 +303,63 @@ pub fn protectPaths(
     n += 1;
     out[n] = try canonical(gpa, holder);
     return out;
+}
+
+/// Each kept overlay's LAYERS (mount.Kind.overlay_kept), opened and locked
+/// for the container's life, at its mount's index; null for every other
+/// mount. As the caller, which the launcher is: opened exactly, so a
+/// symlink anywhere on the way is refused, as for a bind of the caller's;
+/// the caller's own, by its owner; reaching no protected path (`protect`,
+/// protectPaths' canonical list), compared on the path the kernel resolved
+/// the descriptor to, as the mount helper compares a source; and locked
+/// exclusive, without waiting. A lock already held is another container
+/// of these layers: one upper behind two mounts gave a path nix called
+/// valid that `cat` could not open, and overlayfs only warns of it, since
+/// `userxattr` forces `index=off` (PLAN.md §3). The launcher holds its
+/// descriptor until it exits, and the layers' keeper (launch.zig) holds
+/// the same open file description until the container's cgroup is empty,
+/// so a launcher killed outright leaves the lock held for as long as
+/// anything of the container could still write through the overlay.
+pub fn openLayers(gpa: Allocator, mounts: []const mount.Mount, protect: []const [:0]const u8) msg.Error![]const ?fdt.Dir {
+    const out = gpa.alloc(?fdt.Dir, mounts.len) catch return msg.fail(.NOMEM, "calloc", .{});
+    @memset(out, null);
+    for (mounts, out) |*m, *slot| {
+        if (m.kind != .overlay_kept) continue;
+        slot.* = try openLayersOf(m);
+    }
+    for (out) |slot| {
+        const h = slot orelse continue;
+        var buf: [path_max]u8 = undefined;
+        const link = fdt.selfPath(h);
+        const n = try msg.check(sys.readlinkat(sys.AT.FDCWD, link.path(), buf[0 .. buf.len - 1]), "readlink {s}", .{link.path()});
+        for (protect) |p| {
+            if (mount.overlaps(buf[0..n], p))
+                return msg.refuse("the mount source {s} is, holds or lies inside {s}, which no session may reach", .{ buf[0..n], p });
+        }
+    }
+    return out;
+}
+
+fn openLayersOf(m: *const mount.Mount) msg.Error!fdt.Dir {
+    const layers = m.layers.?; // spec.validate refuses an overlay_kept without them
+    const h = switch (fdt.openExact(.dir, layers) catch return msg.refuse("overlay {s}: too many open descriptors", .{m.dest})) {
+        .ok => |h| h,
+        .err => |e| return switch (e) {
+            .LOOP => msg.refuse("overlay {s}: a symlink is on the way to its layers {s}", .{ m.dest, layers }),
+            .NOENT, .NOTDIR => msg.refuse("overlay {s}: its layers {s} are not a directory", .{ m.dest, layers }),
+            else => msg.fail(e, "overlay {s}: its layers {s}", .{ m.dest, layers }),
+        },
+    };
+    errdefer h.close();
+    const st = try msg.check(h.fstat(), "overlay {s}: its layers {s}", .{ m.dest, layers });
+    if (st.uid != sys.getuid())
+        return msg.refuse("overlay {s}: its layers {s} are not yours: their owner is uid {d}", .{ m.dest, layers, st.uid });
+    switch (h.flock(sys.LOCK.EX | sys.LOCK.NB)) {
+        .ok => {},
+        .err => |e| return if (e == .AGAIN)
+            msg.refuse("overlay {s}: its layers {s} are in use by another container", .{ m.dest, layers })
+        else
+            msg.fail(e, "overlay {s}: locking its layers {s}", .{ m.dest, layers }),
+    }
+    return h;
 }

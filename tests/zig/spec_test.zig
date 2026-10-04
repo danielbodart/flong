@@ -408,6 +408,10 @@ const cases = [_]Case{
     case("mount-dev-src-relative", set("mounts", mounts(.{ .kind = .dev, .dest = "/dev/kvm", .src = "dev" })), "spec: mount dev source is not an absolute path: 'dev'"),
     case("mount-exact-src-dotdot", set("mounts", mounts(.{ .kind = .bind_ro_exact, .dest = "/d", .src = "/s/../t" })), "spec: mount bind-ro-exact source has an empty, '.' or '..' component: '/s/../t'"),
     case("mount-exact-src-relative", set("mounts", mounts(.{ .kind = .bind_rw_exact, .dest = "/d", .src = "s" })), "spec: mount bind-rw-exact source is not an absolute path: 's'"),
+    case("mount-overlay-kept-layers-missing", set("mounts", mounts(.{ .kind = .overlay_kept, .dest = "/o", .src = "/o" })), "spec: mount overlay-kept layers is not an absolute path: ''"),
+    case("mount-overlay-kept-layers-relative", set("mounts", mounts(.{ .kind = .overlay_kept, .dest = "/o", .src = "/o", .layers = "l" })), "spec: mount overlay-kept layers is not an absolute path: 'l'"),
+    case("mount-overlay-kept-layers-unclean", set("mounts", mounts(.{ .kind = .overlay_kept, .dest = "/o", .src = "/o", .layers = "/l/" })), "spec: mount overlay-kept layers has an empty, '.' or '..' component: '/l/'"),
+    case("mount-overlay-kept-src-dotdot", set("mounts", mounts(.{ .kind = .overlay_kept, .dest = "/o", .src = "/s/../o", .layers = "/l" })), "spec: mount overlay-kept source has an empty, '.' or '..' component: '/s/../o'"),
     case("mount-overlay-src-relative", set("mounts", mounts(.{ .kind = .overlay, .dest = "/o", .src = "lower" })), "spec: mount overlay source is not an absolute path: 'lower'"),
     case("mount-src-relative", set("mounts", mounts(.{ .kind = .bind_ro, .dest = "/d", .src = "s" })), "spec: mount bind-ro source is not an absolute path: 's'"),
     case("mount-tmpfs-mode-8", set("mounts", mounts(.{ .kind = .tmpfs, .dest = "/t", .mode = "0785" })), "spec: mount tmpfs mode is not an octal mode: '0785'"),
@@ -530,6 +534,7 @@ test "validate: every field set, each at an edge that passes (accepted-all)" {
         .{ .kind = .tmpfs, .dest = "/u", .mode = "0", .size = "100%" },
         .{ .kind = .tmpfs, .dest = "/v", .mode = "00000", .size = "1E" },
         .{ .kind = .overlay, .dest = "/o", .src = "/" },
+        .{ .kind = .overlay_kept, .dest = "/nix/store", .src = "/nix/store", .layers = "/l" },
         .{ .kind = .mask, .dest = "/m" },
     };
     s.protect = &.{ "/p", "/p" };
@@ -666,10 +671,14 @@ const Gen = struct {
     }
 
     fn mountOf(g: Gen) !mount.Mount {
-        const kinds = [_]mount.Kind{ .bind_ro, .bind_rw, .bind_ro_exact, .bind_rw_exact, .dev, .tmpfs, .overlay, .mask };
+        const kinds = [_]mount.Kind{ .bind_ro, .bind_rw, .bind_ro_exact, .bind_rw_exact, .dev, .tmpfs, .overlay, .overlay_kept, .mask };
         var m: mount.Mount = .{ .kind = kinds[g.below(kinds.len)], .dest = try g.cleanPath(.absolute) };
         switch (m.kind) {
             .bind_ro_exact, .bind_rw_exact => m.src = try g.cleanPath(.absolute),
+            .overlay_kept => {
+                m.src = try g.cleanPath(.absolute);
+                m.layers = try g.cleanPath(.absolute);
+            },
             .bind_ro, .bind_rw, .dev, .overlay => m.src = try g.absPath(),
             .tmpfs => {
                 m.mode = try g.octal();

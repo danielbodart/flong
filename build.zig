@@ -1376,6 +1376,7 @@ const Launcher = struct {
                 .{ .name = "sig", .module = m.sig },
                 .{ .name = "proc", .module = m.proc },
                 .{ .name = "record", .module = l.record },
+                .{ .name = "mount", .module = m.mount },
             },
         });
     }
@@ -1454,6 +1455,7 @@ const Launcher = struct {
         });
         const binds = piece.module(bb, "binds", t, o, &.{
             .{ .name = "msg", .module = m.msg },
+            .{ .name = "mount", .module = m.mount },
             .{ .name = "refuse", .module = refuse },
             .{ .name = "workspace", .module = workspace },
             .{ .name = "cmd", .module = cmd },

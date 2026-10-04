@@ -354,11 +354,18 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
             return sys.fchownat(self.raw(), path, uid, gid, flags);
         }
 
+        /// fchmod(2) of the directory itself: a kept overlay's upper
+        /// takes its lower's mode (mount.zig, `shapeUpper`).
+        pub fn fchmod(self: Self, mode: sys.mode_t) sys.Result(void) {
+            comptime need("fchmod", &.{.dir});
+            return sys.fchmod(self.raw(), mode);
+        }
+
         // ---- path and tree: mounts ----
 
         /// The unique id of the mount the file is on (flong-mount.c:57-64).
         pub fn mountId(self: Self) sys.Result(u64) {
-            comptime need("mountId", &.{ .path, .tree });
+            comptime need("mountId", &.{ .dir, .path, .tree });
             return sys.mountId(self.raw());
         }
 

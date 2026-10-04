@@ -7,10 +7,10 @@
 //! before S3):
 //!
 //!   1  the caller and the runtime directory (:67-97)    caller.zig
-//!   2  the workspace (:99-150)                          workspace.zig
-//!   3  the caller's binds (:152-195)                    binds.zig
-//!   4  the guard (:197-203)                             cmd.zig
-//!   5  the signals, the session's name, the project's policy
+//!   2  the signals and the session's name (:205-223)
+//!   3  the workspace (:99-150)                          workspace.zig
+//!   4  the caller's binds (:152-195)                    binds.zig
+//!   5  the guard (:197-203), the project's policy
 //!      (:205-223), the payload's `exec`                 cmd.zig
 //!   6  the depth rule (:225-247)                        depth.zig
 //!   7  the maps (:249-290)                              subid.zig
@@ -32,15 +32,20 @@
 //! it (:314, 322, 352) relaunch flong with the process's own argv
 //! (prologue.relaunchSelf), so a declaration's link name is looked up again.
 //!
-//! From step 5 on the session has a name, `$machine`, and the commands that
-//! see it -- `seccompPolicy` and `exec` -- may have staged something for it
-//! on the host that only `postStop` releases. So from there every way the
+//! From step 2 on the session has a name, `$machine`, and every command
+//! that sees it -- `workspace`, `binds`, `guard`, `seccompPolicy` and
+//! `exec` -- may have staged something for it on the host that only
+//! `postStop` releases: `binds` a kept overlay's layers, keyed by it. The
+//! wrapper named the session after the guard; it is named before the
+//! workspace now, so a consumer keys anything per launch by `$machine` and
+//! finds it again in `postStop`, rather than inventing a name of its own
+//! and sweeping what a crash left. So from there every way the
 //! prologue ends but a spec releases it: a refusal, a signal, and a
 //! relaunch, which runs the commands again under a new name, run postStop's
 //! commands for this one first (`Early`), as the record would have; once
 //! the spec is built, the launch takes that over (launch.zig). And the
 //! signals the launch reads from its signalfd are blocked, and the
-//! signalfd opened, at step 5 rather than after the prologue, so a
+//! signalfd opened, at step 2 rather than after the prologue, so a
 //! terminating signal during the commands or the prepare ends a wait and
 //! is released from, where it would have killed the launcher outright. A
 //! terminating signal still queued when a relaunch releases the name ends
@@ -225,7 +230,20 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
     try env.set("XDG_RUNTIME_DIR", who.runtime);
     const dests = try normAll(gpa, check.declaredDests(gpa, d) catch return oom());
 
-    // 2. The workspace: the caller's directory, or what the workspace
+    // 2. The launch's signals, blocked and read from the signalfd from
+    // here on, SIGPIPE ignored (the header); the session's name, exported
+    // for every command from the workspace's on, and released from
+    // whatever ends the prologue now.
+    const old_mask = try sig.block();
+    sig.ignorePipe();
+    try sig.openSignalfd();
+    const machine = std.fmt.allocPrintSentinel(gpa, "{s}-{d}-{x:0>16}", .{ d.container, sys.getpid(), try randomWord() }, 0) catch return oom();
+    const post_stop = postStopCommands(gpa, d) catch return oom();
+    var early: Early = .{ .post_stop = post_stop, .machine = machine };
+    errdefer early.runPostStop();
+    try env.set("machine", machine);
+
+    // 3. The workspace: the caller's directory, or what the workspace
     // command prints, with its :ro or :rw; resolved, then refused as
     // refuse_path refuses it (:99-150).
     const raw = if (d.workspace) |w| blk: {
@@ -237,8 +255,9 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
     try env.set("workspace", ws.path);
     try env.set("workspace_mode", @tagName(ws.mode));
 
-    // 3. The caller's binds, the commands' outputs concatenated: merged,
-    // folded into the workspace, $binds (:152-195).
+    // 4. The caller's binds, the commands' outputs concatenated: merged,
+    // folded into the workspace, $binds (:152-195); a kept overlay's line
+    // among them.
     const b = if (d.binds.len > 0)
         try binds.parse(gpa, try cmd.outputOf(gpa, d.binds, args, try env.envp()), ws, dests)
     else
@@ -246,22 +265,10 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
     try env.set("workspace_mode", @tagName(b.workspace_mode));
     try env.set("binds", b.text);
 
-    // 4. The guard: each command must pass, in order (:197-203).
+    // 5. The guard: each command must pass, in order (:197-203); the
+    // project's policy, compiled when it says anything (:205-223); the
+    // payload's `exec`, when it has one.
     if (d.guard.len > 0) try cmd.pass(gpa, d.guard, args, try env.envp());
-
-    // 5. The launch's signals, blocked and read from the signalfd from
-    // here on, SIGPIPE ignored (the header); the session's name, exported
-    // for the policy and the hooks, and released from whatever ends the
-    // prologue now; the project's policy, compiled when it says anything
-    // (:205-223); the payload's `exec`, when it has one.
-    const old_mask = try sig.block();
-    sig.ignorePipe();
-    try sig.openSignalfd();
-    const machine = std.fmt.allocPrintSentinel(gpa, "{s}-{d}-{x:0>16}", .{ d.container, sys.getpid(), try randomWord() }, 0) catch return oom();
-    const post_stop = postStopCommands(gpa, d) catch return oom();
-    var early: Early = .{ .post_stop = post_stop, .machine = machine };
-    errdefer early.runPostStop();
-    try env.set("machine", machine);
     var tier_bpf: []const u8 = d.seccompTierFilter orelse "";
     if (d.seccompPolicy.len > 0) {
         const policy = cmd.substitute(try cmd.outputOf(gpa, d.seccompPolicy, args, try env.envp()));
@@ -275,7 +282,9 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
     const masks = gpa.alloc(depth.Mask, d.masks.len) catch return oom();
     for (masks, d.masks, hosts) |*m, path, host| m.* = .{ .path = path, .host = host };
     const roots = gpa.alloc(depth.Root, b.list.len) catch return oom();
-    for (roots, b.list) |*r, x| r.* = .{ .path = x.path, .rw = x.mode == .rw };
+    // An overlay is not checked: a rename under it moves only where the
+    // container's own writes land.
+    for (roots, b.list) |*r, x| r.* = .{ .path = x.path, .rw = x.mode == .rw and x.layers == null };
     if (depth.check(.{ .path = ws.path, .rw = b.workspace_mode == .rw }, roots, masks)) |h|
         return msg.refuse(depth.refusal, .{ h.mask, h.hidden, h.root });
 
@@ -478,7 +487,10 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
     // bound exact: a symlink the launcher meets on the way is a race, and
     // refused (:406-411). Then $home/tmp.
     try l.mounts.append(gpa, .{ .kind = if (f.b.workspace_mode == .rw) .bind_rw_exact else .bind_ro_exact, .dest = f.ws.path, .src = f.ws.path });
-    for (f.b.list) |x| try l.mounts.append(gpa, .{ .kind = if (x.mode == .rw) .bind_rw_exact else .bind_ro_exact, .dest = x.path, .src = x.path });
+    for (f.b.list) |x| try l.mounts.append(gpa, if (x.layers) |layers|
+        .{ .kind = .overlay_kept, .dest = x.path, .src = x.path, .layers = layers }
+    else
+        .{ .kind = if (x.mode == .rw) .bind_rw_exact else .bind_ro_exact, .dest = x.path, .src = x.path });
     if (f.home_tmp) |t| try l.mounts.append(gpa, .{ .kind = .tmpfs, .dest = t, .mode = "0700", .owner_user = true });
 
     // What no mount may reach: the kernel's, the declaration's, and the

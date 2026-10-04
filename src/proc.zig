@@ -112,6 +112,10 @@ pub const ForkOpts = struct {
     cgroup: ?fdt.Fd(.cgroup) = null,
     /// the descriptors from 3 up the child keeps, at their numbers
     keep: []const fdt.AnyFd = &.{},
+    /// 0, 1 and 2 /dev/null in the child, before its body: for a child
+    /// that may outlive the caller, which would otherwise hold the
+    /// caller's pipes open for whoever reads them (launch.zig's keeper)
+    null_stdio: bool = false,
 };
 
 /// fl_fork (flong-util.c:467-482): a helper that runs `body(ctx)` and must
@@ -135,11 +139,30 @@ pub fn fork(opts: ForkOpts, ctx: anytype, comptime body: fn (@TypeOf(ctx)) noret
         .ok => |pid| {
             if (pid == 0) {
                 if (fdt.retainOnly(opts.keep)) |f| msg.die(f.err, "close_range {d}", .{f.low});
+                if (opts.null_stdio) nullStdio();
                 body(ctx);
             }
             return .{ .pidfd = slot.fill(.pidfd, raw), .pid = pid };
         },
     }
+}
+
+/// ForkOpts.null_stdio, in the child: /dev/null at 0, 1 and 2, or the
+/// child dies saying why, while it still has its stderr.
+fn nullStdio() void {
+    const n = switch (sys.openat(sys.AT.FDCWD, "/dev/null", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0)) {
+        .ok => |n| n,
+        .err => |e| msg.die(e, "open /dev/null", .{}),
+    };
+    // A closed 0, 1 or 2 is where the open landed.
+    for ([_]sys.fd_t{ 0, 1, 2 }) |i| {
+        if (i == n) continue;
+        switch (sys.dup2(n, i)) {
+            .ok => {},
+            .err => |e| msg.die(e, "dup2 {d}", .{i}),
+        }
+    }
+    if (n > 2) sys.close(n);
 }
 
 /// A program to start (struct fl_spawn, flong-util.h:157-167). Its argv

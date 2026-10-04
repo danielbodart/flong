@@ -37,17 +37,32 @@ so several modules' lists concatenate (`mkBefore`, `mkAfter`).
 
 | hook | sees |
 |---|---|
-| `workspace` | `"$@"` |
-| `binds` | `"$@"`, `$workspace`, `$workspace_mode` (`ro` or `rw`) |
-| `guard` | the above and `$binds` (one `PATH:ro` or `PATH:rw` per line) |
-| `seccompPolicy` | the above and `$machine` |
+| `workspace` | `"$@"`, `$machine` (the container's name) |
+| `binds` | the above, `$workspace`, `$workspace_mode` (`ro` or `rw`) |
+| `guard` | the above and `$binds` (one `PATH:ro`, `PATH:rw` or `PATH:overlay` per line) |
+| `seccompPolicy` | the same |
 | `exec` | the same |
 | `postStart` | the above, `$leader` (the container's pid 1 on the host), `$userns` and `$netns` (its namespaces, as descriptors), `$uid`, `$gid`, `$home` |
 | `postStop` | `$machine` only |
 
 - `workspace` prints `PATH` (read-write) or `PATH:ro`. `binds` prints
-  `PATH` (read-only) or `PATH:rw`, one per line. Paths are resolved with
-  `realpath`, must be directories, and may not contain `:` or a newline.
+  `PATH` (read-only), `PATH:rw` or `PATH:overlay:LAYERS`, one per line.
+  Paths are resolved with `realpath`, must be directories, and may not
+  contain `:` or a newline.
+- `PATH:overlay:LAYERS` mounts an overlay at `PATH`, over whatever is there
+  (`/nix/store` included), with `PATH` as its lower and its writes kept in
+  `LAYERS/upper`, on your disk, for the next container given the same
+  `LAYERS`. `LAYERS` is your directory, absolute, clean and reached through
+  no symlink; `upper` and `work` are made in it when missing. It may not
+  be, hold or lie inside `PATH`, lie inside the working directory or
+  another path `binds` prints, or reach a `protect` path, and its upper and work must be on one
+  filesystem with user xattrs. `upper`'s root takes `PATH`'s root's mode,
+  owned by the container's root and your group, so under `/nix/store`'s
+  sticky bit the container cannot unlink what the host's store holds; the
+  rest is yours, and `chmod -R u+w`, then `rm -rf`, removes it all. One
+  container at a time holds `LAYERS`, until its cgroup is empty: another is
+  refused. When `LAYERS` goes, and how large it may grow, is yours: key it
+  by `$machine` and remove it in `postStop` to keep it for one launch.
 - `postStart` is where firewall rules go: the entrypoint waits for it, and
   the network is attached after it. `nsenter --user="$userns" --net="$netns"`
   runs a tool as the container's root, with no capability over the host. A
@@ -55,8 +70,8 @@ so several modules' lists concatenate (`mkBefore`, `mkAfter`).
   `/proc/self` does not resolve. Anything a hook starts is in the container's
   cgroup and killed with it.
 - `postStop` must depend on `$machine` alone and succeed when what it
-  releases is already gone. It runs once for every `$machine` that
-  `seccompPolicy` or `exec` saw, whether the container ran or not.
+  releases is already gone. It runs once for every `$machine` that any
+  command saw, `workspace` on, whether the container ran or not.
 
 ## `exec`
 
@@ -135,7 +150,8 @@ flong.agent.seccompPolicy = ''
 ## Inside a container
 
 - The working directory and binds are at their host paths. The entrypoint
-  gets the binds as `$FLONG_BINDS`, one `PATH:ro` or `PATH:rw` per line.
+  gets the binds as `$FLONG_BINDS`, one `PATH:ro`, `PATH:rw` or
+  `PATH:overlay` per line: an overlay's layers are not named.
 - `user`'s uid and primary gid map to yours, so what it writes to a bind is
   yours. Every other id, root included, comes from your subordinate range,
   and shows on the host as that id. Your host groups do not reach inside.
@@ -193,8 +209,9 @@ the build log's last line.
   not work. `ping` does, with a `network`, through ICMP echo sockets rather
   than setuid: its `net.ipv4.ping_group_range` spans every gid in the
   container.
-- **No Nix.** No daemon, and the store database may miss recent paths. See
-  [PLAN.md](../PLAN.md) §3.
+- **No Nix daemon.** The store database may miss recent paths. A container
+  can run `nix` single-user over a local-overlay store of its own, through
+  a kept overlay of `/nix/store` from `binds`; see [PLAN.md](../PLAN.md) §3.
 - **No symlinks on the way to a mount point.** One ends the launch.
 - **No published ports below 1024**, or below
   `net.ipv4.ip_unprivileged_port_start`.
@@ -204,9 +221,12 @@ the build log's last line.
   it runs a local resolver (systemd-resolved, dnsmasq).
 - **Writes use RAM.** The overlay, `/tmp`, `TMPDIR` and overlays are tmpfs,
   charged to the container's cgroup. Set `limits.MemoryMax`; pasta shares
-  the cgroup, so the OOM killer may pick it.
+  the cgroup, so the OOM killer may pick it. A kept overlay from `binds` is
+  the exception: its upper is on your disk, and bounding it is yours.
 - **Overlays need care.** Inode numbers change as a file is written: do not
-  overlay a SQLite database.
+  overlay a SQLite database. A database belongs in a bind beside the
+  overlay, never inside it. A kept upper is as trustworthy as the
+  containers that wrote it, as the cached rootfs is.
 - **Not in `machinectl`.** `systemctl --user status flong-sessions.service`
   lists every container's processes; enter one with
   `nsenter --target <pid> --user --preserve-credentials --mount --pid --net --uts --ipc`,

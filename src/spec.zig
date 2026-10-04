@@ -576,6 +576,7 @@ fn kindName(k: mount.Kind) []const u8 {
         .dev => "dev",
         .tmpfs => "tmpfs",
         .overlay => "overlay",
+        .overlay_kept => "overlay-kept",
         .mask => "mask",
     };
 }
@@ -591,6 +592,10 @@ fn mountValue(m: *const mount.Mount) Error!void {
     const src_what = std.fmt.bufPrint(&src_buf, "mount {s} source", .{kind}) catch unreachable; // proven: 6 + 13 + 7 bytes fit 64
     switch (m.kind) {
         .bind_ro_exact, .bind_rw_exact => try clean(src_what, m.src orelse "", .absolute),
+        .overlay_kept => {
+            try clean(src_what, m.src orelse "", .absolute);
+            try clean("mount overlay-kept layers", m.layers orelse "", .absolute);
+        },
         .bind_ro, .bind_rw, .dev, .overlay => try absolute(src_what, m.src orelse ""),
         .tmpfs => {
             try octal("mount tmpfs mode", m.mode orelse "");

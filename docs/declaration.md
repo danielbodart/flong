@@ -164,8 +164,9 @@ is overridden silently. The loader's names, `LD_*` and
 entrypoint: both run as `user` inside the container, with no
 capability.
 
-Once it has run, as once `seccompPolicy` has, `postStop` runs for
-the container's `$machine` once, whichever way the launcher ends it:
+Once it has run, as once any command that sees `$machine` has,
+`postStop` runs for the container's `$machine` once, whichever way
+the launcher ends it:
 a refusal, even before the container starts, or a terminating signal
 (`SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`), so whatever it staged
 for `$machine` is released. It runs again when the launcher
@@ -200,6 +201,11 @@ Later hooks see the path as `$workspace` and the mode as
 `$workspace_mode` (`ro` or `rw`). Deciding *which* directory is
 allowed is `guard`'s job, not this one's.
 
+`$machine`, the container's name, is in its environment, as in
+every later command's: anything it stages for the launch is keyed
+by it and released by `postStop`, which runs for that name however
+the launch ends.
+
 ### `binds`
 
 - type: `list of command`
@@ -225,6 +231,29 @@ them as `$binds`, one `PATH:ro` or `PATH:rw` per line, with the
 mode always spelt out. The entrypoint sees the same list as
 `$FLONG_BINDS`, to pass on to an agent's `--add-dir`.
 
+A line may also be `PATH:overlay:LAYERS`: an overlay whose lower is
+`PATH`, mounted at `PATH` over whatever is there (`/nix/store`
+included), and whose writes land in `LAYERS/upper` and stay there,
+for the next container given the same `LAYERS` -- and on your disk,
+not in RAM, so bounding them is yours. `LAYERS` is a directory of
+yours, written absolute and clean, never through a symlink, holding
+`upper` and `work` (made when missing); it may not be, hold or lie
+inside `PATH`, lie in the working directory or another path these
+print, or reach a `protect` path. `upper`'s root takes `PATH`'s root's mode, owned by
+the container's root and the user's group, so on a sticky `PATH`
+like `/nix/store` the container cannot unlink what you put there;
+everything else in `LAYERS` stays yours to remove. One container at
+a time holds `LAYERS`, from before its mounts until its cgroup is
+empty, a SIGKILLed launcher included: another is refused. Removing
+`LAYERS` is yours, by `$machine` in `postStop` for one kept per
+launch. `$binds` and `$FLONG_BINDS` show it as `PATH:overlay`.
+Nothing in `LAYERS` is more trustworthy than the containers that
+wrote it, and a database belongs in a bind beside the overlay,
+never inside it.
+
+`$machine`, the container's name, is in its environment, so a
+`LAYERS` or anything else made for one launch can be keyed by it.
+
 Read-only is not a boundary on its own -- it stops writes, not
 execution -- so it is for directories a container should read rather
 than edit, not for making an untrusted one safe.
@@ -243,8 +272,8 @@ any declaration.
 
 Runs *after* `workspace` and `binds`, with their answers in its
 environment: `$workspace`, absolute and symlink-resolved,
-`$workspace_mode`, and `$binds`, one `PATH:ro` or `PATH:rw` per
-line. Judge those rather than re-deriving a directory from `$PWD`
+`$workspace_mode`, `$binds`, one `PATH:ro`, `PATH:rw` or
+`PATH:overlay` per line, and `$machine`. Judge those rather than re-deriving a directory from `$PWD`
 -- they are exactly what will be bound, where anything a guard
 works out for itself agrees with the mounts only by coincidence.
 

@@ -300,7 +300,20 @@ pub const PR = struct {
     pub const CAPBSET_DROP = 24;
     pub const CAP_AMBIENT = 47;
     pub const CAP_AMBIENT_CLEAR_ALL = 4;
+    /// The mount helper's, around a kept overlay's mount (mount.zig,
+    /// `asCaller`).
+    pub const SET_SECUREBITS = 28;
 };
+
+/// The securebits the mount helper sets to mount a kept overlay as the
+/// caller (linux/securebits.h): its capabilities survive the change of
+/// uid.
+pub const SECBIT_NO_SETUID_FIXUP: usize = 1 << 2;
+pub const SECBIT_KEEP_CAPS: usize = 1 << 4;
+
+/// The capabilities a kept overlay is mounted with (linux/capability.h).
+pub const CAP_DAC_OVERRIDE = 1;
+pub const CAP_SYS_ADMIN = 21;
 
 /// prctl(2) with glibc's five arguments, the unused ones 0. The value is
 /// the call's (PR_CAPBSET_READ answers 0 or 1).
@@ -330,6 +343,12 @@ pub const cap_u32s_3 = 2;
 comptime {
     std.debug.assert(@sizeOf(CapHeader) == 8);
     std.debug.assert(@sizeOf(CapData) == 12);
+}
+
+/// capget(2) of the calling thread (pid 0).
+pub fn capget(data: *[cap_u32s_3]CapData) Result(void) {
+    var header: CapHeader = .{ .version = cap_version_3, .pid = 0 };
+    return result(void, linux.syscall2(.capget, @intFromPtr(&header), @intFromPtr(data)));
 }
 
 /// capset(2) of the calling thread (pid 0): every set to `data`.

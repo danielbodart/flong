@@ -176,7 +176,7 @@ shell. In launch order:
 | hook | runs | a non-zero exit |
 |---|---|---|
 | `workspace` | first; prints the working directory (default: where you ran it) | refuses the launch |
-| `binds` | prints more directories to bind-mount | refuses the launch |
+| `binds` | prints more directories to bind-mount, or to overlay with writes kept | refuses the launch |
 | `guard` | checks the launch is one you meant | refuses the launch |
 | `seccompPolicy` | prints per-project seccomp rules | refuses the launch |
 | `exec` | prints the entrypoint, instead of `command` | refuses the launch |
@@ -192,8 +192,9 @@ The variables each hook sees are in [docs/reference.md](docs/reference.md#hooks)
   can.
 - **No init.** No systemd units, D-Bus or PAM inside.
 - **No setuid.** `sudo` does not work inside; `ping` does, with a network.
-- **No Nix.** `nix build` does not work inside.
-- **Writes use RAM.** Set `limits.MemoryMax`.
+- **No Nix daemon.** `nix` runs inside only single-user, over a store of
+  the container's own: a kept overlay of `/nix/store` from `binds`.
+- **Writes use RAM**, but for a kept overlay's. Set `limits.MemoryMax`.
 - **Not in `machinectl`.** Use `systemctl --user status flong-sessions`.
 
 More, with workarounds, in [docs/reference.md](docs/reference.md#limitations).
