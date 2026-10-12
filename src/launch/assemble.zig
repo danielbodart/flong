@@ -1,4 +1,4 @@
-//! launch/assemble.zig: `flong launch DECL.zon`'s prologue (DESIGN.md,
+//! launch/assemble.zig: `flong launch DECL.json`'s prologue (DESIGN.md,
 //! "Launch sequence"), which does what rootless-wrapper.bash did, in its
 //! order, and assembles the spec as a value (spec.Spec) for launch.zig to
 //! hand to ordering checkpoint 1: no argv spec, no exec. `run` is that

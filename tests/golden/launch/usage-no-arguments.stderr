@@ -1,1 +1,1 @@
-usage: flong launch DECL.zon|NAME [-- ARGS...]
+usage: flong launch DECL.json|NAME [-- ARGS...]

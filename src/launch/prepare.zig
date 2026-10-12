@@ -1,5 +1,5 @@
 //! launch/prepare.zig: the prepared root (rootless-wrapper.bash:277-328),
-//! for `flong launch DECL.zon`'s prologue (DESIGN.md, "Launch
+//! for `flong launch DECL.json`'s prologue (DESIGN.md, "Launch
 //! sequence": the prepared root).
 //!
 //!   paths    the cache key, the cache and its prepared/ (:278-282)

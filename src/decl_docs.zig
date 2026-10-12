@@ -34,28 +34,32 @@
 //!   bool
 //!   port                            0-65535, a u16
 //!   int {min, max}                  inclusive, the type's or `ranges`'
-//!   enum {tags}                     a Nix string, a ZON enum literal
-//!   command                         a non-empty list of strings, a ZON
-//!                                   tuple of them (decl.Command)
+//!   enum {tags}                     a string, one of `tags`
+//!   command                         a non-empty list of strings
+//!                                   (decl.Command)
 //!   list {of}
-//!   pathAttrs {name, value}         Nix `attrsOf path`, a ZON list of
-//!                                   `.{ .name = ..., .value = ... }` under
-//!                                   those field names, sorted by name
+//!   pathAttrs {name, value}         Nix `attrsOf path`, a JSON object
+//!                                   whose names are the `name` field and
+//!                                   values the `value` field of decl's type
 //!   struct {fields}                 a submodule; `fields` are entries
-//!   either {options}                a tagged union: each option is a type
-//!                                   with its union field as `tag`; a void
-//!                                   field is `enum {tags: [tag]}`, a ZON
-//!                                   `.tag`, and any other `.{ .tag = V }`
+//!   either {options}                a union: each option is a type with
+//!                                   its union field as `tag`; a void field
+//!                                   is `enum {tags: [tag]}`, the string
+//!                                   `"tag"`, and any other its value, with
+//!                                   no tag around it (decl.zig)
+//!
+//! A declaration's JSON is these types' Nix values, as `builtins.toJSON`
+//! writes them, so a type here is also how a declaration file spells it.
 //!
 //! The grammar's names are Nix's where Nix has one: strMatching rather
 //! than the blueprint's `pathMatching`, since a syscall name and a CPU
 //! quota are patterns too and neither is a path.
 //!
-//! `writeReference` is the same fields for a reader writing ZON by hand
+//! `writeReference` is the same fields for a reader writing JSON by hand
 //! (DESIGN.md, "The declaration"): `flong help decl` in text, and with
 //! `--markdown` docs/declaration.md, which the reference-fresh check holds
 //! to it. Its rows, `rows`, come from the same helpers at comptime, with
-//! types and defaults spelt as ZON writes them.
+//! types and defaults spelt as JSON writes them.
 
 const std = @import("std");
 const decl = @import("decl");
@@ -321,21 +325,21 @@ fn writeValue(s: *std.json.Stringify, comptime T: type, v: T) std.Io.Writer.Erro
 // The same walk again, for a reader writing a declaration by hand rather
 // than for Nix: the same fields, in the same order, with the same
 // `docFor`, `metaOf`, `ordered` and `isComputed`, flattened at comptime
-// into `rows`, one a field. The types and defaults are spelt as
-// ZON writes them, so a path names a union's option by its tag and a
-// pathAttrs list's element by its fields, where decl-options.json, being
-// Nix's, does neither. Both renderings are one loop over the table, so
+// into `rows`, one a field. The types and defaults are spelt as a
+// declaration's JSON writes them, and a path is decl-options.json's: a
+// union's option adds nothing to it, and a pathAttrs element's fields are
+// under `*`. Both renderings are one loop over the table, so
 // the binary carries the doc text once, the text `flong schema` already
 // holds, and a table beside it.
 
 /// One field of the declaration, as the reference prints it.
 pub const Entry = struct {
-    /// Dotted, from the declaration's top: a list's element is `*`, and
-    /// a union's option is its tag, `network.forwardPorts.ports.*.hostPort`.
+    /// Dotted, from the declaration's top: a list's element is `*`, and a
+    /// union's option adds nothing, `network.forwardPorts.*.hostPort`.
     path: []const u8,
-    /// The type as ZON writes it (`typeText`).
+    /// The type, in the reference's words (`typeText`).
     type: []const u8,
-    /// The default as ZON writes it, or null when the field is required.
+    /// The default as JSON writes it, or null when the field is required.
     default: ?[]const u8,
     /// A list whose definitions Nix concatenates in order: decl-options.json's
     /// `merge: ordered`.
@@ -368,7 +372,7 @@ fn entriesOf(comptime T: type, comptime prefix: []const u8, comptime computed: b
         out = out ++ [_]Entry{.{
             .path = path,
             .type = typeText(f.type, metaOf(T, f.name)),
-            .default = if (f.defaultValue()) |d| zonValue(f.type, d) else null,
+            .default = if (f.defaultValue()) |d| jsonValue(f.type, d) else null,
             .ordered = ordered(f.type),
             .computed = c,
             .doc = docFor(T, f.name, path),
@@ -379,7 +383,7 @@ fn entriesOf(comptime T: type, comptime prefix: []const u8, comptime computed: b
 }
 
 /// The fields a value of `T` holds, when it holds any: a struct's, a list
-/// element's under `*`, a union option's under its tag.
+/// element's under `*`, a union option's under the union's own path.
 fn childrenOf(comptime T: type, comptime path: []const u8, comptime computed: bool) []const Entry {
     const U = unwrap(T);
     if (U == decl.Command or isString(U)) return &.{};
@@ -388,7 +392,7 @@ fn childrenOf(comptime T: type, comptime path: []const u8, comptime computed: bo
         .@"struct" => entriesOf(U, path, computed),
         .@"union" => |u| blk: {
             var out: []const Entry = &.{};
-            for (u.fields) |x| out = out ++ childrenOf(x.type, path ++ "." ++ x.name, computed);
+            for (u.fields) |x| out = out ++ childrenOf(x.type, path, computed);
             break :blk out;
         },
         else => &.{},
@@ -407,11 +411,13 @@ fn typeText(comptime T: type, comptime m: Meta) []const u8 {
         },
         .@"enum" => |e| blk: {
             var s: []const u8 = "one of";
-            for (e.fields, 0..) |x, n| s = s ++ (if (n == 0) " ." else ", .") ++ x.name;
+            for (e.fields, 0..) |x, n| s = s ++ (if (n == 0) " \"" else ", \"") ++ x.name ++ "\"";
             break :blk s;
         },
         .pointer => |p| if (isString(U))
             (if (m.pattern) |pattern| "string matching " ++ pattern else "string")
+        else if (isAttrs(p.child))
+            "object of " ++ p.child.attrs.name ++ " to " ++ p.child.attrs.value
         else
             "list of " ++ typeText(p.child, m),
         .@"struct" => "struct",
@@ -419,9 +425,9 @@ fn typeText(comptime T: type, comptime m: Meta) []const u8 {
             var s: []const u8 = "";
             for (u.fields, 0..) |x, n| {
                 s = s ++ (if (n == 0) "" else " | ") ++ if (x.type == void)
-                    "." ++ x.name
+                    "\"" ++ x.name ++ "\""
                 else
-                    ".{ ." ++ x.name ++ " = " ++ typeText(x.type, metaOf(U, x.name)) ++ " }";
+                    typeText(x.type, metaOf(U, x.name));
             }
             break :blk s;
         },
@@ -430,41 +436,59 @@ fn typeText(comptime T: type, comptime m: Meta) []const u8 {
     return if (U != T) base ++ ", or null" else base;
 }
 
-/// A value as ZON writes it: `.tag` for an enum's tag and a void union
-/// field, `.{ .tag = V }` for a union's other fields, `.{}` for an empty
-/// list and for a struct of its own defaults, whose other fields it
-/// names otherwise.
-fn zonValue(comptime T: type, comptime v: T) []const u8 {
+/// A value as a declaration's JSON writes it, which is as Nix writes it
+/// (`writeValue`): an enum's tag and a void union field as a string, a
+/// union's other fields as their value, pathAttrs as an object, and a
+/// struct as the fields that differ from its own defaults, `{}` for none.
+fn jsonValue(comptime T: type, comptime v: T) []const u8 {
     return switch (@typeInfo(T)) {
-        .optional => |o| if (v) |x| zonValue(o.child, x) else "null",
+        .optional => |o| if (v) |x| jsonValue(o.child, x) else "null",
         .bool => if (v) "true" else "false",
         .int => std.fmt.comptimePrint("{d}", .{v}),
-        .@"enum" => "." ++ @tagName(v),
+        .@"enum" => jsonString(@tagName(v)),
         .pointer => |p| if (isString(T))
-            std.fmt.comptimePrint("\"{f}\"", .{std.zig.fmtString(v)})
-        else if (v.len == 0)
-            ".{}"
+            jsonString(v)
+        else if (isAttrs(p.child)) blk: {
+            var s: []const u8 = "";
+            for (v, 0..) |x, n| s = s ++ (if (n == 0) "{ " else ", ") ++ jsonString(@field(x, p.child.attrs.name)) ++ ": " ++ jsonString(@field(x, p.child.attrs.value));
+            break :blk if (s.len == 0) "{}" else s ++ " }";
+        } else if (v.len == 0)
+            "[]"
         else blk: {
-            var s: []const u8 = ".{ ";
-            for (v, 0..) |x, n| s = s ++ (if (n == 0) "" else ", ") ++ zonValue(p.child, x);
-            break :blk s ++ " }";
+            var s: []const u8 = "[";
+            for (v, 0..) |x, n| s = s ++ (if (n == 0) "" else ", ") ++ jsonValue(p.child, x);
+            break :blk s ++ "]";
         },
         .@"struct" => |st| blk: {
             var s: []const u8 = "";
             for (st.fields) |f| {
                 const x = @field(v, f.name);
                 const same = if (f.defaultValue()) |d| equal(f.type, x, d) else false;
-                if (!same) s = s ++ (if (s.len == 0) ".{ ." else ", .") ++ f.name ++ " = " ++ zonValue(f.type, x);
+                if (!same) s = s ++ (if (s.len == 0) "{ " else ", ") ++ jsonString(f.name) ++ ": " ++ jsonValue(f.type, x);
             }
-            break :blk if (s.len == 0) ".{}" else s ++ " }";
+            break :blk if (s.len == 0) "{}" else s ++ " }";
         },
         .@"union" => blk: {
             const tag = @tagName(std.meta.activeTag(v));
             const P = @FieldType(T, tag);
-            break :blk if (P == void) "." ++ tag else ".{ ." ++ tag ++ " = " ++ zonValue(P, @field(v, tag)) ++ " }";
+            break :blk if (P == void) jsonString(tag) else jsonValue(P, @field(v, tag));
         },
-        else => @compileError("no ZON value for " ++ @typeName(T)),
+        else => @compileError("no JSON value for " ++ @typeName(T)),
     };
+}
+
+/// A JSON string literal, escaped as std.json writes one.
+fn jsonString(comptime s: []const u8) []const u8 {
+    var out: []const u8 = "\"";
+    for (s) |c| out = out ++ switch (c) {
+        '"' => "\\\"",
+        '\\' => "\\\\",
+        '\n' => "\\n",
+        '\t' => "\\t",
+        0...8, 11...0x1f => std.fmt.comptimePrint("\\u{x:0>4}", .{c}),
+        else => &[_]u8{c},
+    };
+    return out ++ "\"";
 }
 
 /// How the reference is written: plain text for a terminal (`flong help
@@ -474,38 +498,39 @@ pub const Style = enum { text, markdown };
 /// What a declaration is and how the types read, before the fields; the
 /// same words in both styles, backticks and all.
 const reference_intro =
-    \\A declaration is one ZON file (Zig Object Notation): a struct literal,
-    \\`.{ .field = value, ... }`, holding the fields below. `flong check`
-    \\judges one and `flong launch` runs one, with the same parser: a field
-    \\not listed here, a required one left out, or a value of the wrong type
-    \\is refused with its line and column. A field with a default may be
-    \\left out.
+    \\A declaration is one JSON object holding the fields below, each under
+    \\its own name, the NixOS option's. `flong check` judges one and `flong
+    \\launch` runs one, with the same parser: a field not listed here, one
+    \\given twice, a required one left out, or a value of the wrong type is
+    \\refused with its line and column. A field with a default may be left
+    \\out. JSON is all it takes: no comment, no trailing comma.
     \\
-    \\The NixOS module writes each `flong.<name>` to `/etc/flong/<name>.zon`,
-    \\from options of the same names, and works out the computed fields at
-    \\the end. A declaration written by hand sets those too. The
-    \\descriptions are the module's as well, so some examples are Nix's:
-    \\`[ ]` and `{ }` are `.{}` in ZON, a string such as `"auto"` is the
-    \\enum literal `.auto`, and `{ target = lower; }` is
-    \\`.{ .{ .target = "...", .lower = "..." } }`.
+    \\The NixOS module writes each `flong.<name>` to `/etc/flong/<name>.json`,
+    \\`builtins.toJSON` of options of the same names, and works out the
+    \\computed fields at the end. A declaration written by hand sets those
+    \\too. Every value is spelt as Nix's is, so the descriptions, which are
+    \\the module's too, read the same either way: `[ ]` is `[]`, `{ }` is
+    \\`{}`, `"auto"` is `"auto"`, and `{ target = lower; }` is
+    \\`{ "target": "lower" }`.
     \\
-    \\Each field has its path, dotted from the top: a list's element is `*`
-    \\and a union's option is its tag. Its type is one of:
+    \\Each field has its path, dotted from the top: a list's element is `*`.
+    \\Its type is one of:
     \\
 ;
 
 /// The types' words: a list in text, a table in Markdown, whose cells
 /// read each newline as a space.
 const type_words = [_]struct { []const u8, []const u8 }{
-    .{ "string", "a string literal, `\"text\"`" },
+    .{ "string", "a JSON string, `\"text\"`" },
     .{ "string matching P", "a string the regular expression P matches whole" },
     .{ "bool", "`true` or `false`" },
-    .{ "integer A..B", "a whole number from A to B" },
-    .{ "one of .a, .b", "an enum literal, `.a`" },
-    .{ "command", "`.{ \"program\", \"argument\", ... }`, not empty, and never\nread by a shell: the program is run as it is, or looked up\non `PATH` when it has no `/`" },
-    .{ "list of X", "`.{ X, X, ... }`; `.{}` is empty" },
-    .{ "struct", "`.{ .field = value, ... }`, its fields listed after it" },
-    .{ "A | B", "a union: one of its options, each `.tag` alone or\n`.{ .tag = value }`" },
+    .{ "integer A..B", "a whole number from A to B, with no fraction or\nexponent" },
+    .{ "one of \"a\", \"b\"", "one of those strings" },
+    .{ "command", "`[\"program\", \"argument\", ...]`, not empty, and never\nread by a shell: the program is run as it is, or looked up\non `PATH` when it has no `/`" },
+    .{ "list of X", "`[X, X, ...]`; `[]` is empty" },
+    .{ "object of A to B", "`{ \"A\": \"B\", ... }`, each name once" },
+    .{ "struct", "`{ \"field\": value, ... }`, its fields listed after it" },
+    .{ "A | B", "a union: a value of one of its options, with nothing\naround it; an option in quotes is that string" },
     .{ "..., or null", "`null` is a value too" },
 };
 
@@ -857,38 +882,38 @@ test "the reference has every field the schema has, with the same doc" {
     }
     try testing.expectEqual(top.len, n);
 
-    // And the fields below them, where ZON's path and Nix's agree.
-    for ([_][]const u8{ "network.hostPorts", "limits.CPUWeight", "seccomp.errno", "containerMounts.*.kind", "seccompProject.dump" }) |p| {
+    // And the fields below them, by the same paths.
+    for ([_][]const u8{ "network.hostPorts", "network.forwardPorts.*.hostPort", "limits.CPUWeight", "seccomp.errno", "containerMounts.*.kind", "seccompProject.dump" }) |p| {
         try testing.expectEqualStrings(find(top, p).?.get("doc").?.string, entry(p).?.doc);
     }
 }
 
-test "the reference spells each type and default as ZON does" {
+test "the reference spells each type and default as JSON does" {
     const Case = struct { path: []const u8, type: []const u8, default: ?[]const u8 };
     for ([_]Case{
         .{ .path = "user", .type = "string", .default = null },
         .{ .path = "command", .type = "command, or null", .default = "null" },
         .{ .path = "exec", .type = "command, or null", .default = "null" },
-        .{ .path = "environment", .type = "list of struct", .default = ".{}" },
+        .{ .path = "environment", .type = "list of struct", .default = "[]" },
         .{ .path = "environment.*.name", .type = "string", .default = null },
         .{ .path = "workspace", .type = "command, or null", .default = "null" },
-        .{ .path = "guard", .type = "list of command", .default = ".{}" },
-        .{ .path = "masks", .type = "list of string matching /.*", .default = ".{}" },
+        .{ .path = "guard", .type = "list of command", .default = "[]" },
+        .{ .path = "masks", .type = "list of string matching /.*", .default = "[]" },
         .{ .path = "network", .type = "struct, or null", .default = "null" },
-        .{ .path = "network.forwardPorts", .type = ".auto | .{ .ports = list of struct }", .default = ".{ .ports = .{} }" },
-        .{ .path = "network.forwardPorts.ports.*.protocol", .type = "one of .tcp, .udp", .default = ".tcp" },
-        .{ .path = "network.forwardPorts.ports.*.hostPort", .type = "integer 0..65535", .default = null },
-        .{ .path = "network.forwardPorts.ports.*.containerPort", .type = "integer 0..65535, or null", .default = "null" },
+        .{ .path = "network.forwardPorts", .type = "\"auto\" | list of struct", .default = "[]" },
+        .{ .path = "network.forwardPorts.*.protocol", .type = "one of \"tcp\", \"udp\"", .default = "\"tcp\"" },
+        .{ .path = "network.forwardPorts.*.hostPort", .type = "integer 0..65535", .default = null },
+        .{ .path = "network.forwardPorts.*.containerPort", .type = "integer 0..65535, or null", .default = "null" },
         .{ .path = "network.hostLoopbackToSession", .type = "bool", .default = "false" },
-        .{ .path = "overlays", .type = "list of struct", .default = ".{}" },
+        .{ .path = "overlays", .type = "object of target to lower", .default = "{}" },
         .{ .path = "overlays.*.target", .type = "string", .default = null },
-        .{ .path = "limits", .type = "struct", .default = ".{}" },
-        .{ .path = "limits.MemoryMax", .type = ".infinity | .{ .bytes = integer 0..9223372036854775807 } | .{ .size = string matching [0-9]+[KMGT] }, or null", .default = "null" },
-        .{ .path = "limits.TasksMax", .type = ".infinity | .{ .count = integer 1..9223372036854775807 }, or null", .default = "null" },
+        .{ .path = "limits", .type = "struct", .default = "{}" },
+        .{ .path = "limits.MemoryMax", .type = "\"infinity\" | integer 0..9223372036854775807 | string matching [0-9]+[KMGT], or null", .default = "null" },
+        .{ .path = "limits.TasksMax", .type = "\"infinity\" | integer 1..9223372036854775807, or null", .default = "null" },
         .{ .path = "limits.CPUQuota", .type = "string matching [1-9][0-9]*%, or null", .default = "null" },
         .{ .path = "limits.CPUWeight", .type = "integer 1..10000, or null", .default = "null" },
-        .{ .path = "seccomp.tier", .type = "one of .parity, .strict, or null", .default = ".strict" },
-        .{ .path = "seccomp.errno", .type = "one of .EPERM, .EACCES, .ENOSYS", .default = ".EPERM" },
+        .{ .path = "seccomp.tier", .type = "one of \"parity\", \"strict\", or null", .default = "\"strict\"" },
+        .{ .path = "seccomp.errno", .type = "one of \"EPERM\", \"EACCES\", \"ENOSYS\"", .default = "\"EPERM\"" },
         .{ .path = "cuid", .type = "integer 0..4294967295", .default = null },
         .{ .path = "seccompProject", .type = "struct, or null", .default = "null" },
     }) |c| {
@@ -899,21 +924,21 @@ test "the reference spells each type and default as ZON does" {
     try testing.expect(entry("guard").?.ordered and !entry("overlays").?.ordered and !entry("user").?.ordered);
     try testing.expect(entry("containerMounts.*.kind").?.computed and entry("name").?.computed);
     try testing.expect(!entry("seccomp.tier").?.computed);
-    // A union's option is its tag, where the schema's path skips it.
-    try testing.expectEqual(null, entry("network.forwardPorts.*.hostPort"));
+    // A union's option adds nothing to the path, as in the schema.
+    try testing.expectEqual(null, entry("network.forwardPorts.ports.*.hostPort"));
 }
 
 test "a default that is not its type's own is written out" {
     try testing.expectEqualStrings(
-        ".{ .MemoryMax = .infinity, .TasksMax = .{ .count = 4096 }, .CPUQuota = \"200%\" }",
-        comptime zonValue(decl.Limits, .{ .MemoryMax = .infinity, .TasksMax = .{ .count = 4096 }, .CPUQuota = "200%" }),
+        "{ \"MemoryMax\": \"infinity\", \"TasksMax\": 4096, \"CPUQuota\": \"200%\" }",
+        comptime jsonValue(decl.Limits, .{ .MemoryMax = .infinity, .TasksMax = .{ .count = 4096 }, .CPUQuota = "200%" }),
     );
     try testing.expectEqualStrings(
-        ".{ .{ .target = \"/a\", .lower = \"/b \\\"c\\\"\" } }",
-        comptime zonValue([]const decl.Overlay, &.{.{ .target = "/a", .lower = "/b \"c\"" }}),
+        "{ \"/a\": \"/b \\\"c\\\"\\u0001\" }",
+        comptime jsonValue([]const decl.Overlay, &.{.{ .target = "/a", .lower = "/b \"c\"\x01" }}),
     );
-    try testing.expectEqualStrings(".{ \"git\", \"status\" }", comptime zonValue(decl.Command, &.{ "git", "status" }));
-    try testing.expectEqualStrings(".auto", comptime zonValue(decl.ForwardPorts, .auto));
+    try testing.expectEqualStrings("[\"git\", \"status\"]", comptime jsonValue(decl.Command, &.{ "git", "status" }));
+    try testing.expectEqualStrings("\"auto\"", comptime jsonValue(decl.ForwardPorts, .auto));
 }
 
 test "text prose: indented, bold dropped, links spelt out" {
@@ -934,11 +959,11 @@ test "the reference, in text and in Markdown" {
     const a = arena_state.allocator();
 
     const text = try reference(a, .text);
-    try testing.expect(std.mem.startsWith(u8, text, "The declaration\n===============\n\nA declaration is one ZON file"));
+    try testing.expect(std.mem.startsWith(u8, text, "The declaration\n===============\n\nA declaration is one JSON object"));
     try testing.expect(std.mem.endsWith(u8, text, ".\n") and !std.mem.endsWith(u8, text, "\n\n"));
     try testing.expect(std.mem.indexOf(u8, text, "\nFields\n------\n\nuser\n    type: string\n    required\n\n    User inside the container") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\nseccomp.tier\n    type: one of .parity, .strict, or null\n    default: .strict\n\n    `parity` is exactly") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\nguard\n    type: list of command\n    default: .{}\n    ordered\n\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\nseccomp.tier\n    type: one of \"parity\", \"strict\", or null\n    default: \"strict\"\n\n    `parity` is exactly") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\nguard\n    type: list of command\n    default: []\n    ordered\n\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\ncuid\n    type: integer 0..4294967295\n    required\n    computed\n\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "provided by\n    pasta (https://passt.top):") != null);
     try testing.expect(std.mem.indexOf(u8, text, "**") == null);
@@ -956,10 +981,10 @@ test "the reference, in text and in Markdown" {
     try testing.expect(std.mem.startsWith(u8, md, "# The declaration\n\n<!-- Generated by `flong help decl --markdown`"));
     try testing.expect(std.mem.endsWith(u8, md, ".\n") and !std.mem.endsWith(u8, md, "\n\n"));
     try testing.expect(std.mem.indexOf(u8, md, "\n## Fields\n\n### `user`\n\n- type: `string`\n- required\n\nUser inside") != null);
-    try testing.expect(std.mem.indexOf(u8, md, "\n### `seccomp.tier`\n\n- type: `one of .parity, .strict, or null`\n- default: `.strict`\n\n") != null);
+    try testing.expect(std.mem.indexOf(u8, md, "\n### `seccomp.tier`\n\n- type: `one of \"parity\", \"strict\", or null`\n- default: `\"strict\"`\n\n") != null);
     try testing.expect(std.mem.indexOf(u8, md, "\n## Computed fields\n\n") != null);
     // A table cell's `|` is escaped, and its newlines are spaces.
-    try testing.expect(std.mem.indexOf(u8, md, "| `A \\| B` | a union: one of its options, each `.tag` alone or `.{ .tag = value }` |\n") != null);
+    try testing.expect(std.mem.indexOf(u8, md, "| `A \\| B` | a union: a value of one of its options, with nothing around it; an option in quotes is that string |\n") != null);
     // Markdown as it was written.
     try testing.expect(std.mem.indexOf(u8, md, "[pasta](https://passt.top)") != null);
 

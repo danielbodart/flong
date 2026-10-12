@@ -537,6 +537,7 @@ in
   };
 
   testScript = ''
+    import json
     import shlex
     import time
 
@@ -649,7 +650,7 @@ in
         # flong.
         flong = machine.succeed("readlink -f \"$(command -v plain)\"").strip()
         assert flong.endswith("/bin/flong"), flong
-        for decl in ("plain", "/etc/flong/plain.zon"):
+        for decl in ("plain", "/etc/flong/plain.json"):
             out = machine.succeed(f"cd /srv/work && {flong} launch {decl} -- true 2>&1 && echo rc=0 || echo rc=$?")
             assert out.startswith("plain: refusing to run as root") and out.split()[-1] == "rc=1", (decl, out)
         out = machine.succeed(f"{flong} sweeper /tmp 2>&1 && echo rc=0 || echo rc=$?")
@@ -968,7 +969,7 @@ in
         # failed: 125 (flong-launch.c:563-575). The workspace is /srv/work,
         # bound there.
         flong = machine.succeed("readlink -f \"$(command -v plain)\"").strip()
-        zon = machine.succeed("cat /etc/flong/plain.zon")
+        plain = json.loads(machine.succeed("cat /etc/flong/plain.json"))
         machine.succeed("mkdir /srv/work/adir && echo file > /srv/work/afile")
         GATE = "flong init: the gate closed without opening: not starting the payload"
         # flong init is its namespace's pid 1, which SIGPIPE's default never
@@ -978,16 +979,14 @@ in
 
         # plain's declaration with a read-only bind of SRC at DEST first in
         # its containerMounts, or as it is; launched with PAYLOAD.
-        marker = "    .containerMounts = .{"
-        assert zon.count(marker) == 1, zon
         def extra_mount(bind, payload="echo ok"):
-            text = zon
+            decl = dict(plain)
             if bind:
                 dest, src = bind
-                entry = f' .{{ .kind = .bind_ro, .dest = "{dest}", .src = "{src}" }},'
-                text = zon.replace(marker, marker + entry)
-            machine.succeed(f"printf %s {shlex.quote(text)} > /tmp/plain-mount.zon && chmod 644 /tmp/plain-mount.zon")
-            return machine.succeed(as_user(f"{flong} launch /tmp/plain-mount.zon -- {shlex.quote(payload)} 2>&1; echo rc=$?"))
+                decl["containerMounts"] = [{"kind": "bind_ro", "dest": dest, "src": src}] + plain["containerMounts"]
+            text = json.dumps(decl)
+            machine.succeed(f"printf %s {shlex.quote(text)} > /tmp/plain-mount.json && chmod 644 /tmp/plain-mount.json")
+            return machine.succeed(as_user(f"{flong} launch /tmp/plain-mount.json -- {shlex.quote(payload)} 2>&1; echo rc=$?"))
 
         # flong init may or may not say the gate closed, or that READY's
         # reader is gone, before teardown kills it (flong-launch.c:792-797);
@@ -1017,7 +1016,7 @@ in
                 "/srv/work/afile, on the way to /srv/work/afile/x, is not a directory")
         refused(("/srv/work/afile", "/srv/lower"), "/srv/work/afile is not a directory")
         machine.succeed("test -z \"$(ls -A /srv/work/adir)\" && test \"$(cat /srv/work/afile)\" = file")
-        machine.succeed("rm -r /srv/work/adir /srv/work/afile /tmp/plain-mount.zon")
+        machine.succeed("rm -r /srv/work/adir /srv/work/afile /tmp/plain-mount.json")
 
     @test("the swap race: nothing escapes the workspace", part="b")
     def _():

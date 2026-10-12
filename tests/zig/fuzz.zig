@@ -183,37 +183,25 @@ fn inotify(b: []const u8) !void {
 
 /// A declaration file: decl.parse, the trust boundary `flong check` and
 /// `flong launch` read every file through, then check.validate over what
-/// parses. Neither may panic, whatever the bytes; a parse error's report
-/// is formatted as decl.report would say it; and a declaration validate
+/// parses. Neither may panic, whatever the bytes; a parse error says why,
+/// at a byte of the source decl.report can place; and a declaration validate
 /// refuses nothing has clean paths, non-empty commands and names only its
 /// own.
 fn declParse(b: []const u8) !void {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const source = try a.dupeZ(u8, b);
-    var diag: std.zon.parse.Diagnostics = .{};
-    const d = decl.parse(a, source, &diag) catch |err| {
+    var diag: decl.Diag = .{};
+    const d = decl.parse(a, b, &diag) catch |err| {
         count(false);
         switch (err) {
             error.OutOfMemory => return err,
-            error.NotZon => {
-                const n = decl.notZon(source).?;
-                try testing.expect(n.at < source.len);
-            },
-            error.ParseZon => {
-                var errors = diag.iterateErrors();
-                var said: usize = 0;
-                while (errors.next()) |e| {
-                    const loc = e.getLocation(&diag);
-                    try testing.expect(loc.line <= std.mem.count(u8, source, "\n"));
-                    _ = try std.fmt.allocPrint(a, "{f}", .{e.fmtMessage(&diag)});
-                    var notes = e.iterateNotes(&diag);
-                    while (notes.next()) |note| _ = try std.fmt.allocPrint(a, "{f}", .{note.fmtMessage(&diag)});
-                    said += 1;
-                }
-                // Every refusal says why.
-                try testing.expect(said > 0);
+            error.ParseJson => {
+                // Every refusal says why, at a byte of the source.
+                try testing.expect(diag.message.len > 0);
+                try testing.expect(diag.at <= b.len);
+                const loc = decl.locate(b, diag.at);
+                try testing.expect(loc.line <= std.mem.count(u8, b, "\n") + 1);
             },
         }
         return;

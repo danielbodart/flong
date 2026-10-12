@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-trailing-comma.json:10:1: not JSON: unexpected '}'

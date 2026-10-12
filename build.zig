@@ -738,7 +738,7 @@ pub fn build(b: *std.Build) void {
                 });
                 test_step.dependOn(&b.addRunArtifact(t).step);
             }
-            // flong launch DECL.zon's prologue and the declaration's
+            // flong launch DECL.json's prologue and the declaration's
             // lookup, each module's own tests, in the launch's graph.
             {
                 const sc = Launcher.subcommands(b, target, optimize, false, LaunchPaths.dummy("/nix/store/test-only"));
@@ -1101,7 +1101,7 @@ const Launcher = struct {
         inline for (@typeInfo(LaunchPaths).@"struct".fields) |f| options.addOption([]const u8, f.name, @field(lp, f.name));
         options.addOption([]const u8, "version", @import("build.zig.zon").version);
         const config = options.createModule();
-        // flong launch DECL.zon's prologue (S3): the wrapper's pieces, the
+        // flong launch DECL.json's prologue (S3): the wrapper's pieces, the
         // declaration and its check, over the launch's one graph.
         const w = wrapperModules(bb, l, t, o);
         const d = declModules(bb, m, t, o, bb.path("src/decl.zig"));
@@ -1185,7 +1185,7 @@ const Launcher = struct {
         });
     }
 
-    /// src/launch/assemble.zig: `flong launch DECL.zon`'s prologue, the
+    /// src/launch/assemble.zig: `flong launch DECL.json`'s prologue, the
     /// wrapper's order over its pieces `w`, the declaration `d` and its
     /// check.
     fn assembleModule(bb: *std.Build, l: Launch, w: Wrapper, d: Decl, chk: *std.Build.Module, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode) *std.Build.Module {
@@ -1380,7 +1380,7 @@ const Launcher = struct {
         });
     }
 
-    /// S3's pieces of `flong launch DECL.zon`'s prologue, the wrapper's
+    /// S3's pieces of `flong launch DECL.json`'s prologue, the wrapper's
     /// work (STANDALONE.md, S3), over the launch's modules `l`: the pure
     /// ones (refuse, subid, groups), which import std alone, and those that
     /// touch the system (caller, workspace, cmd, binds, identity,
@@ -1595,7 +1595,7 @@ const Terminal = struct {
 
 /// flong's compiled-in programs (flong-launch.c's FLONG_BWRAP,
 /// FLONG_INIT, FLONG_PASTA, FLONG_NEWUIDMAP and FLONG_NEWGIDMAP, and
-/// flong-init.c's FLONG_TINI; and the two `flong launch DECL.zon` runs in
+/// flong-init.c's FLONG_TINI; and the two `flong launch DECL.json` runs in
 /// place of the wrapper's header, the cache tool, module.nix's cacheTool
 /// (cache.nix), and flong-seccomp, the project policy's compiler):
 /// options with no default. `self` is flong's own installed path, which

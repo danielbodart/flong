@@ -1,5 +1,5 @@
 //! launch/identity.zig: the payload's identity, from the prepared root
-//! (rootless-wrapper.bash:330-360), for `flong launch DECL.zon`'s
+//! (rootless-wrapper.bash:330-360), for `flong launch DECL.json`'s
 //! prologue (DESIGN.md, "Launch sequence": the
 //! payload's identity).
 //!

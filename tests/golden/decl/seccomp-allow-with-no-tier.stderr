@@ -1,1 +1,1 @@
-flong check: @GOLDEN@/decl/seccomp-allow-with-no-tier.zon: flong.box sets seccomp.tier = null and seccomp.allow, which change a tier's allow-list. With no tier there is no filter for them to act on. Set a tier, or drop them.
+flong check: @GOLDEN@/decl/seccomp-allow-with-no-tier.json: flong.box sets seccomp.tier = null and seccomp.allow, which change a tier's allow-list. With no tier there is no filter for them to act on. Set a tier, or drop them.

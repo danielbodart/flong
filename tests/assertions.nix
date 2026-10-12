@@ -333,11 +333,11 @@ let
     '';
 
   # A declaration flong check refuses evaluates, and its file,
-  # /etc/flong/box.zon (module.nix's declFileOf), fails to build with flong
+  # /etc/flong/box.json (module.nix's declFileOf), fails to build with flong
   # check's words. The file is in the system's closure, through
   # environment.etc, so the same declaration fails nixos-rebuild's build
   # with them. The baseline's file builds: the control.
-  declFile = extra: (configWith extra).environment.etc."flong/box.zon".source;
+  declFile = extra: (configWith extra).environment.etc."flong/box.json".source;
   refusedDecl = {
     containers.box.bindMounts."/state".hostPath = "/run/user/1000/flong";
     containers.box.allowedDevices = [ { node = "/dev/null"; modifier = "r"; } ];
@@ -366,7 +366,7 @@ let
         grep -q '^flong check: .*: flong.box has both `command` and `exec`\.' "$log"
         grep -q '^flong check: .*: flong.box.environment sets TMPDIR, which the launch sets for every session\.' "$log"
         [ "$(cat $refused/testBuildFailure.exit)" = 1 ]
-        grep -q '^\.{' $baseline
+        grep -q '^{"' $baseline
         touch $out
       '';
 in

@@ -38,7 +38,7 @@ const path_max = sys.path_max;
 
 /// A launch that did not reach its payload (flong-launch.c:43-45).
 pub const exit_not_run = 125;
-/// A refusal of `flong launch DECL.zon`'s own prologue, the part that
+/// A refusal of `flong launch DECL.json`'s own prologue, the part that
 /// stands in for rootless-wrapper.bash (DESIGN.md, "Launch sequence"): the
 /// wrapper's die (:41-44) printed "$name: <text>" and exited 1, and its
 /// callers assert both. Its modules (caller, workspace, cmd, binds,
@@ -143,7 +143,7 @@ pub fn relaunchSwept(
 
 /// The wrapper's own relaunch (rootless-wrapper.bash:299, 307, 337:
 /// `exec "$self" "${launcher_args[@]}"`), for the three points where
-/// `flong launch DECL.zon`'s prologue finds its cache swept before it
+/// `flong launch DECL.json`'s prologue finds its cache swept before it
 /// holds it (launch/prepare.zig, launch/identity.zig). Silent, as the
 /// wrapper's was: it execs this very binary, readlink(/proc/self/exe), with
 /// `argv`, the process's whole argv as the kernel gave it, argv[0]

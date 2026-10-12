@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/an-id-as-a-string.json:6:11: expected an integer

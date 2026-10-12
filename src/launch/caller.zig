@@ -1,5 +1,5 @@
 //! launch/caller.zig: the caller and the runtime directory
-//! (rootless-wrapper.bash:52-82), for `flong launch DECL.zon`'s prologue
+//! (rootless-wrapper.bash:52-82), for `flong launch DECL.json`'s prologue
 //! (DESIGN.md, "Launch sequence": the caller, the
 //! runtime directory).
 //!

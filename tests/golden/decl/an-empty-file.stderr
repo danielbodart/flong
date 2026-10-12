@@ -1,1 +1,1 @@
-flong check: @GOLDEN@/decl/an-empty-file.zon:1:1: expected expression, found 'EOF'
+flong check: @GOLDEN@/decl/an-empty-file.json:1:1: not JSON: unexpected end of file

@@ -1,1 +1,1 @@
-flong check: @GOLDEN@/decl/a-port-past-65535.zon:10:34: type 'u16' cannot represent value
+flong check: @GOLDEN@/decl/a-port-past-65535.json:11:19: expected an integer from 0 to 65535, found 65536

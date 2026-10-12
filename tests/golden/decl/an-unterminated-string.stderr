@@ -1,1 +1,1 @@
-flong check: @GOLDEN@/decl/an-unterminated-string.zon:2:13: expected expression, found 'invalid token'
+flong check: @GOLDEN@/decl/an-unterminated-string.json:2:14: not JSON: unexpected byte 0x0a

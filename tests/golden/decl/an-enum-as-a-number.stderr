@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/an-enum-as-a-number.json:10:24: expected a string, or null

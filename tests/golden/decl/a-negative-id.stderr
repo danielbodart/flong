@@ -1,1 +1,1 @@
-flong check: @GOLDEN@/decl/a-negative-id.zon:6:13: type 'u32' cannot represent value
+flong check: @GOLDEN@/decl/a-negative-id.json:6:11: expected an integer from 0 to 4294967295, found -1

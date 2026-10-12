@@ -246,10 +246,10 @@ pub fn mountinfo(tokens: []const u16, buf: []u8) []u8 {
 }
 
 /// What every declaration must have, as decl.zig's `minimal` has it, but
-/// its closing brace.
+/// its name and closing brace.
 const decl_head =
-    \\.{ .user = "u", .command = .{"true"}, .container = "box",
-    \\  .closure = "/nix/store/x-box", .cuid = 1000, .cgid = 100, .steps8 = "0123abcd",
+    \\{ "user": "u", "command": ["true"], "container": "box",
+    \\  "closure": "/nix/store/x-box", "cuid": 1000, "cgid": 100, "steps8": "0123abcd"
     \\
 ;
 
@@ -258,49 +258,49 @@ const decl_head =
 /// the lines below, most of which parse, each reaching one of flong
 /// check's refusals or an edge of one, and some of which do not, one rule
 /// at a time (an unknown field, a wrong type, a field given twice when two
-/// lines share one). The others are free pieces of ZON, which rarely
-/// parse.
+/// lines share one, or a line gives one the head has). The others are free
+/// pieces of JSON, which rarely parse.
 pub fn declaration(tokens: []const u16, buf: []u8) []u8 {
     if (tokens.len > 0 and tokens[0] % 2 == 0) {
         const lines = [_][]const u8{
-            ".masks = .{ \"/srv/b\", \"/srv/b/x/y\" },",
-            ".masks = .{ \"/w/x/y/z\", \"/other/one\", \"/t/a/b\", \"\", \"a\", \"/\" },",
-            ".masks = .{\"/" ++ long_a ++ "\"},",
-            ".protect = .{ \"/srv/p/\", \"/\", \"/run/user/1000\", \"//a\" },",
-            ".protect = .{\"/srv\"},",
-            ".overlays = .{.{ .target = \"/srv/b\", .lower = \"/var/run/user/1/bus\" }},",
-            ".overlays = .{ .{ .target = \"/o\", .lower = \"/srv/p/q\" }, .{ .target = \"/o\", .lower = \"\" } },",
-            ".containerMounts = .{ .{ .kind = .bind_rw, .dest = \"/srv/b\", .src = \"/h//w\" }, .{ .kind = .bind_ro, .dest = \"/w/x\" }, .{ .kind = .bind_rw, .dest = \"/w\", .src = \"/h\" } },",
-            ".containerMounts = .{ .{ .kind = .dev, .dest = \"/srv/null\", .mode = \"r\" }, .{ .kind = .dev, .dest = \"/dev/null\" }, .{ .kind = .bind_ro, .dest = \"/snd\", .src = \"/dev/snd\" } },",
-            ".containerMounts = .{ .{ .kind = .tmpfs, .dest = \"/t\" }, .{ .kind = .bind_rw, .dest = \"/\", .src = \"/\" }, .{ .kind = .bind_ro, .dest = \"/p\", .src = \"/proc/1\" } },",
-            ".containerMounts = .{.{ .kind = .bind_rw, .dest = \"/other\", .src = \"/srv/b\" }},",
-            ".seccomp = .{ .tier = null, .allow = .{\"Ptrace\"}, .deny = .{ \"@swap\", \"@\" }, .log = true },",
-            ".seccomp = .{ .tier = .parity, .errno = .ENOSYS, .allow = .{ \"@keyring\", \"io_uring-x\" } },",
-            ".seccompPolicy = .{ .{\"/p\"}, .{} },",
-            ".guard = .{ .{}, .{ \"/g\", \"a b\" } },",
-            ".workspace = .{},",
-            ".workspace = null,",
-            ".limits = .{ .CPUWeight = 0, .TasksMax = .{ .count = 0 }, .CPUQuota = \"0%\", .MemoryMax = .{ .size = \"8g\" } },",
-            ".limits = .{ .CPUWeight = 10000, .TasksMax = .infinity, .CPUQuota = \"1%\", .MemoryHigh = .{ .bytes = 9223372036854775807 } },",
-            ".network = .{ .forwardPorts = .auto, .hostPorts = .{ 0, 65535 } },",
-            ".network = .{ .forwardPorts = .{ .ports = .{.{ .protocol = .udp, .hostPort = 1 }} } },",
-            ".postStop = .{.{\"/s\"}},",
-            ".seccompTierFilter = \"/nix/store/x-tier.bpf\", .seccompFixedFilters = .{ \"/a\", \"/b\" },",
-            ".seccompProject = .{ .dump = \"/d\", .names = \"/n\", .deny = \"1\" },",
-            ".cuid = 70000,",
-            ".post_start = .{},",
-            ".guard = \"true\",",
-            ".cuid = -1,",
-            ".limits = .{ .IOWeight = 1 },",
-            ".masks = .{ \"\\x00\", \"/a\\n/b\" },",
-            ".exec = .{\"/nix/store/x-exec/bin/exec\"},",
-            ".command = null, .exec = .{},",
-            ".command = null,",
-            ".environment = .{ .{ .name = \"PATH\", .value = \"${HOME}/bin:$$\" }, .{ .name = \"A=B\", .value = \"$HOME\" } },",
-            ".environment = .{ .{ .name = \"TERM\", .value = \"${PATH}\" }, .{ .name = \"\", .value = \"${\" }, .{ .name = \"X\", .value = \"$\" } },",
+            ", \"masks\": [\"/srv/b\", \"/srv/b/x/y\"]",
+            ", \"masks\": [\"/w/x/y/z\", \"/other/one\", \"/t/a/b\", \"\", \"a\", \"/\"]",
+            ", \"masks\": [\"/" ++ long_a ++ "\"]",
+            ", \"protect\": [\"/srv/p/\", \"/\", \"/run/user/1000\", \"//a\"]",
+            ", \"protect\": [\"/srv\"]",
+            ", \"overlays\": { \"/srv/b\": \"/var/run/user/1/bus\" }",
+            ", \"overlays\": { \"/o\": \"/srv/p/q\", \"/o\": \"\" }",
+            ", \"containerMounts\": [ { \"kind\": \"bind_rw\", \"dest\": \"/srv/b\", \"src\": \"/h//w\" }, { \"kind\": \"bind_ro\", \"dest\": \"/w/x\" }, { \"kind\": \"bind_rw\", \"dest\": \"/w\", \"src\": \"/h\" } ]",
+            ", \"containerMounts\": [ { \"kind\": \"dev\", \"dest\": \"/srv/null\", \"mode\": \"r\" }, { \"kind\": \"dev\", \"dest\": \"/dev/null\" }, { \"kind\": \"bind_ro\", \"dest\": \"/snd\", \"src\": \"/dev/snd\" } ]",
+            ", \"containerMounts\": [ { \"kind\": \"tmpfs\", \"dest\": \"/t\" }, { \"kind\": \"bind_rw\", \"dest\": \"/\", \"src\": \"/\" }, { \"kind\": \"bind_ro\", \"dest\": \"/p\", \"src\": \"/proc/1\" } ]",
+            ", \"containerMounts\": [ { \"kind\": \"bind_rw\", \"dest\": \"/other\", \"src\": \"/srv/b\" } ]",
+            ", \"seccomp\": { \"tier\": null, \"allow\": [\"Ptrace\"], \"deny\": [\"@swap\", \"@\"], \"log\": true }",
+            ", \"seccomp\": { \"tier\": \"parity\", \"errno\": \"ENOSYS\", \"allow\": [\"@keyring\", \"io_uring-x\"] }",
+            ", \"seccompPolicy\": [[\"/p\"], []]",
+            ", \"guard\": [[], [\"/g\", \"a b\"]]",
+            ", \"workspace\": []",
+            ", \"workspace\": null",
+            ", \"limits\": { \"CPUWeight\": 0, \"TasksMax\": 0, \"CPUQuota\": \"0%\", \"MemoryMax\": \"8g\" }",
+            ", \"limits\": { \"CPUWeight\": 10000, \"TasksMax\": \"infinity\", \"CPUQuota\": \"1%\", \"MemoryHigh\": 9223372036854775807 }",
+            ", \"network\": { \"forwardPorts\": \"auto\", \"hostPorts\": [0, 65535] }",
+            ", \"network\": { \"forwardPorts\": [ { \"protocol\": \"udp\", \"hostPort\": 1 } ] }",
+            ", \"postStop\": [[\"/s\"]]",
+            ", \"seccompTierFilter\": \"/nix/store/x-tier.bpf\", \"seccompFixedFilters\": [\"/a\", \"/b\"]",
+            ", \"seccompProject\": { \"dump\": \"/d\", \"names\": \"/n\", \"deny\": \"1\" }",
+            ", \"cuid\": 70000",
+            ", \"post_start\": []",
+            ", \"guard\": \"true\"",
+            ", \"cuid\": -1",
+            ", \"limits\": { \"IOWeight\": 1 }",
+            ", \"masks\": [\"\\u0000\", \"/a\\n/b\"]",
+            ", \"exec\": [\"/nix/store/x-exec/bin/exec\"]",
+            ", \"command\": null, \"exec\": []",
+            ", \"command\": null",
+            ", \"environment\": [ { \"name\": \"PATH\", \"value\": \"${HOME}/bin:$$\" }, { \"name\": \"A=B\", \"value\": \"$HOME\" } ]",
+            ", \"environment\": [ { \"name\": \"TERM\", \"value\": \"${PATH}\" }, { \"name\": \"\", \"value\": \"${\" }, { \"name\": \"X\", \"value\": \"$\" } ]",
         };
         // Its name, a subcommand's one time in four.
-        const names = [_][]const u8{ ".name = \"box\",\n", ".name = \"a\",\n", ".name = \"box-2\",\n", ".name = \"check\",\n" };
+        const names = [_][]const u8{ ", \"name\": \"box\"\n", ", \"name\": \"a\"\n", ", \"name\": \"box-2\"\n", ", \"name\": \"check\"\n" };
         var n: usize = 0;
         put(buf, &n, decl_head);
         var i: usize = 1;
@@ -314,14 +314,14 @@ pub fn declaration(tokens: []const u16, buf: []u8) []u8 {
         return buf[0..n];
     }
     return build(&.{
-        ".{",                  "}",                                                    "=",           ",",
-        ".user = ",            "\"u\"",                                                ".command = ", ".{\"x\"}",
-        ".masks = ",           "null",                                                 ".infinity",   "0",
-        "65536",               "-",                                                    "\"/\"",       "\"..\"",
-        "//",                  "\n",                                                   "(",           "\\\\x\n",
-        "@\"a\"",              "'a'",                                                  "0x10",        "\"\\x00\"",
-        ".{ .ports = ",        ".cuid = 1",                                            ".cgid = 1",   ".container = \"c\"",
-        ".closure = \"/c\"",   ".steps8 = \"s\"",                                      ".",           "\"",
-        ".containerMounts = ", ".{ .kind = .bind_rw, .dest = \"/a\", .src = \"/a\" }", long_a,        "if",
+        "{",                     "}",                                                            ":",             ",",
+        "\"user\": ",            "\"u\"",                                                        "\"command\": ", "[\"x\"]",
+        "\"masks\": ",           "null",                                                         "\"infinity\"",  "0",
+        "65536",                 "-",                                                            "\"/\"",         "\"..\"",
+        "[",                     "\n",                                                           "]",             "\\",
+        "\"\\u0000\"",           "true",                                                         "1e3",           "\"\\ud800\"",
+        "\"forwardPorts\": ",    "\"cuid\": 1",                                                  "\"cgid\": 1",   "\"container\": \"c\"",
+        "\"closure\": \"/c\"",   "\"steps8\": \"s\"",                                            "\"",            "\"auto\"",
+        "\"containerMounts\": ", "{ \"kind\": \"bind_rw\", \"dest\": \"/a\", \"src\": \"/a\" }", long_a,          "1.5",
     }, tokens, buf);
 }

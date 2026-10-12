@@ -1,7 +1,7 @@
 //! launch/lookup.zig: where a declaration's name leads (DESIGN.md,
 //! "The declaration's command"). A declaration's command is a link
 //! `NAME -> flong`, and `flong launch NAME` does what the link does: flong
-//! loads NAME.zon from the first of these directories that has it.
+//! loads NAME.json from the first of these directories that has it.
 //!
 //!   /etc/flong                  what the NixOS module writes, through
 //!                               environment.etc, one file per flong.<name>
@@ -63,13 +63,13 @@ pub const Found = union(enum) {
     missing: []const []const u8,
 };
 
-/// NAME.zon in the first of `dirs` that has one: a file there that cannot
+/// NAME.json in the first of `dirs` that has one: a file there that cannot
 /// be stat'd for any reason but its absence counts as found, and its load
 /// says why it cannot be read.
 pub fn find(gpa: Allocator, name: []const u8, environ: []const [*:0]const u8) Allocator.Error!Found {
     var looked: std.ArrayList([]const u8) = .empty;
     for (try dirs(gpa, environ)) |d| {
-        const path = try std.fmt.allocPrintSentinel(gpa, "{s}/{s}.zon", .{ d, name }, 0);
+        const path = try std.fmt.allocPrintSentinel(gpa, "{s}/{s}.json", .{ d, name }, 0);
         try looked.append(gpa, path);
         switch (sys.fstatat(sys.AT.FDCWD, path, 0)) {
             .ok => return .{ .path = path },
@@ -121,7 +121,7 @@ fn byName(_: void, a: Entry, b: Entry) bool {
     return std.mem.lessThan(u8, a.name, b.name);
 }
 
-/// Each `NAME.zon` in `dir`, appended to `out`.
+/// Each `NAME.json` in `dir`, appended to `out`.
 fn names(gpa: Allocator, dir: []const u8, out: *std.ArrayList(Entry)) Allocator.Error!void {
     const at = try gpa.dupeZ(u8, dir);
     const r = fdt.openDir(fdt.cwd, at) catch return;
@@ -139,8 +139,8 @@ fn names(gpa: Allocator, dir: []const u8, out: *std.ArrayList(Entry)) Allocator.
         if (n == 0) return;
         var it: fdt.Entries = .{ .buf = buf[0..n] };
         while (it.next()) |e| {
-            if (!std.mem.endsWith(u8, e.name, ".zon")) continue;
-            const name = e.name[0 .. e.name.len - ".zon".len];
+            if (!std.mem.endsWith(u8, e.name, ".json")) continue;
+            const name = e.name[0 .. e.name.len - ".json".len];
             if (!isName(name)) continue;
             try out.append(gpa, .{
                 .name = try gpa.dupe(u8, name),
@@ -171,7 +171,7 @@ test "lookedFor lists every path" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try testing.expectEqualStrings("looked for /etc/flong/agent.zon", try lookedFor(a, &.{"/etc/flong/agent.zon"}));
+    try testing.expectEqualStrings("looked for /etc/flong/agent.json", try lookedFor(a, &.{"/etc/flong/agent.json"}));
     try testing.expectEqualStrings("looked for /a and /b", try lookedFor(a, &.{ "/a", "/b" }));
     try testing.expectEqualStrings("looked for /a, /b and /c", try lookedFor(a, &.{ "/a", "/b", "/c" }));
 }

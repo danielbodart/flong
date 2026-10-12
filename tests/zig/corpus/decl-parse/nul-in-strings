@@ -1,1 +1,11 @@
-.{ .user = "\x00", .command = .{"a\x00b"}, .container = "\x00", .closure = "", .cuid = 0, .cgid = 0, .steps8 = "", .name = "\x00", .masks = .{ "/a\x00b", "/a\nb" } }
+{
+  "user": "\u0000",
+  "command": ["a\u0000b"],
+  "container": "\u0000",
+  "closure": "",
+  "cuid": 0,
+  "cgid": 0,
+  "steps8": "",
+  "name": "\u0000",
+  "masks": ["/a\u0000b", "/a\nb"]
+}

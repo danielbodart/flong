@@ -2,7 +2,7 @@
 //! needs nothing but it: launcher/flong-spec.c's checks (:106-415, 676-708
 //! of 5f1f08e), with flong-spec.h's struct as `Spec` (the Zig port's L1).
 //!
-//! `flong launch DECL.zon|NAME` builds the spec in process from the
+//! `flong launch DECL.json|NAME` builds the spec in process from the
 //! declaration and what only the launch can know (launch/assemble.zig), and
 //! hands it to `validate` before anything is in the descriptor table
 //! (ordering checkpoint 1). Until STANDALONE.md's phase S3 (in git at

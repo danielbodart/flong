@@ -1,1 +1,1 @@
-flong check: @GOLDEN@/decl/a-missing-required-field.zon:1:2: missing required field container
+flong check: @GOLDEN@/decl/a-missing-required-field.json:1:1: missing required field container

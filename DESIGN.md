@@ -17,7 +17,7 @@ as a pass mark.
 
 The launcher is `flong launch`, a static Zig program without libc, run as the
 invoking user. Each declaration's command is a link `NAME -> flong`, which
-loads `/etc/flong/NAME.zon` (then `$XDG_CONFIG_HOME/flong/NAME.zon`) as
+loads `/etc/flong/NAME.json` (then `$XDG_CONFIG_HOME/flong/NAME.json`) as
 `flong launch NAME -- ARGS` does, and judges it as `flong check` does.
 Nothing in it runs as host root, and nothing asks for it.
 
@@ -99,7 +99,7 @@ So nothing is declared by running a command:
   its own; a hook that wants one names a script.
 
 A declaration reaches flong as data and nothing else. `module.nix` renders
-each one to `/etc/flong/<name>.zon` (`nix/to-zon.nix`), and `flong launch`
+each one to `/etc/flong/<name>.json` (`builtins.toJSON`), and `flong launch`
 reads it with the typed parser `flong check` judges it with, so a name, a path
 or a command's word is a value there, never code. The spec holds each
 `postStart` and `postStop` command as one entry, and runs them in order,
@@ -1723,22 +1723,32 @@ frisket and nix-config. A change of interface updates module.nix, the tests
 and those consumers together, and leaves no old-name link, no shim script and
 no translated field behind: anything left on an old interface fails loudly,
 so that it is fixed rather than carried. A declaration that spells a field the
-old way is refused (`tests/golden/decl/an-unknown-field.zon`).
+old way is refused (`tests/golden/decl/an-unknown-field.json`).
 
 ### The declaration
 
 A declaration is a value of `src/decl.zig`'s `Declaration`, and its file is
-ZON, as capsper's configuration is. The static half of a container is one
-typed value with one parser:
+strict JSON. The static half of a container is one typed value with one
+parser:
 
 - **The type is the schema.** Each field is named as its Nix option,
-  camelCase and `MemoryMax` alike, with no translation. Its type is what
-  `std.zon.parse` can hold a file to: enums, `u16` ports, optionals, and a
-  tagged union where Nix has an either (`forwardPorts` is `.auto` or
-  `.{ .ports = ... }`, a memory size `.infinity`, `.{ .bytes = N }` or
-  `.{ .size = "8G" }`). What the parse cannot check, a type's `patterns` and
-  `ranges` say. An unknown field or a wrong type is a parse error at its line
-  and column. The computed fields (`Declaration.computed`: the closure, the
+  camelCase and `MemoryMax` alike, with no translation, and each value is
+  spelt as the option's Nix value is, so `builtins.toJSON` of the options is
+  the file: an enum is its tag's name as a string (`"strict"`, `"EPERM"`),
+  `overlays` (pathAttrs) an object, and a union, where Nix has an either, is
+  its option's value with no tag around it, told apart by its JSON type:
+  `forwardPorts` is `"auto"` or a list of ports, a memory size `"infinity"`,
+  a number of bytes or a string such as `"8G"`, `TasksMax` `"infinity"` or a
+  number. A union whose options one JSON type cannot tell apart does not
+  compile. The parse holds a file to the type: `u16` ports and `u32` ids,
+  integers with no fraction or exponent, optionals as `null`. What it cannot
+  check, a type's `patterns` and `ranges` say. An unknown field, one given
+  twice, a missing one or a wrong type is a parse error at its line and
+  column; so is anything that is not JSON, a comment and a trailing comma
+  among them. JSON rather than ZON, which this was until 2026-10-12:
+  Nix writes JSON natively and has no ZON reader, the Go around flong is
+  built without cgo and would need a reader of its own, and the policy
+  files around flong are JSON too (frisket's `docs/policy-plan.md`). The computed fields (`Declaration.computed`: the closure, the
   ids, the filters, `commandPath`, the hook programs, the container's
   `environment`) are worked out by module.nix from `containers.<name>`; a
   configuration made without Nix writes them itself.
@@ -1758,7 +1768,7 @@ typed value with one parser:
   rewrites both. Only the options Nix alone has (`container`, `path`,
   `scopeConfig`, `launcher`) keep prose in module.nix.
 - **Rendered, not interpreted.** module.nix renders each declaration with
-  `nix/to-zon.nix`, adapted from capsper's, to `/etc/flong/<name>.zon`.
+  `builtins.toJSON`, nothing translated, to `/etc/flong/<name>.json`.
   `flong launch` reads that file with the parser `flong check` judges it with
   at build time, so the two cannot read it differently.
 - **One validator.** `flong check` (`src/check.zig`) runs in each declaration
@@ -1767,9 +1777,9 @@ typed value with one parser:
   exists, stay in Nix.
 - **The trust boundary does not move.** Anyone can run `flong launch` with any
   file, so the parser is a boundary: `decl.load` reads at most 1 MiB into one
-  arena, `decl.notZon` refuses a `{` past 32 deep, two `-` in a row and any
-  token no declaration holds before `std.zon.parse`'s recursion sees them
-  (100,000 `.{` or `-` would overflow its stack), every parse error is a
+  arena, `decl.parse` reads std.json's scanner a token at a time into the
+  type and descends only as deep as the type does, never as deep as the
+  source nests (a megabyte of `[` is refused at the first), every parse error is a
   refusal and never a panic, and `decl.parse` and `check.validate` are fuzzed
   over a checked-in corpus (`tests/zig/corpus/decl-parse/`). `flong check`
   judges a megabyte of masks and binds in about a second, every lookup a
@@ -1961,7 +1971,7 @@ to end. **The record contract**: the bytes the launcher writes are pinned by
 `tests/golden/records/`, against which both the writer test and basic's
 record subtest compare, so a sweeper of an older release reads a newer
 launcher's records. **One validator of a declaration**: `flong check`
-(`src/check.zig`) judges each `/etc/flong/<name>.zon` in its own derivation
+(`src/check.zig`) judges each `/etc/flong/<name>.json` in its own derivation
 (`module.nix`'s `declFileOf`), with the parse `flong launch` reads it with, so
 a refused declaration fails the system's build with its line and column or
 the refusal's own words. It refuses before a launch what `spec.clean` and the
@@ -1972,7 +1982,7 @@ declaration can say: the mask depth rule against its own writable binds,
 devices, seccomp settings with no tier, the container's ids, the patterns and
 ranges `src/decl.zig` declares, an empty command, an entrypoint that is not
 exactly one of `command` and `exec`, a container `environment` a shell would
-have to expand, and a NUL in any string, which ZON can write and an argv or a
+have to expand, and a NUL in any string, which JSON can write and an argv or a
 path would cut short. `tests/golden/decl/` is its cases, each refusal and its
 accepted counterpart. `module.nix`'s assertions keep only what NixOS alone can
 say, of `containers.<name>`, the host and the option types
@@ -2000,7 +2010,7 @@ does, when it is called and how it fails.
 | `src/record.zig` | the state directory, records and `leader=`, liveness, the sweep, `postStop`, the watch |
 | `src/tty.zig` | the foreground wait, the pty relay or passthrough, raw mode, the watchdog, `^]^]^]`, the wait for bwrap |
 | `src/main.zig` | `flong`'s root: the dispatch, the start settings and the one panic handler; each subcommand's `main` is handed argv from its word on; `flong help`'s text |
-| `src/decl.zig`, `src/check.zig` | the declaration's type, its parse and `load`, and `notZon`; `flong check`, every refusal of a declaration |
+| `src/decl.zig`, `src/check.zig` | the declaration's type, its JSON parse and `load`; `flong check`, every refusal of a declaration |
 | `src/decl_docs.zig` | the walk of the declaration's type and doc comments: `flong schema` (`decl-options.json`) and `flong help decl` (`docs/declaration.md`, with `--markdown`) |
 | `src/mount.zig` | the mount helper, a fork body of `flong launch`'s: sources, the walker, masks, overlays, `/sys`, `/run` read-only; checkpoint 7 |
 | `src/launch.zig` | `flong launch`: `main` (its words), the declaration loaded and judged, `launch` (the prologue), `run` and `teardown`, the order of a launch; checkpoints 1, 2, 3, 5 and 6 |
@@ -2339,7 +2349,7 @@ prologue's own refusals exit 1 under the declaration's name (`agent: ...`),
 and so does a declaration file that cannot be read or that `flong check`
 refuses, under `flong launch`; a name no directory has a declaration for is 2,
 `flong: no declaration "NAME" (looked for ...)`, as is
-`usage: flong launch DECL.zon|NAME [-- ARGS...]`. A cache swept before it was
+`usage: flong launch DECL.json|NAME [-- ARGS...]`. A cache swept before it was
 locked is no status: flong runs itself again.
 
 ### Layouts on disk

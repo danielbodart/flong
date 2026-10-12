@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/an-id-with-a-fraction.json:6:11: expected an integer from 0 to 4294967295, found 1000.0

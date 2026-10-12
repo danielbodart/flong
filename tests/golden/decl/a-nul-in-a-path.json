@@ -1,0 +1,18 @@
+{
+  "user": "u",
+  "command": ["true"],
+  "overlays": {
+    "/data": "/var/lib/\u0000state"
+  },
+  "masks": ["/srv/token", "/srv/a\u0000/b"],
+  "protect": ["/srv/gate\u0000"],
+  "container": "box",
+  "closure": "/nix/store/x-nixos-system-box",
+  "cuid": 1000,
+  "cgid": 100,
+  "steps8": "0123abcd",
+  "name": "box",
+  "containerMounts": [
+    { "kind": "bind_ro", "dest": "/in\u0000side", "src": "/srv/ok" }
+  ]
+}

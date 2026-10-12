@@ -181,7 +181,7 @@ let
     # Written for flong launch's entry when S3 deleted the argv spec (the
     # spec set, recorded from the C's flong-spec.c: its refusals a value can
     # still reach are spec.validate's, tests/zig/spec_test.zig, each case
-    # under its old name). `flong launch DECL.zon|NAME [-- ARGS...]`: a
+    # under its old name). `flong launch DECL.json|NAME [-- ARGS...]`: a
     # usage error for anything else, the argv spec's forms included, 2; a
     # name no directory has, 2 (no /etc/flong here, and no HOME in a
     # case's empty environment); a file that cannot be read or parsed, or
@@ -210,17 +210,16 @@ let
     # a-mask-two-levels-below-a-writable-bind...), with its message, the
     # assertion's in one line naming flong.box, as assertions.nix's
     # declaration is named; its accepted counterparts where assertions.nix
-    # pairs one; what Nix's types refused and a ZON file must be told (a
-    # pattern or range decl.zig declares, an empty command); a name flong's
-    # dispatch reads as its own; parse errors at their line and column (an
-    # unknown field, a wrong type, a missing field, and what decl.notZon
-    # refuses before the parser could recurse on it); and every row of the
+    # pairs one; what Nix's types refused and a declaration file must be
+    # told (a pattern or range decl.zig declares, an empty command); a name
+    # flong's dispatch reads as its own; parse errors at their line and
+    # column (an unknown field, a wrong type, a missing field); and every row of the
     # retired golden/paths.txt through a declaration (paths-*, each citing
     # its row), which held module.nix's mirrors of the launcher's path
     # checks to it. minimal and full pass. S2 chunk E added a NUL in a
-    # command's word or in a path (a-nul-*), which ZON can write and Nix
-    # cannot, and escapes, nix/to-zon.nix's render of escapes.nix: every
-    # other character a Nix string can hold, which passes (see
+    # command's word or in a path (a-nul-*), which a declaration file can
+    # write and Nix cannot, and escapes, builtins.toJSON of escapes.nix:
+    # every other character a Nix string can hold, which passes (see
     # escapesRendered below). a-snippet-guard is the control that a
     # declaration of the wrong shape is refused. The payload as `command` or
     # `exec`, both and neither refused, and the container's `environment`,
@@ -231,8 +230,17 @@ let
     # asserts neither the payload's nor an entry's name, and refuses only
     # the /etc/set-environment lines it cannot compute without a shell
     # (tests/assertions.nix, whose assertions-decl holds that the rest
-    # surface in the file's build). Each case NAME's declaration is NAME.zon,
-    # GOLDEN the store directory holding them.
+    # surface in the file's build). When declarations moved from ZON to
+    # JSON (2026-10-12) every declaration was converted, value for value,
+    # and every refusal but the parse's kept its words; the parse errors
+    # were rewritten for JSON's, the ZON-only cases (a builtin, a keyword,
+    # a parenthesis, two minuses, nesting past the parser's depth bound)
+    # gave way to JSON's own (a-zon-declaration, a-trailing-comma,
+    # a-comment, a-field-given-twice, an-overlay-given-twice, an id with a
+    # fraction or as a string, a-tagged-union, an-enum-as-a-number,
+    # something-after-the-declaration, nesting-deeper-than-the-type), and
+    # the comments the files carried went to README. Each case NAME's
+    # declaration is NAME.json, GOLDEN the store directory holding them.
     decl = {
       program = "${launcher}/bin/flong";
       sub = "check";
@@ -561,15 +569,14 @@ let
     '';
   };
 
-  # The decl set's escapes.zon is nix/to-zon.nix's render of escapes.nix,
-  # so the case holds what to-zon writes of every character a Nix string
-  # can hold, as well as what flong check reads of it.
+  # The decl set's escapes.json is builtins.toJSON of escapes.nix, as
+  # module.nix writes a declaration, so the case holds what Nix writes of
+  # every character a Nix string can hold, as well as what flong check
+  # reads of it.
   escapesRendered =
-    import ./golden/decl/escapes.nix {
-      inherit lib;
-      toZon = import ../nix/to-zon.nix { inherit lib; };
-    } == builtins.readFile ./golden/decl/escapes.zon
-    || throw "golden: tests/golden/decl/escapes.zon is not nix/to-zon.nix's render of escapes.nix";
+    builtins.toJSON (import ./golden/decl/escapes.nix { inherit lib; })
+      == builtins.readFile ./golden/decl/escapes.json
+    || throw "golden: tests/golden/decl/escapes.json is not builtins.toJSON of escapes.nix";
 in
 assert escapesRendered;
 check

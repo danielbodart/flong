@@ -1007,7 +1007,7 @@ in
           out = machine.succeed(by_caller("${execd} ok 'a b' '$HOME' \"\""))
           assert out == "/srv/work|rw||a=b|/srv/work|en_US.UTF-8|[a b][$HOME][]\n", out
           # Each refused, 1, saying why under the declaration's name.
-          program = machine.succeed("grep -o '/nix/store/[a-z0-9]*-flong-test-exec' /etc/flong/execd.zon | head -1").strip()
+          program = machine.succeed("grep -o '/nix/store/[a-z0-9]*-flong-test-exec' /etc/flong/execd.json | head -1").strip()
           tags = "where each field is env:NAME=VALUE, arg:WORD, file:MODE:PATH followed by the file's content, forward:BIND, or label:TEXT"
           refusals = [
               ("fixed", "sets HOME, which the launch sets for every session"),
@@ -1222,13 +1222,13 @@ in
               pid, start = pid1_of(f"{CG}/netless/{name}/sandbox")
               poststop = machine.succeed(
                   "grep -o '/nix/store/[a-z0-9]*-flong-poststop-recorded/bin/flong-poststop-recorded' "
-                  "/etc/flong/recorded.zon | sort -u").split()
+                  "/etc/flong/recorded.json | sort -u").split()
               assert len(poststop) == 1, poststop
               # Its one command: the hook program, then the command's word
               # (module.nix's mkHookProgram), 0x1F-separated.
               script = machine.succeed(
                   "grep -o '/nix/store/[a-z0-9]*-flong-test-poststop' "
-                  "/etc/flong/recorded.zon | sort -u").split()
+                  "/etc/flong/recorded.json | sort -u").split()
               assert len(script) == 1, script
               want = golden_record(${builtins.toJSON (builtins.readFile ./golden/records/poststop)},
                                    POSTSTOP=poststop[0] + "\x1f" + script[0], CGROUP=f"{CG}/netless/{name}",

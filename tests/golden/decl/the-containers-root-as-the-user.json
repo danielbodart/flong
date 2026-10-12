@@ -1,0 +1,10 @@
+{
+  "user": "root",
+  "command": ["true"],
+  "container": "box",
+  "closure": "/nix/store/x-nixos-system-box",
+  "cuid": 0,
+  "cgid": 0,
+  "steps8": "0123abcd",
+  "name": "box"
+}

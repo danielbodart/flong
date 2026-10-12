@@ -1,5 +1,5 @@
 //! launch/cmd.zig: a declaration's command, run as the caller, for
-//! `flong launch DECL.zon`'s prologue (DESIGN.md, "Data is data; shell
+//! `flong launch DECL.json`'s prologue (DESIGN.md, "Data is data; shell
 //! is for what only launch knows"): the workspace, binds, guard,
 //! seccompPolicy and exec commands, and what exec prints read as its
 //! protocol of tagged fields (`parseExec`).

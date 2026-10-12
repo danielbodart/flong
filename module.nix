@@ -417,47 +417,28 @@ let
     };
 
   # THE DECLARATION AS DATA: `flong.<name>` as the value src/decl.zig's
-  # Declaration types, field for field under the option's own name, and the
-  # computed fields beside them (Declaration.computed). Rendered to ZON by
-  # nix/to-zon.nix and installed as /etc/flong/<name>.zon.
-  toZon = import ./nix/to-zon.nix { inherit lib; };
-
+  # Declaration reads, field for field under the option's own name, and
+  # the computed fields beside them (Declaration.computed). Written with
+  # builtins.toJSON and installed as /etc/flong/<name>.json: decl.zig reads
+  # each value as its option holds it (an enum or `"auto"` a string, a
+  # union untagged, pathAttrs an object), so nothing is translated here.
   declValueOf = name: c:
     let
       d = declarationOf name c;
       inherit (d) declared;
-      l = c.limits;
       f = seccompFiltersOf c;
-      # decl.MemSize and decl.Tasks: `infinity` a tag, a number or a size
-      # the union's other fields.
-      memSize = v:
-        if v == null then null
-        else if v == "infinity" then toZon.tag "infinity"
-        else if builtins.isInt v then { bytes = v; }
-        else { size = v; };
-      tasks = v:
-        if v == null then null
-        else if v == "infinity" then toZon.tag "infinity"
-        else { count = v; };
     in
     {
       inherit (c) user command exec workspace binds guard postStart postStop masks protect seccompPolicy;
       network = if c.network == null then null else {
         forwardPorts =
-          if c.network.forwardPorts == "auto" then toZon.tag "auto"
-          else {
-            ports = map (p: { inherit (p) protocol hostPort containerPort; }) c.network.forwardPorts;
-          };
+          if c.network.forwardPorts == "auto" then "auto"
+          else map (p: { inherit (p) protocol hostPort containerPort; }) c.network.forwardPorts;
         inherit (c.network) forwardAddress forwardInterface hostLoopbackToSession hostPorts;
       };
-      overlays = lib.mapAttrsToList (target: lower: { inherit target; lower = toString lower; }) c.overlays;
-      limits = {
-        MemoryMax = memSize l.MemoryMax;
-        MemoryHigh = memSize l.MemoryHigh;
-        MemorySwapMax = memSize l.MemorySwapMax;
-        TasksMax = tasks l.TasksMax;
-        inherit (l) CPUQuota CPUWeight oomGroup;
-      };
+      # A path as its string: toJSON would copy a path into the store.
+      overlays = lib.mapAttrs (_: toString) c.overlays;
+      limits = { inherit (c.limits) MemoryMax MemoryHigh MemorySwapMax TasksMax CPUQuota CPUWeight oomGroup; };
       seccomp = { inherit (c.seccomp) tier debug nestedSandbox allow deny errno log; };
 
       # Computed.
@@ -497,15 +478,15 @@ let
         else "${mkHookProgram name "poststop" c}/bin/flong-poststop-${name}";
     };
 
-  # The rendered file, /etc/flong/<name>.zon.
+  # The rendered file, /etc/flong/<name>.json.
   declFileOf = name: c:
     let
       s = (declarationOf name c).setEnvironment;
       value = declValueOf name c;
     in
     pkgs.writeTextFile {
-      name = "flong-${name}.zon";
-      text = toZon.toZON toZon.enumPaths value;
+      name = "flong-${name}.json";
+      text = builtins.toJSON value;
       # The value rendered, for tests/assertions.nix to read a computed
       # field (`environment`) as Nix rather than as the file's text.
       passthru.declaration = value;
@@ -528,7 +509,7 @@ let
 
   # THE LAUNCHER: a link NAME -> flong, and nothing else (DESIGN.md, "The
   # declaration's command"). flong reads its argv[0]'s basename, finds no
-  # subcommand by that name, and launches /etc/flong/NAME.zon, which
+  # subcommand by that name, and launches /etc/flong/NAME.json, which
   # environment.etc installs from declFileOf: exactly what `flong launch
   # NAME -- ARGS` does.
   mkLauncher = name: pkgs.runCommand "flong-${name}" { meta.mainProgram = name; } ''
@@ -925,7 +906,7 @@ in
           readOnly = true;
           description = ''
             The declaration's command: `bin/<name>`, a link to flong, which
-            runs /etc/flong/<name>.zon as `flong launch <name> -- ARGS`
+            runs /etc/flong/<name>.json as `flong launch <name> -- ARGS`
             would. Run it directly as the user whose container it is, never
             as root. It needs their subordinate ids in /etc/subuid and
             /etc/subgid (`users.users.<name>.subUidRanges`, or
@@ -956,9 +937,9 @@ in
     # The sessions' holder, in every user's manager.
     systemd.user.services.flong-sessions = holderUnit;
 
-    # Each declaration as src/decl.zig reads one: /etc/flong/<name>.zon.
+    # Each declaration as src/decl.zig reads one: /etc/flong/<name>.json.
     environment.etc = lib.mapAttrs'
-      (n: c: lib.nameValuePair "flong/${n}.zon" { source = declFileOf n c; })
+      (n: c: lib.nameValuePair "flong/${n}.json" { source = declFileOf n c; })
       cfg;
 
     warnings = lib.concatLists (lib.mapAttrsToList warningsFor cfg);

@@ -8,7 +8,7 @@ default, is in [declaration.md](declaration.md). Why it works this way is in
 
 Run the launcher as yourself. It refuses to run as root, and needs no sudo
 rule. `flong launch <name> -- ARGS` does the same from
-`/etc/flong/<name>.zon`; `flong list` names every declaration.
+`/etc/flong/<name>.json`; `flong list` names every declaration.
 
 The launcher has your privilege and no more. You can enter, change or read
 any of your containers from the host, as you can any process you run, so
@@ -174,7 +174,7 @@ flong.agent.seccompPolicy = ''
 
 A refused container option or host fails evaluation. A refused declaration
 (an unclean path, a mount twice, a source reaching flong's state, ids past
-65535, …) fails building `flong-<name>.zon`, with `flong check`'s reason as
+65535, …) fails building `flong-<name>.json`, with `flong check`'s reason as
 the build log's last line.
 
 ## Limitations

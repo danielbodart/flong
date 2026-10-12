@@ -1,0 +1,12 @@
+{
+  "user": "u",
+  "command": ["true"],
+  "workspace": ["pwd\u0000"],
+  "guard": [["test", "-d", "/srv"], ["test", "-d", "/srv\u0000/etc"]],
+  "container": "box",
+  "closure": "/nix/store/x-nixos-system-box",
+  "cuid": 1000,
+  "cgid": 100,
+  "steps8": "0123abcd",
+  "name": "box"
+}

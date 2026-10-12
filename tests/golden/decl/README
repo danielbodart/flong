@@ -1,0 +1,106 @@
+What each case of the decl set is for, where its name does not say it all:
+the comments its declaration carried while declarations were ZON, which
+JSON has no room for. tests/golden.nix describes the set.
+
+a-nul-in-a-command-word
+    A NUL, which JSON's \u0000 writes and a Nix string cannot hold: argv
+    would end the word at it.
+
+a-nul-in-a-path
+    A path ends at its first NUL: /srv/a\u0000/b would be /srv/a.
+
+a-poststop-list-at-the-records-bound
+    postStop's two commands, each after the program it is run through, joined as the record keeps them: 4095 bytes, the most a record's value holds.
+
+a-poststop-list-past-the-records-bound
+    The same, one byte longer: 4096 bytes, which record.create would refuse at launch.
+
+a-poststop-program-with-a-unit-separator
+    0x1F in the program each postStop command is run through, the record's separator between two words.
+
+a-poststop-word-with-a-newline
+    A newline in a postStop word, which the session's record, lines of text, cannot hold: record.create would refuse it at launch.
+
+a-poststop-word-with-a-record-separator
+    0x1E in a postStop word, the record's separator between two commands.
+
+a-snippet-guard
+    A snippet, as the options took before commands.
+
+an-environment-the-launch-expands
+    What module.nix computes from a container's /etc/set-environment:
+    references to the six the launch fills in, and PATH, which replaces the
+    launch's own. And a $ spelt $$, which module.nix never writes (no value
+    it computes holds a $ of its own) but a declaration written by hand may.
+
+an-exec-in-place-of-command
+    The payload printed at launch: no command.
+
+an-unknown-field
+    A Nix name translated, which no compatibility layer allows.
+
+full
+    Every field set, none to its default, as module.nix would render a busy declaration.
+
+minimal
+    Only what has no default, and a command, since a payload needs one of
+    command and exec.
+
+paths-clean-*
+    The path as a protect entry, which is judged by spec.unclean.
+  paths-clean-01: clean  yes  same  /a
+  paths-clean-02: clean  yes  same  /a/b
+  paths-clean-03: clean  yes  same  /home/u/.cache/flong
+  paths-clean-04: clean  yes  same  /...
+  paths-clean-05: clean  yes  same  /a b/c
+  paths-clean-06: clean  yes  same  /.a/b.
+  paths-clean-07: clean  yes  same  /aaaaaaaaaaaaaaaaaaa... (256 bytes)
+  paths-clean-08: clean  no  same  /aaaaaaaaaaaaaaaaaaa... (257 bytes)
+  paths-clean-09: clean  yes  same  /x/aaaaaaaaaaaaaaaaa... (260 bytes)
+  paths-clean-10: clean  no  same  /
+  paths-clean-11: clean  no  same
+  paths-clean-12: clean  no  same  a
+  paths-clean-13: clean  no  same  a/b
+  paths-clean-14: clean  no  same  //a
+  paths-clean-15: clean  no  same  /a//b
+  paths-clean-16: clean  no  same  /a/
+  paths-clean-17: clean  no  same  /.
+  paths-clean-18: clean  no  same  /..
+  paths-clean-19: clean  no  same  /a/.
+  paths-clean-20: clean  no  same  /a/./b
+  paths-clean-21: clean  no  same  /a/../b
+  paths-clean-22: clean  no  same  /a/..
+  paths-clean-23: clean  no  differs  /aaaaaaaaaaaaaaaaaaa... (4096 bytes)
+  paths-clean-24: clean  yes  same  /aaaaaaaaaaaaaaaaaaa... (4095 bytes)
+
+paths-overlaps-*
+    The first path as a bind's source, the second as a protect entry: they
+    overlap when the source is refused as one that reaches it. flong check
+    is lexical, as module.nix was: it compares module.nix's norm of each
+    by module.nix's overlaps, so it says what the MIRROR column says the
+    module did. A source that is /, /run, /run/user or flong's or the user
+    manager's own under /run/user/UID is refused whatever the protect
+    entry, and a path that is not clean is refused as that.
+  paths-overlaps-01: overlaps  yes  same  /a  /a
+  paths-overlaps-02: overlaps  yes  same  /a  /a/b
+  paths-overlaps-03: overlaps  yes  same  /a/b  /a
+  paths-overlaps-04: overlaps  no  same  /a  /ab
+  paths-overlaps-05: overlaps  no  same  /ab  /a
+  paths-overlaps-06: overlaps  no  same  /a/b  /a/c
+  paths-overlaps-07: overlaps  no  same  /run/user/1000  /run/user/100
+  paths-overlaps-08: overlaps  yes  same  /run/user/1000/flong  /run/user/1000
+  paths-overlaps-09: overlaps  yes  differs  /  /a
+  paths-overlaps-10: overlaps  yes  differs  /a  /
+  paths-overlaps-11: overlaps  yes  same  /  /
+  paths-overlaps-12: overlaps  no  differs  //a  /a
+  paths-overlaps-13: overlaps  no  differs  /a/  /a/b
+  paths-overlaps-14: overlaps  no  differs  /var/run/user/1000  /run/user/1000
+  paths-overlaps-15: overlaps  no  differs  /var/run  /run/user
+
+paths-twice-*
+    Both as masks: the same destination twice is refused.
+  paths-twice-01: twice  yes  same  /srv/work  /srv/work
+  paths-twice-02: twice  no  same  /srv/work  /srv/work/x
+  paths-twice-03: twice  no  same  /srv/work  /srv/wor
+  paths-twice-04: twice  no  same  /a  /b
+  paths-twice-05: twice  no  same  /a b  /a

@@ -1,5 +1,5 @@
 //! launch/workspace.zig: the workspace (rootless-wrapper.bash:84-136), for
-//! `flong launch DECL.zon`'s prologue (DESIGN.md, "Launch
+//! `flong launch DECL.json`'s prologue (DESIGN.md, "Launch
 //! sequence": the workspace), and `resolveDir`, the wrapper's
 //! canon, which the caller's binds share (launch/binds.zig).
 //!

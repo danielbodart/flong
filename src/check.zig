@@ -2,7 +2,7 @@
 //! file before anything launches it, as each declaration's derivation does,
 //! so a bad one fails the build with a line number rather than a launch.
 //!
-//!   flong check DECL.zon
+//!   flong check DECL.json
 //!
 //! The parse is decl.zig's, the one `flong launch` reads with, so the two
 //! cannot read a file differently: at most `decl.max_bytes`, into one
@@ -17,10 +17,10 @@
 //! destination mounted twice, the mask depth rule against the
 //! declaration's own writable binds, sources reaching what no session may
 //! reach, devices, the seccomp settings that need a tier, the container's
-//! ids; with what Nix's types judged and a ZON file must be told: the
-//! patterns and ranges decl.zig declares, commands that are not empty, and
-//! strings without a NUL byte, which ZON can write and which an argv, a
-//! path or the environment would cut short.
+//! ids; with what Nix's types judged and a declaration file must be told:
+//! the patterns and ranges decl.zig declares, commands that are not empty,
+//! and strings without a NUL byte, which JSON's `\u0000` can write and
+//! which an argv, a path or the environment would cut short.
 //! Each message is the assertion's, in one line, naming the declaration as
 //! `flong.NAME`. Like the assertions, the path checks are lexical, on the
 //! declaration's spelling: the launcher's canonical checks at launch stay
@@ -44,7 +44,7 @@ const usage_status = 2;
 /// Any refusal, and a file that cannot be read or parsed.
 const refused = 1;
 
-const usage = "usage: flong check DECL.zon";
+const usage = "usage: flong check DECL.json";
 
 /// Names a declaration cannot have: its command is a link to flong named
 /// after it (DESIGN.md, "The declaration's command"), and flong reads
@@ -120,7 +120,7 @@ const Checker = struct {
         }
     }
 
-    /// What decl.zig's types say and ZON cannot: a command is not empty,
+    /// What decl.zig's types say and JSON cannot: a command is not empty,
     /// and a field with a pattern or a range (`patterns`, `ranges` on its
     /// container, as decl_docs.zig reads them) keeps to it. `path` is the
     /// option's, a list's elements under the list's; `in_list` says "has"
@@ -441,7 +441,7 @@ pub fn maskHosts(arena: Allocator, d: *const Declaration) Allocator.Error![]cons
     return out;
 }
 
-/// ZON's `\x00` puts a NUL in a string, which a Nix string cannot hold.
+/// JSON's `\u0000` puts a NUL in a string, which a Nix string cannot hold.
 fn hasNul(s: []const u8) bool {
     return std.mem.indexOfScalar(u8, s, 0) != null;
 }
@@ -758,22 +758,22 @@ test "firstOfEach keeps first appearances in order" {
 }
 
 /// Only what has no default, as decl.zig's own `minimal`, but its
-/// closing brace.
+/// closing brace: more fields follow it, each line starting `,`.
 const minimal =
-    \\.{
-    \\    .user = "alice",
-    \\    .command = .{"hello"},
-    \\    .container = "agent",
-    \\    .closure = "/nix/store/x-nixos-system-agent",
-    \\    .cuid = 1000,
-    \\    .cgid = 100,
-    \\    .steps8 = "0123abcd",
-    \\    .name = "agent",
+    \\{
+    \\  "user": "alice",
+    \\  "command": ["hello"],
+    \\  "container": "agent",
+    \\  "closure": "/nix/store/x-nixos-system-agent",
+    \\  "cuid": 1000,
+    \\  "cgid": 100,
+    \\  "steps8": "0123abcd",
+    \\  "name": "agent"
     \\
 ;
 
 fn refusalsOf(a: Allocator, extra: []const u8) ![]const []const u8 {
-    const source = try std.mem.concatWithSentinel(a, u8, &.{ minimal, extra, "}" }, 0);
+    const source = try std.mem.concat(a, u8, &.{ minimal, extra, "}" });
     const d = try decl.parse(a, source, null);
     return validate(a, &d);
 }
@@ -783,7 +783,7 @@ test "a declaration named as flong's own subcommand is refused" {
     defer arena_state.deinit();
     const a = arena_state.allocator();
     for (reserved) |r| {
-        const source = try std.mem.concatWithSentinel(a, u8, &.{ ".{ .user = \"u\", .command = .{\"x\"}, .container = \"c\", .closure = \"/c\", .cuid = 1, .cgid = 1, .steps8 = \"s\", .name = \"", r, "\" }" }, 0);
+        const source = try std.mem.concat(a, u8, &.{ "{ \"user\": \"u\", \"command\": [\"x\"], \"container\": \"c\", \"closure\": \"/c\", \"cuid\": 1, \"cgid\": 1, \"steps8\": \"s\", \"name\": \"", r, "\" }" });
         const d = try decl.parse(a, source, null);
         const got = try validate(a, &d);
         try testing.expectEqual(1, got.len);
@@ -803,13 +803,13 @@ test "every refusal is collected, in order" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const r = try refusalsOf(arena_state.allocator(),
-        \\    .guard = .{.{}},
-        \\    .masks = .{ "/srv/b", "/srv/b/x/y" },
-        \\    .seccomp = .{ .tier = null, .allow = .{"Ptrace"} },
-        \\    .containerMounts = .{
-        \\        .{ .kind = .bind_rw, .dest = "/srv/b", .src = "/srv/b" },
-        \\        .{ .kind = .bind_ro, .dest = "/proc2", .src = "/proc/1" },
-        \\    },
+        \\, "guard": [[]],
+        \\  "masks": ["/srv/b", "/srv/b/x/y"],
+        \\  "seccomp": { "tier": null, "allow": ["Ptrace"] },
+        \\  "containerMounts": [
+        \\    { "kind": "bind_rw", "dest": "/srv/b", "src": "/srv/b" },
+        \\    { "kind": "bind_ro", "dest": "/proc2", "src": "/proc/1" }
+        \\  ]
         \\
     );
     const want = [_][]const u8{
@@ -832,18 +832,18 @@ test "the depth rule and the sources, looked up rather than compared pairwise" {
     // bind at it gives the host path; every writable source holding that
     // two levels down is named, once, in the binds' order.
     const r = try refusalsOf(a,
-        \\    .masks = .{ "/w/x/y/z", "/other/one", "/t/a/b" },
-        \\    .protect = .{ "/srv/p/" },
-        \\    .containerMounts = .{
-        \\        .{ .kind = .bind_rw, .dest = "/w", .src = "/h//w" },
-        \\        .{ .kind = .bind_rw, .dest = "/other", .src = "/h" },
-        \\        .{ .kind = .bind_rw, .dest = "/again", .src = "/h/w" },
-        \\        .{ .kind = .bind_ro, .dest = "/w/x", .src = "/h/w/x" },
-        \\        .{ .kind = .tmpfs, .dest = "/t" },
-        \\        .{ .kind = .bind_ro, .dest = "/in", .src = "/srv" },
-        \\        .{ .kind = .bind_ro, .dest = "/in2", .src = "/srv/p/q" },
-        \\        .{ .kind = .bind_ro, .dest = "/in3", .src = "/srv/pq" },
-        \\    },
+        \\, "masks": ["/w/x/y/z", "/other/one", "/t/a/b"],
+        \\  "protect": ["/srv/p/"],
+        \\  "containerMounts": [
+        \\    { "kind": "bind_rw", "dest": "/w", "src": "/h//w" },
+        \\    { "kind": "bind_rw", "dest": "/other", "src": "/h" },
+        \\    { "kind": "bind_rw", "dest": "/again", "src": "/h/w" },
+        \\    { "kind": "bind_ro", "dest": "/w/x", "src": "/h/w/x" },
+        \\    { "kind": "tmpfs", "dest": "/t" },
+        \\    { "kind": "bind_ro", "dest": "/in", "src": "/srv" },
+        \\    { "kind": "bind_ro", "dest": "/in2", "src": "/srv/p/q" },
+        \\    { "kind": "bind_ro", "dest": "/in3", "src": "/srv/pq" }
+        \\  ]
         \\
     );
     try testing.expectEqual(3, r.len);
@@ -854,12 +854,12 @@ test "the depth rule and the sources, looked up rather than compared pairwise" {
     // 20,000 masks under 20,000 writable binds: quadratic would be 4e8
     // comparisons; this is well under a second.
     var src: std.ArrayList(u8) = .empty;
-    try src.appendSlice(a, minimal ++ "    .masks = .{");
-    for (0..20_000) |i| try src.print(a, "\"/m{d}/a/b\",", .{i});
-    try src.appendSlice(a, "},\n    .containerMounts = .{");
-    for (0..20_000) |i| try src.print(a, ".{{ .kind = .bind_rw, .dest = \"/m{d}\", .src = \"/s{d}\" }},", .{ i, i });
-    try src.appendSlice(a, "},\n}");
-    const d = try decl.parse(a, try src.toOwnedSliceSentinel(a, 0), null);
+    try src.appendSlice(a, minimal ++ ", \"masks\": [");
+    for (0..20_000) |i| try src.print(a, "{s}\"/m{d}/a/b\"", .{ if (i == 0) "" else ",", i });
+    try src.appendSlice(a, "],\n  \"containerMounts\": [");
+    for (0..20_000) |i| try src.print(a, "{s}{{ \"kind\": \"bind_rw\", \"dest\": \"/m{d}\", \"src\": \"/s{d}\" }}", .{ if (i == 0) "" else ",", i, i });
+    try src.appendSlice(a, "]\n}");
+    const d = try decl.parse(a, src.items, null);
     const many = try validate(a, &d);
     try testing.expectEqual(1, many.len);
     try testing.expect(std.mem.startsWith(u8, many[0], "flong.agent masks /m0/a/b (in the writable bind of /s0), /m1/a/b"));
@@ -869,18 +869,18 @@ test "the payload is command or exec, exactly one" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const both = try refusalsOf(a, "    .exec = .{\"/nix/store/x-exec/bin/exec\"},\n");
+    const both = try refusalsOf(a, ", \"exec\": [\"/nix/store/x-exec/bin/exec\"]\n");
     try testing.expectEqual(1, both.len);
     try testing.expect(std.mem.startsWith(u8, both[0], "flong.agent has both `command` and `exec`."));
-    const base = minimal[".{\n    .user = \"alice\",\n    .command = .{\"hello\"},\n".len..];
-    const head = ".{\n    .user = \"alice\",\n";
-    const neither = try decl.parse(a, try std.mem.concatWithSentinel(a, u8, &.{ head, base, "}" }, 0), null);
+    const head = "{\n  \"user\": \"alice\",\n";
+    const base = minimal[(head ++ "  \"command\": [\"hello\"],\n").len..];
+    const neither = try decl.parse(a, try std.mem.concat(a, u8, &.{ head, base, "}" }), null);
     const n = try validate(a, &neither);
     try testing.expectEqual(1, n.len);
     try testing.expectEqualStrings("flong.agent has neither `command` nor `exec`, so nothing names the payload.", n[0]);
-    const exec = try decl.parse(a, try std.mem.concatWithSentinel(a, u8, &.{ head, "    .exec = .{\"/x\"},\n", base, "}" }, 0), null);
+    const exec = try decl.parse(a, try std.mem.concat(a, u8, &.{ head, "  \"exec\": [\"/x\"],\n", base, "}" }), null);
     try testing.expectEqual(0, (try validate(a, &exec)).len);
-    const empty = try decl.parse(a, try std.mem.concatWithSentinel(a, u8, &.{ head, "    .exec = .{},\n", base, "}" }, 0), null);
+    const empty = try decl.parse(a, try std.mem.concat(a, u8, &.{ head, "  \"exec\": [],\n", base, "}" }), null);
     const e = try validate(a, &empty);
     try testing.expectEqual(1, e.len);
     try testing.expectEqualStrings("flong.agent.exec is an empty command, which names no program to run.", e[0]);
@@ -890,16 +890,16 @@ test "the container's environment: names, the launch's own, and nothing for a sh
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const r = try refusalsOf(arena_state.allocator(),
-        \\    .environment = .{
-        \\        .{ .name = "PATH", .value = "/etc/profiles/per-user/${USER}/bin:${HOME}/.local/bin" },
-        \\        .{ .name = "PRICE", .value = "$$5" },
-        \\        .{ .name = "", .value = "x" },
-        \\        .{ .name = "A=B", .value = "x" },
-        \\        .{ .name = "HOME", .value = "/root" },
-        \\        .{ .name = "PRICE", .value = "6" },
-        \\        .{ .name = "NIX_PATH", .value = "${NIX_PATH}:x" },
-        \\        .{ .name = "SUB", .value = "$(id -u)" },
-        \\    },
+        \\, "environment": [
+        \\    { "name": "PATH", "value": "/etc/profiles/per-user/${USER}/bin:${HOME}/.local/bin" },
+        \\    { "name": "PRICE", "value": "$$5" },
+        \\    { "name": "", "value": "x" },
+        \\    { "name": "A=B", "value": "x" },
+        \\    { "name": "HOME", "value": "/root" },
+        \\    { "name": "PRICE", "value": "6" },
+        \\    { "name": "NIX_PATH", "value": "${NIX_PATH}:x" },
+        \\    { "name": "SUB", "value": "$(id -u)" }
+        \\  ]
         \\
     );
     const want = [_][]const u8{
@@ -918,7 +918,7 @@ test "the ranges decl.zig declares" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const r = try refusalsOf(a, "    .limits = .{ .CPUWeight = 0, .TasksMax = .{ .count = 0 }, .MemoryMax = .{ .size = \"8g\" } },\n");
+    const r = try refusalsOf(a, ", \"limits\": { \"CPUWeight\": 0, \"TasksMax\": 0, \"MemoryMax\": \"8g\" }\n");
     try testing.expectEqual(3, r.len);
     try testing.expectEqualStrings("flong.agent.limits.MemoryMax is \"8g\", which is not a string matching the pattern [0-9]+[KMGT].", r[0]);
     try testing.expectEqualStrings("flong.agent.limits.TasksMax is 0, outside 1-9223372036854775807.", r[1]);
@@ -929,9 +929,9 @@ test "a NUL byte in a command's word or in any string" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const r = try refusalsOf(arena_state.allocator(),
-        \\    .guard = .{ .{ "test", "-d" }, .{ "a\x00b", "c\x00" } },
-        \\    .masks = .{ "/a\x00b", "/c" },
-        \\    .seccomp = .{ .allow = .{"ptrace\x00"} },
+        \\, "guard": [["test", "-d"], ["a\u0000b", "c\u0000"]],
+        \\  "masks": ["/a\u0000b", "/c"],
+        \\  "seccomp": { "allow": ["ptrace\u0000"] }
         \\
     );
     try testing.expectEqual(3, r.len);

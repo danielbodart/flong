@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/something-after-the-declaration.json:11:1: not JSON: unexpected '{'

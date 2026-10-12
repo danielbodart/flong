@@ -1,5 +1,5 @@
 //! S3's prologue pieces from outside (the `test` step): the parts of
-//! rootless-wrapper.bash that `flong launch DECL.zon` does itself, each
+//! rootless-wrapper.bash that `flong launch DECL.json` does itself, each
 //! refusal's text and status as the wrapper's (prologue.exit_refused under
 //! the declaration's name, here "agent"):
 //!

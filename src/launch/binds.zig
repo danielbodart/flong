@@ -1,5 +1,5 @@
 //! launch/binds.zig: the caller's binds (rootless-wrapper.bash:138-180),
-//! for `flong launch DECL.zon`'s prologue (DESIGN.md, "Launch
+//! for `flong launch DECL.json`'s prologue (DESIGN.md, "Launch
 //! sequence": the caller's binds), from the binds commands'
 //! output (cmd.outputOf).
 //!

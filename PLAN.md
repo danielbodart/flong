@@ -161,7 +161,7 @@ single-user Nix makes.
   of `NIX_PATH` when it exists, as doing nothing: a container's home is the
   rootfs's, and no container has a daemon. A declaration that binds a
   home holding channels loses that prefix, which no container could use.
-- **flong's size.** flong is 1,417,640 bytes with the ZON parser, the
+- **flong's size.** flong is 1,132,448 bytes with the JSON parser, the
   schema's walk and the doc comments' text, and it is every container's
   pid 1, as `flong init`.
 

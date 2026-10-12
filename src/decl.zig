@@ -1,8 +1,9 @@
 //! decl.zig: a declaration, the static half of a container, as a type
 //! (DESIGN.md, "The declaration"). The NixOS module renders each
-//! `flong.<name>` to a `.zon` file of this shape; `flong check` reads it at
-//! build time and `flong launch` at launch, through `parse` here, so the two
-//! cannot read it differently.
+//! `flong.<name>` to a JSON file of this shape, `builtins.toJSON` of the
+//! options' values; `flong check` reads it at build time and `flong
+//! launch` at launch, through `parse` here, so the two cannot read it
+//! differently.
 //!
 //! The type is the schema. A field's name is the Nix option's, camelCase and
 //! all, with no translation (DESIGN.md, "One binary": no compatibility
@@ -11,14 +12,20 @@
 //! into `decl-options.json`, which module.nix builds its options from. A
 //! field without a doc comment is a compile error there.
 //!
-//! What std.zon.parse can refuse, the type says: an unknown field, a missing
-//! one, a wrong type, an enum tag that is not one, an integer out of its
-//! width. What it cannot, `patterns` and `ranges` on the containing type say,
-//! for the schema to carry into Nix, and check.zig to judge; so does a
-//! command's being non-empty. A Nix type ZON has no spelling for is a tagged
-//! union: `either (enum [ "auto" ]) (listOf ...)` is `.auto` or
-//! `.{ .ports = .{ ... } }`, each void field a tag and each other field one
-//! of the either's branches.
+//! A value is spelt in JSON as its Nix option's value is, so Nix writes
+//! one with `builtins.toJSON` and nothing between: an enum is its tag's
+//! name as a string (`"strict"`), pathAttrs (`overlays`) an object, and a
+//! union -- Nix's `either`, which has no tag -- is its option's value,
+//! untagged: a void option is its name as a string (`"auto"`,
+//! `"infinity"`), and any other is its payload (`[ ... ]`, `4096`,
+//! `"8G"`), told apart by its JSON type. `Parser.untagged` says how, and a
+//! union whose options a JSON type cannot tell apart is a compile error.
+//!
+//! What the parse can refuse, the type says: an unknown field, one given
+//! twice, a missing one, a wrong type, an enum's value that is not one,
+//! an integer out of its width. What it cannot, `patterns` and `ranges` on
+//! the containing type say, for the schema to carry into Nix, and check.zig
+//! to judge; so does a command's being non-empty.
 //!
 //! Some fields are not options: `computed` names them. Nix works them out of
 //! `containers.<name>` and the closure it builds, and renders them beside the
@@ -683,7 +690,7 @@ pub fn labelBad(l: []const u8) ?LabelBad {
     return null;
 }
 
-/// `network.forwardPorts`: `.auto`, or `.{ .ports = .{ ... } }`.
+/// `network.forwardPorts`: `"auto"`, or a list of ports.
 pub const ForwardPorts = union(enum) {
     /// Every TCP port the container listens on, while it listens.
     auto,
@@ -703,8 +710,8 @@ pub const ForwardPort = struct {
 
 pub const Protocol = enum { tcp, udp };
 
-/// One of `overlays`: Nix's `{ target = lower; }`, an attribute set, as a
-/// list of pairs, since a ZON struct's field names are its type's.
+/// One of `overlays`: Nix's `{ target = lower; }`, an attribute set, read
+/// from a JSON object into a list of pairs in its order.
 pub const Overlay = struct {
     /// Where the overlay is mounted in the container.
     target: []const u8,
@@ -740,7 +747,7 @@ pub const Limits = struct {
 };
 
 /// A size as systemd writes one, and as the kernel's memparse reads it:
-/// `.infinity`, `.{ .bytes = N }` or `.{ .size = "8G" }`. Nix's
+/// `"infinity"`, a number of bytes, or a string such as `"8G"`. Nix's
 /// `either ints.unsigned (strMatching "[0-9]+[KMGT]|infinity")`, split so
 /// the parse keeps the number a number. u63 is every Nix integer that is
 /// not negative.
@@ -752,7 +759,7 @@ pub const MemSize = union(enum) {
     pub const patterns = .{ .size = "[0-9]+[KMGT]" };
 };
 
-/// `pids.max`: `.infinity` or `.{ .count = N }`, N at least 1 (Nix's
+/// `pids.max`: `"infinity"` or a number at least 1 (Nix's
 /// `either ints.positive (enum [ "infinity" ])`).
 pub const Tasks = union(enum) {
     infinity,
@@ -864,79 +871,357 @@ pub const SeccompProject = struct {
 /// kilobytes; the bound is on what a user can make the launcher allocate.
 pub const max_bytes = 1 << 20;
 
-/// Parses ZON `source` into a `Declaration`, in `arena`, which the
-/// returned value lives in: it mixes allocated strings with its type's
-/// static defaults, so it is freed with the arena, never field by field.
-/// `error.ParseZon` leaves the reason, with its line and column, in
-/// `diag` (initialized to `.{}`), for `report`; `error.NotZon` is a
-/// source `notZon` refuses, and says where and why.
-///
-/// An unknown field is an error, as a missing required one is: a typo
-/// that silently did nothing is what a typed declaration exists to stop.
-pub fn parse(arena: Allocator, source: [:0]const u8, diag: ?*std.zon.parse.Diagnostics) error{ OutOfMemory, ParseZon, NotZon }!Declaration {
-    if (notZon(source) != null) return error.NotZon;
-    // The parser's per-field `inline` switches, over twenty-one fields, pass
-    // the default quota of a thousand branches.
-    @setEvalBranchQuota(10_000);
-    return std.zon.parse.fromSlice(Declaration, arena, source, diag, .{ .free_on_error = false });
-}
-
-/// The deepest `.{` a declaration may nest: its own shape needs five
-/// (`network.forwardPorts.ports`' elements).
-pub const max_depth = 32;
-
-/// What `notZon` refuses, at byte `at` of the source.
-pub const NotZon = struct {
-    at: usize,
-    why: union(enum) {
-        /// A token no declaration holds.
-        token: std.zig.Token.Tag,
-        /// A `{` past `max_depth`.
-        deep,
-    },
+/// Why `parse` refused a source: what, and at which byte of it.
+pub const Diag = struct {
+    /// The byte the refusal is at: the value of the wrong type, the
+    /// field's name, the `{` of an object missing a field, or where the
+    /// source stops being JSON.
+    at: usize = 0,
+    message: []const u8 = "",
+    /// What would have been accepted, when that is a short list.
+    note: ?[]const u8 = null,
 };
 
-/// The first reason `source` cannot be a declaration, found before it is
-/// parsed, or null. std.zon.parse parses by Zig's own recursive descent,
-/// on the process's stack, as deep as the source nests: a megabyte of
-/// `.{`, `(` or `-` would overflow it and end the process with SIGSEGV,
-/// where every other bad file gets a line and a column. So what the
-/// parser recurses on is bounded first, one token at a time: `{` at most
-/// `max_depth` deep, and no token a declaration cannot hold, which is
-/// every one but `.{}=,`, a name (`true`, `false` and `null` among them),
-/// a string, a number and one `-` before one. A token the tokenizer finds
-/// invalid is left to the parser, to say as it does.
-pub fn notZon(source: [:0]const u8) ?NotZon {
-    var tokens = std.zig.Tokenizer.init(source);
-    var depth: usize = 0;
-    var prev: std.zig.Token.Tag = .eof;
-    while (true) {
-        const t = tokens.next();
-        switch (t.tag) {
-            .eof => return null,
-            .l_brace => {
-                depth += 1;
-                if (depth > max_depth) return .{ .at = t.loc.start, .why = .deep };
-            },
-            .r_brace => depth -|= 1,
-            .minus => if (prev == .minus) return .{ .at = t.loc.start, .why = .{ .token = t.tag } },
-            .period,
-            .equal,
-            .comma,
-            .identifier,
-            .string_literal,
-            .multiline_string_literal_line,
-            .char_literal,
-            .number_literal,
-            .doc_comment,
-            .container_doc_comment,
-            .invalid,
-            .invalid_periodasterisks,
-            => {},
-            else => return .{ .at = t.loc.start, .why = .{ .token = t.tag } },
-        }
-        prev = t.tag;
+pub const Error = error{ OutOfMemory, ParseJson };
+
+/// Parses JSON `source` into a `Declaration`, in `arena`, which the
+/// returned value lives in: it mixes allocated strings with its type's
+/// static defaults, so it is freed with the arena, never field by field.
+/// `error.ParseJson` leaves the reason, and the byte it is at, in `diag`,
+/// for `report`.
+///
+/// Strict as the type: an unknown field is an error, as are a field given
+/// twice, a missing required one, a value of the wrong JSON type, a
+/// string that is not one of an enum's, a number that is not an integer
+/// or is outside its field's type, and anything after the declaration's
+/// closing `}`. A typo that silently did nothing is what a typed
+/// declaration exists to stop. Every value is spelt as its Nix option's
+/// is (`writeValue`, decl_docs.zig): an enum is its tag's name as a
+/// string, a union is its option's value with no tag around it, told
+/// apart by its JSON type and, between strings, by a void option's name
+/// (`untagged`), and pathAttrs (`Overlay`) is an object, name to value.
+///
+/// The parse descends only as deep as the type does, never as deep as the
+/// source nests: a value is read only once its JSON type is the one its
+/// field takes, so a megabyte of `[` is refused at the first, on no more
+/// stack than a valid declaration takes.
+pub fn parse(arena: Allocator, source: []const u8, diag: ?*Diag) Error!Declaration {
+    var p: Parser = .{
+        .arena = arena,
+        .scanner = std.json.Scanner.initCompleteInput(arena, source),
+        .source = source,
+    };
+    errdefer if (diag) |d| {
+        d.* = p.diag;
+    };
+    const d = try p.value(Declaration, false);
+    const end = try p.peek();
+    if (end.type != .end_of_document) return p.fail(end.at, null, "more after the declaration's closing '}}'", .{});
+    return d;
+}
+
+/// The JSON reader `parse` drives: a token at a time from std.json's
+/// scanner, into the type, saying where and why it stops.
+const Parser = struct {
+    arena: Allocator,
+    scanner: std.json.Scanner,
+    source: []const u8,
+    diag: Diag = .{},
+
+    const Peeked = struct { type: std.json.TokenType, at: usize };
+
+    fn fail(p: *Parser, at: usize, note: ?[]const u8, comptime fmt: []const u8, args: anytype) Error {
+        p.diag = .{ .at = at, .message = try std.fmt.allocPrint(p.arena, fmt, args), .note = note };
+        return error.ParseJson;
     }
+
+    /// The scanner's refusal, at the byte it stopped on.
+    fn notJson(p: *Parser, err: anyerror) Error {
+        const at = @min(p.scanner.cursor, p.source.len);
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.UnexpectedEndOfInput => p.fail(at, null, "not JSON: unexpected end of file", .{}),
+            else => if (at < p.source.len)
+                p.fail(at, null, "not JSON: unexpected {f}", .{fmtByte(p.source[at])})
+            else
+                p.fail(at, null, "not JSON: unexpected end of file", .{}),
+        };
+    }
+
+    /// The next token's JSON type, and the byte it starts at.
+    fn peek(p: *Parser) Error!Peeked {
+        const t = p.scanner.peekNextTokenType() catch |err| return p.notJson(err);
+        return .{ .type = t, .at = p.scanner.cursor };
+    }
+
+    fn next(p: *Parser) Error!std.json.Token {
+        return p.scanner.nextAllocMax(p.arena, .alloc_always, p.source.len) catch |err| p.notJson(err);
+    }
+
+    fn string(p: *Parser) Error![]const u8 {
+        return switch (try p.next()) {
+            .allocated_string => |s| s,
+            else => unreachable,
+        };
+    }
+
+    fn number(p: *Parser) Error![]const u8 {
+        return switch (try p.next()) {
+            .allocated_number => |s| s,
+            else => unreachable,
+        };
+    }
+
+    /// The next value as a `T`, or null when `nullable` and it is `null`.
+    fn value(p: *Parser, comptime T: type, comptime nullable: bool) Error!T {
+        const t = try p.peek();
+        if (@typeInfo(T) == .optional) {
+            if (t.type == .null) {
+                _ = try p.next();
+                return null;
+            }
+            return try p.value(@typeInfo(T).optional.child, true);
+        }
+        const wrong = "expected " ++ comptime describe(T) ++ (if (nullable) ", or null" else "");
+        switch (@typeInfo(T)) {
+            .bool => return switch (t.type) {
+                .true => blk: {
+                    _ = try p.next();
+                    break :blk true;
+                },
+                .false => blk: {
+                    _ = try p.next();
+                    break :blk false;
+                },
+                else => p.fail(t.at, null, wrong, .{}),
+            },
+            .int => {
+                if (t.type != .number) return p.fail(t.at, null, wrong, .{});
+                return p.integer(T, t.at);
+            },
+            .@"enum" => |e| {
+                if (t.type != .string) return p.fail(t.at, null, wrong, .{});
+                const s = try p.string();
+                return std.meta.stringToEnum(T, s) orelse
+                    p.fail(t.at, comptime supported(e.fields), "unexpected value {f}", .{std.json.fmt(s, .{})});
+            },
+            .pointer => |ptr| {
+                if (comptime isString(T)) {
+                    if (t.type != .string) return p.fail(t.at, null, wrong, .{});
+                    const s = try p.string();
+                    return if (ptr.sentinel()) |_| try p.arena.dupeZ(u8, s) else s;
+                }
+                if (comptime isAttrs(ptr.child)) return p.attrs(ptr.child, t, wrong);
+                if (t.type != .array_begin) return p.fail(t.at, null, wrong, .{});
+                _ = try p.next();
+                var list: std.ArrayList(ptr.child) = .empty;
+                while ((try p.peek()).type != .array_end) try list.append(p.arena, try p.value(ptr.child, false));
+                _ = try p.next();
+                return list.toOwnedSlice(p.arena);
+            },
+            .@"struct" => return p.object(T, t, wrong),
+            .@"union" => return p.untagged(T, t, wrong),
+            else => @compileError("no JSON reading of " ++ @typeName(T)),
+        }
+    }
+
+    /// A JSON integer, as JSON writes one (no fraction, no exponent, no
+    /// `-0`), within `T`.
+    fn integer(p: *Parser, comptime T: type, at: usize) Error!T {
+        const s = try p.number();
+        const range = "an integer from " ++ std.fmt.comptimePrint("{d} to {d}", .{ std.math.minInt(T), std.math.maxInt(T) });
+        if (!std.json.isNumberFormattedLikeAnInteger(s)) return p.fail(at, null, "expected " ++ range ++ ", found {s}", .{s});
+        return std.fmt.parseInt(T, s, 10) catch p.fail(at, null, "expected " ++ range ++ ", found {s}", .{s});
+    }
+
+    /// A struct from an object: each field once, by its own name, and
+    /// every field without a default.
+    fn object(p: *Parser, comptime T: type, t: Peeked, comptime wrong: []const u8) Error!T {
+        const fields = @typeInfo(T).@"struct".fields;
+        if (t.type != .object_begin) return p.fail(t.at, null, wrong, .{});
+        _ = try p.next();
+        var r: T = undefined;
+        var seen = [_]bool{false} ** fields.len;
+        while (true) {
+            const k = try p.peek();
+            if (k.type == .object_end) break;
+            const name = try p.string();
+            var known = false;
+            inline for (fields, 0..) |f, i| {
+                if (std.mem.eql(u8, f.name, name)) {
+                    if (seen[i]) return p.fail(k.at, null, "field {f} given twice", .{std.json.fmt(name, .{})});
+                    seen[i] = true;
+                    known = true;
+                    @field(r, f.name) = try p.value(f.type, false);
+                }
+            }
+            if (!known) return p.fail(k.at, comptime supported(fields), "unexpected field {f}", .{std.json.fmt(name, .{})});
+        }
+        _ = try p.next();
+        inline for (fields, 0..) |f, i| {
+            if (!seen[i]) {
+                if (f.defaultValue()) |d| {
+                    @field(r, f.name) = d;
+                } else return p.fail(t.at, null, "missing required field " ++ f.name, .{});
+            }
+        }
+        return r;
+    }
+
+    /// pathAttrs: an object, each name a `T`'s `attrs.name` and its value
+    /// the `attrs.value`, in the object's order. A name given twice is
+    /// refused, as a field is.
+    fn attrs(p: *Parser, comptime T: type, t: Peeked, comptime wrong: []const u8) Error![]const T {
+        if (t.type != .object_begin) return p.fail(t.at, null, wrong, .{});
+        _ = try p.next();
+        var list: std.ArrayList(T) = .empty;
+        while (true) {
+            const k = try p.peek();
+            if (k.type == .object_end) break;
+            const name = try p.string();
+            for (list.items) |x| {
+                if (std.mem.eql(u8, @field(x, T.attrs.name), name))
+                    return p.fail(k.at, null, "{f} given twice", .{std.json.fmt(name, .{})});
+            }
+            var x: T = undefined;
+            @field(x, T.attrs.name) = name;
+            @field(x, T.attrs.value) = try p.value([]const u8, false);
+            try list.append(p.arena, x);
+        }
+        _ = try p.next();
+        return list.toOwnedSlice(p.arena);
+    }
+
+    /// A union, untagged as Nix writes it: a void option is its name as a
+    /// string, and every other option is its payload, the one whose JSON
+    /// type the value has (`untaggedKinds` allows one option a type). A
+    /// string that names a void option is that option, before a string
+    /// payload.
+    fn untagged(p: *Parser, comptime U: type, t: Peeked, comptime wrong: []const u8) Error!U {
+        const fields = @typeInfo(U).@"union".fields;
+        comptime untaggedKinds(U);
+        if (t.type == .string) {
+            const s = try p.string();
+            inline for (fields) |f| {
+                if (f.type == void and std.mem.eql(u8, f.name, s)) return @unionInit(U, f.name, {});
+            }
+            inline for (fields) |f| {
+                if (comptime f.type != void and kindOf(f.type) == .string) return @unionInit(U, f.name, s);
+            }
+            return p.fail(t.at, comptime voidTags(U), "unexpected value {f}", .{std.json.fmt(s, .{})});
+        }
+        inline for (fields) |f| {
+            if (f.type != void) {
+                if ((comptime kindOf(f.type).token()) == t.type) return @unionInit(U, f.name, try p.value(f.type, false));
+            }
+        }
+        return p.fail(t.at, null, wrong, .{});
+    }
+};
+
+/// What a value of `T` is in JSON, as an error says it expected one.
+fn describe(comptime T: type) []const u8 {
+    if (@typeInfo(T) == .@"union") {
+        var s: []const u8 = "";
+        const fields = @typeInfo(T).@"union".fields;
+        for (fields, 0..) |f, n| {
+            const sep = if (n == 0) "" else if (n == fields.len - 1) " or " else ", ";
+            s = s ++ sep ++ if (f.type == void) "\"" ++ f.name ++ "\"" else describe(f.type);
+        }
+        return s;
+    }
+    return switch (kindOf(T)) {
+        .bool => "true or false",
+        .integer => "an integer",
+        .string => "a string",
+        .array => "an array",
+        .object => "an object",
+    };
+}
+
+/// The JSON types a declaration's values take.
+const Kind = enum {
+    bool,
+    integer,
+    string,
+    array,
+    object,
+
+    fn token(k: Kind) std.json.TokenType {
+        return switch (k) {
+            .bool => .true,
+            .integer => .number,
+            .string => .string,
+            .array => .array_begin,
+            .object => .object_begin,
+        };
+    }
+};
+
+fn kindOf(comptime T: type) Kind {
+    return switch (@typeInfo(T)) {
+        .bool => .bool,
+        .int => .integer,
+        .@"enum" => .string,
+        .pointer => |ptr| if (isString(T)) .string else if (isAttrs(ptr.child)) .object else .array,
+        .@"struct" => .object,
+        else => @compileError("no JSON kind for " ++ @typeName(T)),
+    };
+}
+
+/// A union reads untagged only if its options' JSON types tell them
+/// apart: at most one option of each, and void ones as strings.
+fn untaggedKinds(comptime U: type) void {
+    var seen: [@typeInfo(Kind).@"enum".fields.len]bool = @splat(false);
+    for (@typeInfo(U).@"union".fields) |f| {
+        if (f.type == void) continue;
+        const k = @intFromEnum(kindOf(f.type));
+        if (seen[k]) @compileError(@typeName(U) ++ ": two options of one JSON type, which an untagged value cannot tell apart");
+        seen[k] = true;
+    }
+}
+
+fn isString(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .pointer => |ptr| ptr.size == .slice and ptr.child == u8,
+        else => false,
+    };
+}
+
+fn isAttrs(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "attrs");
+}
+
+/// `supported: 'a', 'b'`, of a struct's fields or an enum's tags.
+fn supported(comptime fields: anytype) []const u8 {
+    var s: []const u8 = "supported: ";
+    for (fields, 0..) |f, n| s = s ++ (if (n == 0) "" else ", ") ++ "\"" ++ f.name ++ "\"";
+    return s;
+}
+
+fn voidTags(comptime U: type) []const u8 {
+    var s: []const u8 = "supported: ";
+    var n = 0;
+    for (@typeInfo(U).@"union".fields) |f| {
+        if (f.type != void) continue;
+        s = s ++ (if (n == 0) "" else ", ") ++ "\"" ++ f.name ++ "\"";
+        n += 1;
+    }
+    for (@typeInfo(U).@"union".fields) |f| {
+        if (f.type == void or kindOf(f.type) != .string) continue;
+        s = s ++ ", or " ++ describe(f.type) ++ " for " ++ f.name;
+    }
+    return s;
+}
+
+/// A byte as an error quotes it: printable ASCII as itself, anything
+/// else as `\xNN`.
+fn fmtByte(b: u8) std.fmt.Alt(u8, formatByte) {
+    return .{ .data = b };
+}
+
+fn formatByte(b: u8, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    if (b >= 0x20 and b < 0x7f) try w.print("'{c}'", .{b}) else try w.print("byte 0x{x:0>2}", .{b});
 }
 
 /// Reads and parses the declaration at `path`, at most `max_bytes` of
@@ -944,51 +1229,19 @@ pub fn notZon(source: [:0]const u8) ?NotZon {
 /// message each, and returned as `error.Reported`.
 pub fn load(arena: Allocator, path: [:0]const u8) (msg.Error || error{OutOfMemory})!Declaration {
     const source = try readBounded(arena, path);
-    if (notZon(source)) |n| {
-        try reportNotZon(arena, path, source, n);
-        return error.Reported;
-    }
-    var diag: std.zon.parse.Diagnostics = .{};
+    var diag: Diag = .{};
     return parse(arena, source, &diag) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.ParseZon => {
-            try report(arena, path, &diag);
+        error.ParseJson => {
+            try report(arena, path, source, &diag);
             return error.Reported;
         },
-        // notZon has passed this source above.
-        error.NotZon => msg.refuse("{s}: not a declaration", .{path}),
     };
 }
 
-/// Says why `notZon` refused `source`, as `path:line:col: why`.
-pub fn reportNotZon(arena: Allocator, path: []const u8, source: []const u8, n: NotZon) error{OutOfMemory}!void {
-    const before = source[0..n.at];
-    const line_start = if (std.mem.lastIndexOfScalar(u8, before, '\n')) |i| i + 1 else 0;
-    const loc: std.zig.Ast.Location = .{
-        .line = std.mem.count(u8, before, "\n"),
-        .column = n.at - line_start,
-        .line_start = line_start,
-        .line_end = std.mem.indexOfScalarPos(u8, source, n.at, '\n') orelse source.len,
-    };
-    const Why = struct {
-        n: NotZon,
-        pub fn format(w: @This(), out: *std.Io.Writer) std.Io.Writer.Error!void {
-            switch (w.n.why) {
-                .deep => try out.print("nested more than {d} deep", .{max_depth}),
-                .token => |tag| {
-                    if (tag.lexeme()) |l| try out.print("'{s}'", .{l}) else try out.writeAll(tag.symbol());
-                    try out.writeAll(" cannot be in a declaration, which holds only structs and lists of strings, numbers, enum literals, true, false and null");
-                },
-            }
-        }
-    };
-    try sayAt(arena, path, loc, "", Why{ .n = n });
-}
-
-/// `path`'s bytes, NUL-terminated for the parser, refused past
-/// `max_bytes`: read in pieces, so a file that never ends (a FIFO,
-/// /dev/zero) costs a MiB and not the memory.
-fn readBounded(arena: Allocator, path: [:0]const u8) (msg.Error || error{OutOfMemory})![:0]const u8 {
+/// `path`'s bytes, refused past `max_bytes`: read in pieces, so a file
+/// that never ends (a FIFO, /dev/zero) costs a MiB and not the memory.
+fn readBounded(arena: Allocator, path: [:0]const u8) (msg.Error || error{OutOfMemory})![]const u8 {
     const f = try msg.check(fd.openFile(fd.cwd, path, .{}, 0), "{s}", .{path});
     defer f.close();
     var buf: std.ArrayList(u8) = .empty;
@@ -1001,24 +1254,24 @@ fn readBounded(arena: Allocator, path: [:0]const u8) (msg.Error || error{OutOfMe
         buf.items.len += n;
         if (buf.items.len > max_bytes) return msg.refuse("{s}: longer than 1 MiB", .{path});
     }
-    return buf.toOwnedSliceSentinel(arena, 0);
+    return buf.toOwnedSlice(arena);
 }
 
-/// Says each error and note in `diag` as `path:line:col: why`, the way
-/// the compiler places one, 1-based.
-pub fn report(arena: Allocator, path: []const u8, diag: *const std.zon.parse.Diagnostics) error{OutOfMemory}!void {
-    var errors = diag.iterateErrors();
-    while (errors.next()) |e| {
-        try sayAt(arena, path, e.getLocation(diag), "", e.fmtMessage(diag));
-        var notes = e.iterateNotes(diag);
-        while (notes.next()) |n| try sayAt(arena, path, n.getLocation(diag), "note: ", n.fmtMessage(diag));
-    }
+/// A byte offset as a 1-based line and column, the column in bytes.
+pub const Location = struct { line: usize, column: usize };
+
+pub fn locate(source: []const u8, at: usize) Location {
+    const before = source[0..@min(at, source.len)];
+    const line_start = if (std.mem.lastIndexOfScalar(u8, before, '\n')) |i| i + 1 else 0;
+    return .{ .line = std.mem.count(u8, before, "\n") + 1, .column = before.len - line_start + 1 };
 }
 
-fn sayAt(arena: Allocator, path: []const u8, loc: std.zig.Ast.Location, kind: []const u8, why: anytype) error{OutOfMemory}!void {
-    var text: std.Io.Writer.Allocating = .init(arena);
-    text.writer.print("{s}:{d}:{d}: {s}{f}", .{ path, loc.line + 1, loc.column + 1, kind, why }) catch return error.OutOfMemory;
-    msg.say("{s}", .{text.written()});
+/// Says `diag` as `path:line:col: why`, the way the compiler places one,
+/// and its note, if any, as a second line at the same place.
+pub fn report(arena: Allocator, path: []const u8, source: []const u8, diag: *const Diag) error{OutOfMemory}!void {
+    const loc = locate(source, diag.at);
+    msg.say("{s}", .{try std.fmt.allocPrint(arena, "{s}:{d}:{d}: {s}", .{ path, loc.line, loc.column, diag.message })});
+    if (diag.note) |n| msg.say("{s}", .{try std.fmt.allocPrint(arena, "{s}:{d}:{d}: note: {s}", .{ path, loc.line, loc.column, n })});
 }
 
 // ---- tests ----
@@ -1028,82 +1281,86 @@ const testing = std.testing;
 /// Every field set, none to its default, as module.nix would render a
 /// busy declaration.
 const full =
-    \\.{
-    \\    .user = "alice",
-    \\    .command = .{ "/nix/store/x-hello/bin/hello", "--greeting=hi there" },
-    \\    .workspace = .{ "/nix/store/x-root/bin/root", "--git" },
-    \\    .binds = .{ .{"/nix/store/x-b1/bin/b1"}, .{ "/nix/store/x-b2/bin/b2", "a" } },
-    \\    .guard = .{.{"/nix/store/x-g/bin/g"}},
-    \\    .postStart = .{.{"/nix/store/x-s/bin/s"}},
-    \\    .postStop = .{.{"/nix/store/x-t/bin/t"}},
-    \\    .network = .{
-    \\        .forwardPorts = .{ .ports = .{
-    \\            .{ .hostPort = 8080, .containerPort = 80 },
-    \\            .{ .protocol = .udp, .hostPort = 5353 },
-    \\        } },
-    \\        .hostLoopbackToSession = true,
-    \\        .hostPorts = .{5432},
-    \\    },
-    \\    .overlays = .{.{ .target = "/home/alice/.state", .lower = "/var/lib/state" }},
-    \\    .masks = .{"/home/alice/.cache/tool/token"},
-    \\    .protect = .{"/run/frisket"},
-    \\    .limits = .{
-    \\        .MemoryMax = .{ .size = "8G" },
-    \\        .MemoryHigh = .{ .bytes = 4294967296 },
-    \\        .MemorySwapMax = .infinity,
-    \\        .TasksMax = .{ .count = 4096 },
-    \\        .CPUQuota = "400%",
-    \\        .CPUWeight = 50,
-    \\        .oomGroup = true,
-    \\    },
-    \\    .seccomp = .{
-    \\        .tier = .parity,
-    \\        .debug = true,
-    \\        .nestedSandbox = true,
-    \\        .allow = .{ "@keyring", "userfaultfd" },
-    \\        .deny = .{"@swap"},
-    \\        .errno = .ENOSYS,
-    \\        .log = true,
-    \\    },
-    \\    .seccompPolicy = .{.{ "/nix/store/x-env/bin/chase-envelope", "approve" }},
-    \\    .container = "agent",
-    \\    .closure = "/nix/store/x-nixos-system-agent",
-    \\    .cuid = 1000,
-    \\    .cgid = 100,
-    \\    .steps8 = "0123abcd",
-    \\    .containerMounts = .{
-    \\        .{ .kind = .bind_rw, .dest = "/home/alice/src", .src = "/srv/src" },
-    \\        .{ .kind = .tmpfs, .dest = "/scratch", .mode = "1777", .size = "64m" },
-    \\        .{ .kind = .dev, .dest = "/dev/fuse", .src = "/dev/fuse", .mode = "rwm" },
-    \\    },
-    \\    .name = "agent-trusted",
-    \\    .environment = .{
-    \\        .{ .name = "PATH", .value = "/etc/profiles/per-user/${USER}/bin:/run/current-system/sw/bin" },
-    \\        .{ .name = "LANG", .value = "en_US.UTF-8" },
-    \\    },
-    \\    .seccompTierFilter = "/nix/store/x-tier/flong-seccomp.bpf",
-    \\    .seccompFixedFilters = .{ "/nix/store/x-audit.bpf", "/nix/store/x-tty.bpf" },
-    \\    .seccompProject = .{
-    \\        .dump = "/nix/store/x-flong-seccomp-groups",
-    \\        .names = "/nix/store/x-flong-seccomp-names",
-    \\        .deny = "log",
-    \\    },
+    \\{
+    \\  "user": "alice",
+    \\  "command": ["/nix/store/x-hello/bin/hello", "--greeting=hi there"],
+    \\  "workspace": ["/nix/store/x-root/bin/root", "--git"],
+    \\  "binds": [["/nix/store/x-b1/bin/b1"], ["/nix/store/x-b2/bin/b2", "a"]],
+    \\  "guard": [["/nix/store/x-g/bin/g"]],
+    \\  "postStart": [["/nix/store/x-s/bin/s"]],
+    \\  "postStop": [["/nix/store/x-t/bin/t"]],
+    \\  "network": {
+    \\    "forwardPorts": [
+    \\      { "hostPort": 8080, "containerPort": 80 },
+    \\      { "protocol": "udp", "hostPort": 5353 }
+    \\    ],
+    \\    "hostLoopbackToSession": true,
+    \\    "hostPorts": [5432]
+    \\  },
+    \\  "overlays": { "/home/alice/.state": "/var/lib/state" },
+    \\  "masks": ["/home/alice/.cache/tool/token"],
+    \\  "protect": ["/run/frisket"],
+    \\  "limits": {
+    \\    "MemoryMax": "8G",
+    \\    "MemoryHigh": 4294967296,
+    \\    "MemorySwapMax": "infinity",
+    \\    "TasksMax": 4096,
+    \\    "CPUQuota": "400%",
+    \\    "CPUWeight": 50,
+    \\    "oomGroup": true
+    \\  },
+    \\  "seccomp": {
+    \\    "tier": "parity",
+    \\    "debug": true,
+    \\    "nestedSandbox": true,
+    \\    "allow": ["@keyring", "userfaultfd"],
+    \\    "deny": ["@swap"],
+    \\    "errno": "ENOSYS",
+    \\    "log": true
+    \\  },
+    \\  "seccompPolicy": [["/nix/store/x-env/bin/chase-envelope", "approve"]],
+    \\  "container": "agent",
+    \\  "closure": "/nix/store/x-nixos-system-agent",
+    \\  "cuid": 1000,
+    \\  "cgid": 100,
+    \\  "steps8": "0123abcd",
+    \\  "containerMounts": [
+    \\    { "kind": "bind_rw", "dest": "/home/alice/src", "src": "/srv/src" },
+    \\    { "kind": "tmpfs", "dest": "/scratch", "mode": "1777", "size": "64m" },
+    \\    { "kind": "dev", "dest": "/dev/fuse", "src": "/dev/fuse", "mode": "rwm" }
+    \\  ],
+    \\  "name": "agent-trusted",
+    \\  "environment": [
+    \\    { "name": "PATH", "value": "/etc/profiles/per-user/${USER}/bin:/run/current-system/sw/bin" },
+    \\    { "name": "LANG", "value": "en_US.UTF-8" }
+    \\  ],
+    \\  "seccompTierFilter": "/nix/store/x-tier/flong-seccomp.bpf",
+    \\  "seccompFixedFilters": ["/nix/store/x-audit.bpf", "/nix/store/x-tty.bpf"],
+    \\  "seccompProject": {
+    \\    "dump": "/nix/store/x-flong-seccomp-groups",
+    \\    "names": "/nix/store/x-flong-seccomp-names",
+    \\    "deny": "log"
+    \\  }
     \\}
 ;
 
 /// Only what has no default.
 const minimal =
-    \\.{
-    \\    .user = "alice",
-    \\    .command = .{"hello"},
-    \\    .container = "agent",
-    \\    .closure = "/nix/store/x-nixos-system-agent",
-    \\    .cuid = 1000,
-    \\    .cgid = 100,
-    \\    .steps8 = "0123abcd",
-    \\    .name = "agent",
-    \\}
+    \\{
+    \\  "user": "alice",
+    \\  "command": ["hello"],
+    \\  "container": "agent",
+    \\  "closure": "/nix/store/x-nixos-system-agent",
+    \\  "cuid": 1000,
+    \\  "cgid": 100,
+    \\  "steps8": "0123abcd",
+    \\  "name": "agent"
 ;
+
+/// `minimal` with `more` after its fields, each line starting `,`.
+fn minimalWith(comptime more: []const u8) []const u8 {
+    return minimal ++ more ++ "\n}";
+}
 
 test "a full declaration parses, every field as written" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1113,6 +1370,7 @@ test "a full declaration parses, every field as written" {
     try testing.expectEqualStrings("alice", d.user);
     try testing.expectEqual(2, d.command.?.len);
     try testing.expectEqualStrings("--greeting=hi there", d.command.?[1]);
+    try testing.expectEqual(0, d.command.?[1][d.command.?[1].len]);
     try testing.expectEqual(null, d.exec);
     try testing.expectEqualStrings("--git", d.workspace.?[1]);
     try testing.expectEqual(2, d.binds.len);
@@ -1132,6 +1390,8 @@ test "a full declaration parses, every field as written" {
     try testing.expect(n.hostLoopbackToSession);
     try testing.expectEqualSlices(u16, &.{5432}, n.hostPorts);
 
+    try testing.expectEqual(1, d.overlays.len);
+    try testing.expectEqualStrings("/home/alice/.state", d.overlays[0].target);
     try testing.expectEqualStrings("/var/lib/state", d.overlays[0].lower);
     try testing.expectEqualStrings("/home/alice/.cache/tool/token", d.masks[0]);
     try testing.expectEqualStrings("/run/frisket", d.protect[0]);
@@ -1162,12 +1422,14 @@ test "a full declaration parses, every field as written" {
     try testing.expectEqual(2, d.environment.len);
     try testing.expectEqualStrings("PATH", d.environment[0].name);
     try testing.expectEqualStrings("en_US.UTF-8", d.environment[1].value);
+    try testing.expectEqualStrings("log", d.seccompProject.?.deny);
 }
 
 test "a minimal declaration takes module.nix's defaults" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
-    const d = try parse(arena_state.allocator(), minimal, null);
+    const a = arena_state.allocator();
+    const d = try parse(a, minimalWith(""), null);
 
     try testing.expectEqualStrings("hello", d.command.?[0]);
     try testing.expectEqual(null, d.exec);
@@ -1186,115 +1448,151 @@ test "a minimal declaration takes module.nix's defaults" {
 
     // `network = { };` is a network with no ports, and forwardPorts'
     // default is the empty list, not "auto".
-    const n = (try parse(arena_state.allocator(), minimal[0 .. minimal.len - 1] ++ "    .network = .{},\n}", null)).network.?;
+    const n = (try parse(a, minimalWith(",\"network\": {}"), null)).network.?;
     try testing.expectEqual(0, n.forwardPorts.ports.len);
     try testing.expect(!n.hostLoopbackToSession);
-    const auto = (try parse(arena_state.allocator(), minimal[0 .. minimal.len - 1] ++ "    .network = .{ .forwardPorts = .auto },\n}", null)).network.?;
+    const auto = (try parse(a, minimalWith(",\"network\": { \"forwardPorts\": \"auto\" }"), null)).network.?;
     try testing.expectEqual(.auto, auto.forwardPorts);
     try testing.expectEqual(null, auto.forwardAddress);
     try testing.expectEqual(null, auto.forwardInterface);
-    const bound = (try parse(arena_state.allocator(), minimal[0 .. minimal.len - 1] ++ "    .network = .{ .forwardPorts = .auto, .forwardAddress = \"127.9.9.9\", .forwardInterface = \"lo\" },\n}", null)).network.?;
+    const bound = (try parse(a, minimalWith(",\"network\": { \"forwardPorts\": \"auto\", \"forwardAddress\": \"127.9.9.9\", \"forwardInterface\": \"lo\" }"), null)).network.?;
     try testing.expectEqualStrings("127.9.9.9", bound.forwardAddress.?);
     try testing.expectEqualStrings("lo", bound.forwardInterface.?);
     // tier = null, no allow-list, is said as null.
-    const none = try parse(arena_state.allocator(), minimal[0 .. minimal.len - 1] ++ "    .seccomp = .{ .tier = null },\n}", null);
+    const none = try parse(a, minimalWith(",\"seccomp\": { \"tier\": null }"), null);
     try testing.expectEqual(null, none.seccomp.tier);
+    // Each union's options, told apart by their JSON types.
+    const l = (try parse(a, minimalWith(",\"limits\": { \"MemoryMax\": \"infinity\", \"MemoryHigh\": 0, \"MemorySwapMax\": \"1K\", \"TasksMax\": \"infinity\" }"), null)).limits;
+    try testing.expectEqual(.infinity, l.MemoryMax.?);
+    try testing.expectEqual(0, l.MemoryHigh.?.bytes);
+    try testing.expectEqualStrings("1K", l.MemorySwapMax.?.size);
+    try testing.expectEqual(.infinity, l.TasksMax.?);
+    // Strings take every escape JSON has, and a command's words keep
+    // theirs NUL-terminated.
+    const e = try parse(a, minimalWith(",\"exec\": [\"a\\u0000b\", \"\\t\\\"\\\\\\u00e9\\ud83d\\ude00\"]"), null);
+    try testing.expectEqualStrings("a\x00b", e.exec.?[0]);
+    try testing.expectEqualStrings("\t\"\\\u{e9}\u{1f600}", e.exec.?[1]);
 }
 
-/// The first error's message and 1-based line, from parsing `source`.
-fn refusal(arena: Allocator, source: [:0]const u8) !struct { line: usize, text: []const u8 } {
-    var diag: std.zon.parse.Diagnostics = .{};
-    if (parse(arena, source, &diag)) |_| return error.TestUnexpectedResult else |err| try testing.expectEqual(error.ParseZon, err);
-    var errors = diag.iterateErrors();
-    const e = errors.next().?;
-    return .{ .line = e.getLocation(&diag).line + 1, .text = try std.fmt.allocPrint(arena, "{f}", .{e.fmtMessage(&diag)}) };
+/// The refusal of `source`, and its 1-based line and column.
+fn refusal(arena: Allocator, source: []const u8) !struct { line: usize, column: usize, text: []const u8, note: ?[]const u8 } {
+    var diag: Diag = .{};
+    if (parse(arena, source, &diag)) |_| return error.TestUnexpectedResult else |err| try testing.expectEqual(error.ParseJson, err);
+    const loc = locate(source, diag.at);
+    return .{ .line = loc.line, .column = loc.column, .text = diag.message, .note = diag.note };
 }
 
-test "an unknown field is refused at its line" {
+test "an unknown field is refused at its name" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
     // A Nix name translated, which no compatibility layer allows.
-    const r = try refusal(a, minimal[0 .. minimal.len - 1] ++ "    .post_start = .{},\n}");
+    const r = try refusal(a, minimalWith(",\n  \"post_start\": []"));
     try testing.expectEqual(10, r.line);
-    try testing.expectEqualStrings("unexpected field 'post_start'", r.text);
+    try testing.expectEqual(3, r.column);
+    try testing.expectEqualStrings("unexpected field \"post_start\"", r.text);
+    try testing.expect(std.mem.startsWith(u8, r.note.?, "supported: \"user\", \"command\", "));
 
     // And one inside a section.
     const s = try refusal(a,
-        \\.{
-        \\    .user = "alice",
-        \\    .command = .{"hello"},
-        \\    .limits = .{
-        \\        .IOWeight = 100,
-        \\    },
+        \\{
+        \\  "user": "alice",
+        \\  "command": ["hello"],
+        \\  "limits": {
+        \\    "IOWeight": 100
+        \\  }
         \\}
     );
     try testing.expectEqual(5, s.line);
-    try testing.expectEqualStrings("unexpected field 'IOWeight'", s.text);
+    try testing.expectEqualStrings("unexpected field \"IOWeight\"", s.text);
 }
 
-test "a wrong type is refused at its line" {
+test "a field given twice is refused at its second" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const r = try refusal(a, minimalWith(",\n  \"user\": \"bob\""));
+    try testing.expectEqual(10, r.line);
+    try testing.expectEqualStrings("field \"user\" given twice", r.text);
+    const o = try refusal(a, minimalWith(",\n  \"overlays\": { \"/a\": \"/b\", \"/a\": \"/c\" }"));
+    try testing.expectEqualStrings("\"/a\" given twice", o.text);
+}
+
+test "a wrong type is refused at its value" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
-    // A snippet, as the options took before commands.
-    for ([_][]const u8{
-        "    .guard = \"test -d $workspace\",\n}",
-        "    .seccomp = .{ .tier = .lax },\n}",
-        "    .seccomp = .{ .errno = \"EPERM\" },\n}",
-        "    .network = .{ .hostPorts = .{65536} },\n}",
-        "    .network = .{ .forwardPorts = .all },\n}",
-        "    .limits = .{ .MemoryMax = \"8G\" },\n}",
-        "    .limits = .{ .oomGroup = 1 },\n}",
-        "    .containerMounts = .{.{ .kind = .overlay, .dest = \"/x\" }},\n}",
-    }) |line| {
-        const r = try refusal(a, try std.mem.concatWithSentinel(a, u8, &.{ minimal[0 .. minimal.len - 1], line }, 0));
+    for ([_]struct { []const u8, []const u8 }{
+        // A snippet, as the options took before commands.
+        .{ "\"guard\": \"test -d $workspace\"", "expected an array" },
+        .{ "\"seccomp\": { \"tier\": \"lax\" }", "unexpected value \"lax\"" },
+        .{ "\"seccomp\": { \"errno\": 1 }", "expected a string" },
+        .{ "\"network\": { \"hostPorts\": [65536] }", "expected an integer from 0 to 65535, found 65536" },
+        .{ "\"network\": { \"hostPorts\": [80.0] }", "expected an integer from 0 to 65535, found 80.0" },
+        .{ "\"network\": { \"forwardPorts\": \"all\" }", "unexpected value \"all\"" },
+        .{ "\"network\": { \"forwardPorts\": {} }", "expected \"auto\" or an array" },
+        .{ "\"limits\": { \"MemoryMax\": true }", "expected \"infinity\", an integer or a string, or null" },
+        .{ "\"limits\": { \"TasksMax\": \"8G\" }", "unexpected value \"8G\"" },
+        .{ "\"limits\": { \"oomGroup\": 1 }", "expected true or false" },
+        .{ "\"limits\": { \"CPUWeight\": \"50\" }", "expected an integer, or null" },
+        .{ "\"network\": { \"hostPorts\": [-1] }", "expected an integer from 0 to 65535, found -1" },
+        .{ "\"overlays\": [{ \"target\": \"/a\", \"lower\": \"/b\" }]", "expected an object" },
+        .{ "\"containerMounts\": [{ \"kind\": \"overlay\", \"dest\": \"/x\" }]", "unexpected value \"overlay\"" },
+        .{ "\"exec\": \"hello\"", "expected an array, or null" },
+    }) |c| {
+        const r = try refusal(a, try std.mem.concat(a, u8, &.{ minimal, ",\n  ", c[0], "\n}" }));
         try testing.expectEqual(10, r.line);
+        try testing.expectEqualStrings(c[1], r.text);
     }
 }
 
-test "a missing required field is refused" {
+test "a missing required field is refused at its object" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const r = try refusal(arena_state.allocator(),
-        \\.{
-        \\    .user = "alice",
+        \\{
+        \\  "user": "alice"
         \\}
     );
     try testing.expectEqual(1, r.line);
+    try testing.expectEqual(1, r.column);
     try testing.expectEqualStrings("missing required field container", r.text);
 }
 
-test "notZon bounds what the parser would recurse on, before it does" {
+test "what is not JSON is refused where it stops being JSON" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    try testing.expectEqual(null, notZon(full));
-    try testing.expectEqual(null, notZon(minimal));
-    // One `-` before a number is ZON, and the parser says what is wrong
-    // with it; two is not.
-    try testing.expectEqual(null, notZon(".{ .cuid = -1 }"));
-    try testing.expectEqual(NotZon{ .at = 12, .why = .{ .token = .minus } }, notZon(".{ .cuid = --1 }").?);
-    try testing.expectEqual(NotZon{ .at = 0, .why = .{ .token = .l_paren } }, notZon("(((1)))").?);
-    try testing.expectEqual(NotZon{ .at = 11, .why = .{ .token = .keyword_if } }, notZon(".{ .user = if (true) \"a\" else \"b\" }").?);
-    try testing.expectEqual(NotZon{ .at = 2, .why = .{ .token = .l_bracket } }, notZon(".{[]u8}").?);
-    // `max_depth` of `.{` is enough; one more is refused where it opens.
-    const ok = try std.mem.concatWithSentinel(a, u8, &.{ ".{" ** max_depth, "}" ** max_depth }, 0);
-    try testing.expectEqual(null, notZon(ok));
-    // What would overflow the parser's stack: 100,000 of `.{`, and of
-    // `-`, which it recurses on once each.
-    const deep = try a.allocSentinel(u8, 200_000, 0);
-    for (0..100_000) |i| @memcpy(deep[2 * i ..][0..2], ".{");
-    try testing.expectEqual(NotZon{ .at = 2 * max_depth + 1, .why = .deep }, notZon(deep).?);
-    try testing.expectError(error.NotZon, parse(a, deep, null));
-    const minuses = try a.allocSentinel(u8, 100_001, 0);
-    @memset(minuses[0..100_000], '-');
-    minuses[100_000] = '1';
-    try testing.expectError(error.NotZon, parse(a, minuses, null));
-    // Comments and strings are not tokens to it.
-    try testing.expectEqual(null, notZon(".{ // (((\n.user = \"(((\" }"));
+    // ZON, the format this replaced.
+    const z = try refusal(a, ".{ .user = \"u\" }");
+    try testing.expectEqualStrings("not JSON: unexpected '.'", z.text);
+    try testing.expectEqual(1, z.column);
+    // A trailing comma, a comment, an unterminated string, nothing at all,
+    // and a second value.
+    try testing.expectEqualStrings("not JSON: unexpected '}'", (try refusal(a, minimal ++ ",\n}")).text);
+    try testing.expectEqualStrings("not JSON: unexpected '/'", (try refusal(a, "// a declaration\n" ++ comptime minimalWith(""))).text);
+    try testing.expectEqualStrings("not JSON: unexpected end of file", (try refusal(a, "{ \"user\": \"u")).text);
+    try testing.expectEqualStrings("not JSON: unexpected end of file", (try refusal(a, "")).text);
+    try testing.expectEqualStrings("not JSON: unexpected '{'", (try refusal(a, comptime minimalWith("") ++ " {}")).text);
+    // A raw control character in a string.
+    try testing.expectEqualStrings("not JSON: unexpected byte 0x0a", (try refusal(a, "{ \"user\": \"a\nb\" }")).text);
+}
+
+test "the parse descends only as deep as the type, whatever the source nests" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // A million `[` is refused at the first, where an object belongs.
+    const deep = try a.alloc(u8, 1 << 20);
+    @memset(deep, '[');
+    const r = try refusal(a, deep);
+    try testing.expectEqual(1, r.column);
+    try testing.expectEqualStrings("expected an object", r.text);
+    // And under a field that takes a list of commands, at the third.
+    const binds = try std.mem.concat(a, u8, &.{ minimal, ",\"binds\": ", deep[0 .. 1 << 19] });
+    try testing.expectEqualStrings("expected a string", (try refusal(a, binds)).text);
 }
 
 test "load refuses a file that never ends, and one that is not there" {
@@ -1305,7 +1603,7 @@ test "load refuses a file that never ends, and one that is not there" {
     msg.prog = "decl-test: planted by decl.zig's test, ignore";
     defer msg.prog = was;
     try testing.expectError(error.Reported, load(a, "/dev/zero"));
-    try testing.expectError(error.Reported, load(a, "/nonexistent/flong/agent.zon"));
+    try testing.expectError(error.Reported, load(a, "/nonexistent/flong/agent.json"));
 }
 
 test "labelBad: any UTF-8 of 1 to 80 bytes with no control character" {

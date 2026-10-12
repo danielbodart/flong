@@ -1,3 +1,4 @@
-.{
-    .user = "u,
+{
+  "user": "u,
+  "command": ["true"]
 }

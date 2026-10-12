@@ -1,2 +1,2 @@
-flong check: @GOLDEN@/decl/a-tier-that-is-not-one.zon:10:28: unexpected enum literal 'lax'
-flong check: @GOLDEN@/decl/a-tier-that-is-not-one.zon:10:28: note: supported: 'parity', 'strict'
+flong check: @GOLDEN@/decl/a-tier-that-is-not-one.json:11:13: unexpected value "lax"
+flong check: @GOLDEN@/decl/a-tier-that-is-not-one.json:11:13: note: supported: "parity", "strict"

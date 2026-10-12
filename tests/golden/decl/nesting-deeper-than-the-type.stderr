@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/nesting-deeper-than-the-type.json:2:11: expected a string

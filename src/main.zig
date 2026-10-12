@@ -2,10 +2,10 @@
 //! without libc, whose subcommands are the programs that were flong-launch,
 //! flong-init and flong-sweeper (DESIGN.md, "One binary").
 //!
-//!   flong launch DECL.zon|NAME [-- ARGS...]
+//!   flong launch DECL.json|NAME [-- ARGS...]
 //!   flong init GATE READY FILES GROUPS TTY TRACE DIR -- COMMAND...
 //!   flong sweeper STATE-DIR
-//!   flong check DECL.zon
+//!   flong check DECL.json
 //!   flong list
 //!   flong schema
 //!   flong version
@@ -25,7 +25,7 @@
 //! and the kernel's own slots are what flong init rewrites for tini. A
 //! basename that is neither a subcommand nor "flong" is a declaration's
 //! name (DESIGN.md, "The declaration's command"): the link runs what
-//! `flong launch NAME -- ARGS` does, NAME.zon from the directories
+//! `flong launch NAME -- ARGS` does, NAME.json from the directories
 //! launch/lookup.zig names, /etc/flong first.
 //!
 //! Dispatch reads the kernel's argv and environ and nothing else. It makes
@@ -113,11 +113,11 @@ fn basename(path: []const u8) []const u8 {
 }
 
 const usage =
-    \\usage: flong launch DECL.zon [-- ARGUMENT...]
+    \\usage: flong launch DECL.json [-- ARGUMENT...]
     \\       flong launch NAME [-- ARGUMENT...]
     \\       NAME [ARGUMENT...]
     \\       flong list
-    \\       flong check DECL.zon
+    \\       flong check DECL.json
     \\       flong schema
     \\       flong help [decl [--markdown]]
     \\       flong version
@@ -132,13 +132,13 @@ const help_text = usage ++
     \\
     \\flong runs a declaration: one sandboxed session per launch, in user
     \\namespaces the caller owns, as the caller, gone when its command exits.
-    \\A declaration is a ZON file naming the container's root, the user, the
+    \\A declaration is a JSON file naming the container's root, the user, the
     \\command, what is bound in, the network, the syscall filter and the
     \\hooks. `flong help decl` lists every field.
     \\
-    \\flong launch DECL.zon [-- ARGUMENT...]
-    \\    Start a session from the declaration in the file DECL.zon (a word
-    \\    with a '/' in it, or ending in .zon), run its command inside with
+    \\flong launch DECL.json [-- ARGUMENT...]
+    \\    Start a session from the declaration in the file DECL.json (a word
+    \\    with a '/' in it, or ending in .json), run its command inside with
     \\    the ARGUMENTs after its own, and wait for it. The declaration's
     \\    workspace, binds, guard, seccompPolicy and postStart commands get
     \\    the ARGUMENTs after their own too. Run it as yourself: it refuses
@@ -157,7 +157,7 @@ const help_text = usage ++
     \\    2 on a usage error. stderr says which.
     \\
     \\flong launch NAME [-- ARGUMENT...]
-    \\    The same, for the declaration called NAME: NAME.zon in the first
+    \\    The same, for the declaration called NAME: NAME.json in the first
     \\    of these directories that has one:
     \\        /etc/flong               where the NixOS module writes each one
     \\        $XDG_CONFIG_HOME/flong   the caller's own, outside Nix; with
@@ -180,12 +180,12 @@ const help_text = usage ++
     \\    then the caller's, each directory's by name. One that /etc/flong
     \\    shadows is left out.
     \\
-    \\flong check DECL.zon
+    \\flong check DECL.json
     \\    Judge a declaration without launching it: parse it, then check
     \\    what needs no caller, such as clean paths, a destination mounted
     \\    twice, a mask too deep below a writable bind, a source reaching
     \\    what no session may, and every pattern and range. Each refusal is
-    \\    one line, `flong check: DECL.zon: ...`, a parse error's with its
+    \\    one line, `flong check: DECL.json: ...`, a parse error's with its
     \\    line and column. Exit status: 0 when it passes, 1 when anything is
     \\    refused or the file cannot be read, 2 on a usage error.
     \\
@@ -217,11 +217,11 @@ const help_text = usage ++
     \\    %t/flong`. It releases the sessions of launchers that were killed.
     \\
     \\Files:
-    \\    /etc/flong/NAME.zon              a declaration, as NixOS writes it
-    \\    $XDG_CONFIG_HOME/flong/NAME.zon  a declaration, outside Nix
-    \\    ~/.config/flong/NAME.zon         the same, XDG_CONFIG_HOME unset
-    \\    $XDG_RUNTIME_DIR/flong/          sessions' records, prepared roots,
-    \\                                     compiled syscall filters
+    \\    /etc/flong/NAME.json              a declaration, as NixOS writes it
+    \\    $XDG_CONFIG_HOME/flong/NAME.json  a declaration, outside Nix
+    \\    ~/.config/flong/NAME.json         the same, XDG_CONFIG_HOME unset
+    \\    $XDG_RUNTIME_DIR/flong/           sessions' records, prepared roots,
+    \\                                      compiled syscall filters
     \\
     \\A usage error exits 2.
     \\
@@ -384,7 +384,7 @@ test "dispatch: argv[0]'s basename first, then argv[1]" {
 }
 
 test "dispatch: check and schema are subcommands, and no declaration's name" {
-    try expectSub(.check, 1, &.{ "flong", "check", "/etc/flong/agent.zon" });
+    try expectSub(.check, 1, &.{ "flong", "check", "/etc/flong/agent.json" });
     try expectSub(.schema, 1, &.{ "flong", "schema" });
     // A declaration named as a subcommand would dispatch to it, so flong
     // check refuses every name dispatch reads as one.

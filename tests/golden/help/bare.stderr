@@ -1,8 +1,8 @@
-usage: flong launch DECL.zon [-- ARGUMENT...]
+usage: flong launch DECL.json [-- ARGUMENT...]
        flong launch NAME [-- ARGUMENT...]
        NAME [ARGUMENT...]
        flong list
-       flong check DECL.zon
+       flong check DECL.json
        flong schema
        flong help [decl [--markdown]]
        flong version

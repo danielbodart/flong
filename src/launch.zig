@@ -1,6 +1,6 @@
 //! flong launch: one session, from a declaration to the payload's exit
 //! (DESIGN.md, "Files"; the Zig port's L4; launcher/flong-launch.c of
-//! a7919be, whose line numbers these are). `flong launch DECL.zon|NAME [--
+//! a7919be, whose line numbers these are). `flong launch DECL.json|NAME [--
 //! ARGS...]`, or a declaration's link `NAME -> flong` (src/main.zig), loads
 //! the declaration and judges it as flong check does; launch/assemble.zig
 //! then does, in its order, what rootless-wrapper.bash did before
@@ -148,13 +148,13 @@ const Launch = struct {
     early: assemble.Early,
 };
 
-const usage = "usage: flong launch DECL.zon|NAME [-- ARGS...]";
+const usage = "usage: flong launch DECL.json|NAME [-- ARGS...]";
 const usage_status = 2;
 
 /// `argv` is the kernel's whole, flong launch's own word at `at`, and
 /// `envp` its environ, which a relaunch passes on. `flong launch
-/// DECL.zon|NAME [-- ARGS...]` launches the declaration, a file when the
-/// word has a '/' or ends in `.zon`, else a name (launch/lookup.zig);
+/// DECL.json|NAME [-- ARGS...]` launches the declaration, a file when the
+/// word has a '/' or ends in `.json`, else a name (launch/lookup.zig);
 /// anything else is a usage error, 2.
 pub fn main(argv: []const [*:0]const u8, at: usize, envp: []const [*:0]const u8) noreturn {
     // The time is main's first statement: `prologue-start` is stamped now
@@ -174,9 +174,9 @@ pub fn main(argv: []const [*:0]const u8, at: usize, envp: []const [*:0]const u8)
     proc.exit(usage_status);
 }
 
-/// A declaration named by its file: a '/' in it, or a `.zon` name.
+/// A declaration named by its file: a '/' in it, or a `.json` name.
 fn isFile(w: []const u8) bool {
-    return std.mem.indexOfScalar(u8, w, '/') != null or std.mem.endsWith(u8, w, ".zon");
+    return std.mem.indexOfScalar(u8, w, '/') != null or std.mem.endsWith(u8, w, ".json");
 }
 
 /// A declaration's link, `NAME -> flong` (DESIGN.md, "The

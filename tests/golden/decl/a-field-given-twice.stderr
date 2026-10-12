@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/a-field-given-twice.json:10:3: field "user" given twice
