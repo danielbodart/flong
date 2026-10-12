@@ -1,0 +1,5 @@
+--layer
+project
+--base
+@GOLDEN@/decl/minimal.json
+@GOLDEN@/decl/layer-a-network-where-there-is-none.json

@@ -1,0 +1,8 @@
+{
+  "seccomp": {
+    "tier": "strict",
+    "debug": true,
+    "syscalls": { "io_uring_setup": "allow", "ptrace": null, "userfaultfd": "log" }
+  },
+  "limits": { "MemoryMax": "8G", "TasksMax": null }
+}

@@ -1,0 +1,2 @@
+usage: flong check DECL.json
+       flong check --layer project [--base DECL.json] LAYER.json

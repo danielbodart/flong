@@ -34,6 +34,7 @@
     "nestedSandbox": true,
     "allow": ["@keyring", "userfaultfd"],
     "deny": ["@swap"],
+    "syscalls": { "ptrace": "deny", "io_uring_setup": "log", "userfaultfd": "allow" },
     "errno": "ENOSYS",
     "log": true
   },

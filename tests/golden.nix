@@ -125,11 +125,21 @@ let
     # resolve-*, `flong-seccomp resolve ARCH NR`. A refusal of a line names
     # the five words since, in the four cases recorded with "not an allow
     # or deny line".
+    #
+    # Written with seccomp.syscalls on 2026-10-12: MAPNAMES and MAPLOGGED
+    # are policy.nix's namesFor and loggedFor of syscallsMap below, so
+    # render-syscalls-map pins what a declaration's map compiles to (keyctl
+    # denied over @keyring's allow, ptrace allowed over deny's, two calls
+    # logged), each line checked when written against the tier's names;
+    # render-logged-* a LOGGED file by hand; project-declared-logged-* the
+    # declaration's logged under a project's allow, nolog and base none.
     tooling = {
       program = "${seccomp}/bin/flong-seccomp";
       vars = {
         DUMP = "${policy.dump}";
         GOLDEN = "${cases}";
+        MAPNAMES = "${policy.namesFor syscallsMap}";
+        MAPLOGGED = "${policy.loggedFor syscallsMap}";
       };
       caseVars = ''
         if [[ -e $dir/$name.policy ]]; then
@@ -241,6 +251,16 @@ let
     # something-after-the-declaration, nesting-deeper-than-the-type), and
     # the comments the files carried went to README. Each case NAME's
     # declaration is NAME.json, GOLDEN the store directory holding them.
+    # Written with seccomp.syscalls (2026-10-12): a-syscalls-* (a map that
+    # passes, names no call of x86_64 has, as Zig spells one or as a group,
+    # and an answer that is not one) and seccomp-syscalls-with-no-tier; and
+    # layer-*, `flong check --layer project [--base DECL.json] LAYER.json`:
+    # a layer that passes over the defaults and one over full's network,
+    # each refusal of a host field, a null over one, a network made, the
+    # tier loosened (over the defaults, and over minimal) and removed,
+    # values judged on their own, the merge over minimal judged whole, a
+    # base that does not parse, and the usage. A layer's NAME.json may be
+    # another case's.
     decl = {
       program = "${launcher}/bin/flong";
       sub = "check";
@@ -263,13 +283,35 @@ let
     };
 
     # The subcommands' usage errors, the one text phase 2 (a) changed
-    # (quirk 38): rewritten from the bash's then, and expand's added.
+    # (quirk 38): rewritten from the bash's then, and expand's added. With
+    # seccomp.syscalls (2026-10-12) render and project took an optional
+    # LOGGED, which their usage lines name; the two cases of one word too
+    # many were given one more, which LOGGED would otherwise take.
     tooling-usage = {
       program = "${seccomp}/bin/flong-seccomp";
       vars = {
         DUMP = "${policy.dump}";
       };
     };
+  };
+
+  # A declaration's seccomp whose syscalls map overrides each layer beneath
+  # it: the tier, debug's ptrace, allow's @keyring and deny's ptrace.
+  syscallsMap = {
+    tier = "strict";
+    debug = true;
+    nestedSandbox = false;
+    allow = [ "@keyring" ];
+    deny = [ "ptrace" "kcmp" ];
+    syscalls = {
+      ptrace = "allow";
+      keyctl = "deny";
+      io_uring_setup = "log";
+      userfaultfd = "log";
+      kexec_load = "deny";
+    };
+    errno = "EPERM";
+    log = false;
   };
 
   sweeperSet = program: {

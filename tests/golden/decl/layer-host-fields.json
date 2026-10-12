@@ -1,0 +1,9 @@
+{
+  "user": "root",
+  "exec": ["/bin/sh"],
+  "seccompPolicy": [],
+  "overlays": { "/home/u/.ssh": "/root/.ssh" },
+  "seccomp": { "nestedSandbox": true, "errno": "ENOSYS", "syscalls": { "ptrace": "allow" } },
+  "closure": "/nix/store/x-other",
+  "seccompProject": null
+}

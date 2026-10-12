@@ -1,0 +1,2 @@
+flong check: @GOLDEN@/decl/a-syscalls-answer-that-is-not-one.json:5:29: unexpected value "permit"
+flong check: @GOLDEN@/decl/a-syscalls-answer-that-is-not-one.json:5:29: note: supported: "allow", "deny", "log"

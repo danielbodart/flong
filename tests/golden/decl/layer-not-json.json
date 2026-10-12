@@ -1,0 +1,3 @@
+{
+  "seccomp": { "debug": true, }
+}

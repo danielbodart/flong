@@ -6,8 +6,10 @@
 # An entry's `doc` is its description, Markdown as NixOS reads a plain
 # string; `default` is its default unless it is `required`, which has none.
 # `merge` needs no reading: a list type concatenates its definitions in
-# mkOrder order, which is what `ordered` promises, and every other type
-# merges as a single value.
+# mkOrder order, which is what `ordered` promises, attrsOf merges its
+# definitions name by name, and every other type merges as a single value.
+# Nor does `x-scope`, which is a project layer's business (flong check
+# --layer project), not the module's.
 #
 # `examples` maps a path (`network.hostPorts`) to an option's example, which
 # the schema does not carry: an example is Nix, and is written in Nix.
@@ -43,6 +45,8 @@ let
           types.listOf (typeOf t.of)
         else if t.type == "pathAttrs" then
           types.attrsOf types.path
+        else if t.type == "attrsOf" then
+          types.attrsOf (typeOf t.of)
         else if t.type == "struct" then
           types.submodule { options = optionsOf t.fields; }
         else if t.type == "either" then

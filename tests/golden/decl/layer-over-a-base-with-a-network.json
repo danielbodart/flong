@@ -1,0 +1,4 @@
+{
+  "network": { "hostPorts": [5432, 6379], "forwardPorts": "auto" },
+  "seccomp": { "tier": "strict", "syscalls": { "ptrace": null } }
+}

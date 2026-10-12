@@ -1,11 +1,14 @@
 //! test-libc: src/seccomp/scmp.zig against seccomp.h, through translate-c
 //! of the libseccomp flong-seccomp links (DESIGN.md, "Tests"): every constant,
 //! the struct's layout, the enum values, each extern's arity, and the calls
-//! themselves, once, as flong-seccomp and bpfdump make them.
+//! themselves, once, as flong-seccomp and bpfdump make them; and
+//! src/syscalls.zig's names, which `seccomp.syscalls` is judged by, against
+//! libseccomp's for this architecture, both ways.
 
 const std = @import("std");
 const scmp = @import("scmp");
 const h = @import("seccomp_h");
+const syscalls = @import("syscalls");
 
 const testing = std.testing;
 
@@ -121,4 +124,31 @@ test "the calls, as flong-seccomp makes them" {
     // A rule repeating the default: libseccomp's EACCES, which
     // compile.zig names.
     try testing.expectEqual(@as(?std.os.linux.E, .ACCES), scmp.ruleAddArray(ctx, scmp.actErrno(38), scmp.resolveName("read"), &.{}));
+}
+
+test "the names seccomp.syscalls takes are libseccomp's for this architecture" {
+    const arch = h.seccomp_arch_native();
+    // Every call libseccomp names on this architecture, by number.
+    var nr: c_int = 0;
+    var named: usize = 0;
+    while (nr < 1024) : (nr += 1) {
+        const name = h.seccomp_syscall_resolve_num_arch(arch, nr) orelse continue;
+        defer std.c.free(name);
+        named += 1;
+        const s = std.mem.span(name);
+        if (!syscalls.known(s)) std.debug.print("libseccomp names {d} {s}, which syscalls.zig does not know\n", .{ nr, s });
+        try testing.expect(syscalls.known(s));
+    }
+    try testing.expect(named > 300);
+    // And every name it knows, a native call of libseccomp's, never a
+    // pseudo-number (negative) or none.
+    const all = try syscalls.all(testing.allocator);
+    defer testing.allocator.free(all);
+    for (all) |s| {
+        const z = try testing.allocator.dupeZ(u8, s);
+        defer testing.allocator.free(z);
+        const n = h.seccomp_syscall_resolve_name_arch(arch, z.ptr);
+        if (n < 0) std.debug.print("syscalls.zig knows {s}, which libseccomp gives {d}\n", .{ s, n });
+        try testing.expect(n >= 0);
+    }
 }

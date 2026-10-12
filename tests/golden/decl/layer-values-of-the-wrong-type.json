@@ -1,0 +1,6 @@
+{
+  "seccomp": { "tier": "lax", "syscalls": { "ptrace": "maybe", "kexec_load": null, "nosuchcall": "deny" }, "allow": "ptrace" },
+  "limits": { "CPUWeight": "50" },
+  "network": 5,
+  "colour": "blue"
+}

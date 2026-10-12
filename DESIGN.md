@@ -1376,9 +1376,29 @@ Loosenings, combinable:
   namespace mask and bwrap's assertion, and allows `@mount`. Chromium's own
   sandbox, `codex sandbox` and a nested bwrap need all three together, and ran
   with 16.
-- **`allow`** adds names or groups; **`deny`** removes them, after everything
-  else in the declaration, which it overrides. A project's policy comes after
-  the declaration and can put back what `deny` removed.
+- **`allow`** adds names or groups; **`deny`** removes them, after the tier
+  and the loosenings, which it overrides.
+- **`syscalls`** is a map, one entry a call by the kernel's name for it on
+  the machine's architecture, `"allow"`, `"deny"` or `"log"`, applied last:
+  a call it names is what it says whatever the tier, `debug`,
+  `nestedSandbox`, `allow` and `deny` say of it, a group of theirs included,
+  so `"ptrace": "allow"` puts ptrace back though `deny` has it, and
+  `"keyctl": "deny"` takes keyctl out though `allow` has `@keyring`. `"log"`
+  lets the call through and has the kernel log it, as `log` does for every
+  call. A map, not lists, so that a layer merged over the declaration as a
+  JSON Merge Patch ([Layers](#layers)) adds, changes or, with `null`,
+  removes one call's entry alone. `policy.nix` expands it in a second pass
+  over the names the rest made (the expander takes adds less subtractions
+  whatever their order, so one pass could not let an `"allow"` beat a
+  `deny`), and its logged calls go to `render` and `project` as LOGGED.
+  `flong check` refuses a name the architecture has no call by
+  (`src/syscalls.zig`: Zig's table, with the kernel's spelling of the two it
+  spells its own way and the calls added since, held to libseccomp's both
+  ways by test-libc), and the build one systemd's lists lack. The lists keep
+  their `@groups`; a call they name is warned towards `syscalls`, and the
+  lists' names go after one release.
+- A project's policy comes after all of them and can put back what `deny` or
+  `syscalls` removed.
 - **`log`** allows the calls `errno` would refuse and has the kernel log each
   (audit `type=1326`), to learn a policy. It warns. `flong-seccomp resolve
   ARCH NR` names a record's `arch=` and `syscall=` by libseccomp's tables, an
@@ -1441,7 +1461,11 @@ whereas journald's audit socket (`systemd-journald-audit.socket`,
 limit does not touch; `audit_rate_limit` is 0, unlimited, by default. The
 audit backlog (`audit_backlog_limit`) can still overflow in a large enough
 burst, so a rare call can be missed. Under
-`seccomp.log` everything refused is logged already. Without the three lines,
+`seccomp.log` everything refused is logged already. The calls a
+declaration's `seccomp.syscalls` logs (`seccompProject.logged`) start the
+project's logged, as `log` lines of its own would: a `nolog` or an `allow`
+takes one back, a `deny` leaves it logged, and `base none` drops them with
+the declaration's names. Without the three lines, or a declaration's logged,
 the policy is the text `render` prints for the same names, byte for byte, as
 is its filter (`tests/golden/tooling/`).
 
@@ -1793,6 +1817,44 @@ parser:
 
 `--help`, messages and paths assume no Nix store, for a release outside Nix,
 which is [PLAN.md](PLAN.md)'s.
+
+### Layers
+
+A declaration can be the base of layers, each a JSON object of its fields,
+any of them left out, merged over it as a JSON Merge Patch (RFC 7396): an
+object merges field by field, `null` removes what is beneath (so the
+field's default applies), and anything else, a list included, replaces it
+whole. That is how chase puts a project's own settings, from its signed
+`chase.json`, over a tier's declaration (frisket's `docs/policy-plan.md`,
+§1.2 and §1.5). So every collection a layer should change an entry of is a
+map keyed by identity, `seccomp.syscalls` first.
+
+**Scope.** Each field has one (`decl.Scope`, the schema's `x-scope`, and
+"host only" in `flong help decl`): a project may set it, unmarked; only the
+host may, `host`, and so is everything below it; or a project may only
+tighten it, `tighten`. Host fields are the ones that decide what a session
+can reach rather than how it behaves: `user`, every hook (`command`,
+`exec`, `workspace`, `binds`, `guard`, `postStart`, `postStop`,
+`seccompPolicy`), `overlays`, `masks`, `protect`,
+`network.forwardAddress`, `network.forwardInterface`,
+`network.hostLoopbackToSession`, `seccomp.nestedSandbox`, `seccomp.errno`,
+and every computed field (the container, its closure and ids, its mounts,
+its environment, the compiled filters). `seccomp.tier` is the one
+`tighten`: strict over parity over none. The rest, `network`'s ports,
+`limits` and `seccomp`'s `debug`, `allow`, `deny`, `syscalls` and `log`, are
+a project's to set, and its ceilings are the caller's (chase's) to clamp.
+
+**`flong check --layer project [--base DECL.json] LAYER.json`**
+(`src/layer.zig`) judges a project's layer before it is merged: it refuses a
+host field set, whatever the value; a `null` over a struct holding one
+(`seccomp`, `network`), which would remove it too; a `network` where the
+base has none, which would make one whose host fields nobody set; and a
+tier less strict than the base's. With `--base`, the merged result is then
+judged whole, as `flong check` judges any declaration; without, the base is
+the defaults (strict, no network), and each value is judged on its own. The
+merge itself is the caller's, not flong's: flong launches the declaration
+it is given, and a project's settings reach a launch through it, or, for
+the filter, through `seccompPolicy`'s lines.
 
 ### The declaration's command
 

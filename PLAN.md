@@ -161,6 +161,18 @@ single-user Nix makes.
   of `NIX_PATH` when it exists, as doing nothing: a container's home is the
   rootfs's, and no container has a daemon. A declaration that binds a
   home holding channels loses that prefix, which no container could use.
+- **`seccomp.allow` and `seccomp.deny`'s names.** `seccomp.syscalls` says a
+  call by name, one entry a call, which a layer can change alone; the lists'
+  names are warned towards it and go after one release, once chase writes
+  the map. Their `@groups` stay, unless the map comes to take a group as a
+  key, which needs a precedence between a group's entry and its members'
+  (the narrower winning, as §1.6 of frisket's policy plan has it for
+  patterns) and `flong check` to know systemd's groups.
+- **A project's loosenings.** A project's layer may set `seccomp.debug`,
+  `seccomp.log` and `limits`, which loosen; only the tier is held to
+  tightening. Their ceilings are chase's to clamp (frisket's policy plan,
+  §1.5); should flong hold them too, `seccomp.log` would be the first, as
+  it logs rather than refuses every call outside the tier.
 - **flong's size.** flong is 1,132,448 bytes with the JSON parser, the
   schema's walk and the doc comments' text, and it is every container's
   pid 1, as `flong init`.

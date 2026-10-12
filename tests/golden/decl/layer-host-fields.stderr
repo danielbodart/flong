@@ -1,0 +1,8 @@
+flong check: @GOLDEN@/decl/layer-host-fields.json: user is the host's to set, and a project's layer may not set it
+flong check: @GOLDEN@/decl/layer-host-fields.json: exec is the host's to set, and a project's layer may not set it
+flong check: @GOLDEN@/decl/layer-host-fields.json: seccompPolicy is the host's to set, and a project's layer may not set it
+flong check: @GOLDEN@/decl/layer-host-fields.json: overlays is the host's to set, and a project's layer may not set it
+flong check: @GOLDEN@/decl/layer-host-fields.json: seccomp.nestedSandbox is the host's to set, and a project's layer may not set it
+flong check: @GOLDEN@/decl/layer-host-fields.json: seccomp.errno is the host's to set, and a project's layer may not set it
+flong check: @GOLDEN@/decl/layer-host-fields.json: closure is the host's to set, and a project's layer may not set it
+flong check: @GOLDEN@/decl/layer-host-fields.json: seccompProject is the host's to set, and a project's layer may not set it

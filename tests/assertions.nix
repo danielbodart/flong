@@ -102,6 +102,17 @@ let
         || throw "assertions: a seccomp name with a blank was accepted")
       (untyped { flong.box.seccomp.errno = "EINVAL"; } [ "flong" "box" "seccomp" "errno" ]
         || throw "assertions: an errno outside EPERM, EACCES and ENOSYS was accepted")
+      # seccomp.syscalls: an answer is allow, deny or log; the lists' names
+      # are warned towards it, their groups not.
+      (untyped { flong.box.seccomp.syscalls.ptrace = "permit"; } [ "flong" "box" "seccomp" "syscalls" ]
+        || throw "assertions: a syscalls answer outside allow, deny and log was accepted")
+      (accepted "a syscalls map"
+        { flong.box.seccomp.syscalls = { ptrace = "allow"; io_uring_setup = "log"; kexec_load = "deny"; }; })
+      (warned "a call named in seccomp.allow"
+        { flong.box.seccomp.allow = [ "@keyring" "userfaultfd" ]; }
+        "names calls in seccomp.allow or seccomp.deny (userfaultfd)")
+      (flongWarnings { flong.box.seccomp.deny = [ "@swap" ]; } == [ ]
+        || throw "assertions: a group in seccomp.deny is warned about")
       # A guard is a consistency check as the launcher's other checks are,
       # and like them it is not warned about.
       (! lib.any (lib.hasInfix "guard")
@@ -343,6 +354,9 @@ let
     containers.box.allowedDevices = [ { node = "/dev/null"; modifier = "r"; } ];
     flong.box.masks = [ "/state" ];
     flong.box.seccomp = { tier = null; log = true; };
+    # A name no call of the architecture has, which the build's expander
+    # never meets with no tier to expand.
+    flong.box.seccomp.syscalls.fstatat64 = "allow";
     # Rules module.nix leaves to flong check, whole: a payload that is both
     # `command` and `exec`, and a container variable the launch sets.
     flong.box.exec = [ "/bin/exec" ];
@@ -362,7 +376,8 @@ let
         grep -q '^flong check: .*: flong.box drives containers.box, and would bind /run/user/1000/flong into a session\.' "$log"
         grep -q '^flong check: .*: flong.box drives containers.box, whose allowedDevices has /dev/null r\.' "$log"
         grep -q '^flong check: .*: flong.box drives containers.box, and mounts something at /state twice:' "$log"
-        grep -q '^flong check: .*: flong.box sets seccomp.tier = null and seccomp.log,' "$log"
+        grep -q '^flong check: .*: flong.box sets seccomp.tier = null and seccomp.syscalls, seccomp.log,' "$log"
+        grep -q '^flong check: .*: flong.box.seccomp.syscalls has "fstatat64", which is not a system call on ' "$log"
         grep -q '^flong check: .*: flong.box has both `command` and `exec`\.' "$log"
         grep -q '^flong check: .*: flong.box.environment sets TMPDIR, which the launch sets for every session\.' "$log"
         [ "$(cat $refused/testBuildFailure.exit)" = 1 ]

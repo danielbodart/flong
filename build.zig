@@ -292,6 +292,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "scmp", .module = scmp },
                 .{ .name = "seccomp_h", .module = header.createModule() },
+                .{ .name = "syscalls", .module = b.createModule(.{ .root_source_file = b.path("src/syscalls.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "sys", .module = m.sys }} }) },
             },
         });
         root.linkSystemLibrary("seccomp", .{});
@@ -1780,7 +1781,7 @@ fn declModules(b: *std.Build, m: Modules, target: std.Build.ResolvedTarget, opti
         .root_source_file = src,
         .target = target,
         .optimize = optimize,
-        .imports = &.{ .{ .name = "fd", .module = m.fd }, .{ .name = "msg", .module = m.msg } },
+        .imports = &.{ .{ .name = "fd", .module = m.fd }, .{ .name = "msg", .module = m.msg }, .{ .name = "sys", .module = m.sys } },
     });
     const docs = b.createModule(.{
         .root_source_file = b.path("src/decl_docs.zig"),

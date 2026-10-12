@@ -1,8 +1,13 @@
-//! project.zig: `flong-seccomp project DUMP NAMES DENY DIR < POLICY`, what
+//! project.zig: `flong-seccomp project DUMP NAMES DENY DIR [LOGGED] < POLICY`, what
 //! flong-seccomp-project did (policy.nix:141-206), in process (ZIG.md,
 //! "Phase 2"). It reads a project's `allow X...` and `deny X...` lines on
 //! stdin and prints the path of the tier filter they make of the
 //! declaration's NAMES, compiled once into DIR and then reused.
+//!
+//! LOGGED, flong's own, is the file of the calls the declaration's
+//! `seccomp.syscalls` logs, one a line: the project's lines start from them
+//! as from `log` lines of their own, so a `nolog` takes one back, an
+//! `allow` allows it, and `base none` drops them with NAMES.
 //!
 //! Three more lines are flong's own, which the bash never read:
 //!
@@ -67,12 +72,13 @@ fn nomem() msg.Error {
 
 /// `flong-seccomp project DUMP NAMES DENY DIR < POLICY`: its exit status.
 pub fn main(gpa: std.mem.Allocator, args: []const [*:0]const u8) u8 {
-    if (args.len != 4) {
-        msg.bare("usage: flong-seccomp project DUMP NAMES 1|13|38|log DIR < POLICY", .{});
+    if (args.len != 4 and args.len != 5) {
+        msg.bare("usage: flong-seccomp project DUMP NAMES 1|13|38|log DIR [LOGGED] < POLICY", .{});
         return 2;
     }
     msg.prog = prog;
-    return run(gpa, args[0], args[1], std.mem.span(args[2]), std.mem.span(args[3])) catch |err| switch (err) {
+    const logged: ?[*:0]const u8 = if (args.len == 5) args[4] else null;
+    return run(gpa, args[0], args[1], std.mem.span(args[2]), std.mem.span(args[3]), logged) catch |err| switch (err) {
         error.Reported => 1,
     };
 }
@@ -228,7 +234,7 @@ fn mktempFailed(e: sys.E, dir_name: []const u8, key: []const u8) msg.Error {
 /// refused DENY, having said so; any other failure is said, then Reported,
 /// exit 1 (ZIG.md, "Messages, errors and panics": Reported is the one
 /// printed error).
-fn run(gpa: std.mem.Allocator, dump_path: [*:0]const u8, names_path: [*:0]const u8, deny_word: []const u8, dir: []const u8) msg.Error!u8 {
+fn run(gpa: std.mem.Allocator, dump_path: [*:0]const u8, names_path: [*:0]const u8, deny_word: []const u8, dir: []const u8, logged_path: ?[*:0]const u8) msg.Error!u8 {
     // 1. The policy on stdin (:145-165).
     const input = msg.check(fd.readAll(fd.Stdio.in, gpa) catch return nomem(), "reading the policy", .{}) catch
         return error.Reported;
@@ -249,10 +255,15 @@ fn run(gpa: std.mem.Allocator, dump_path: [*:0]const u8, names_path: [*:0]const 
     // the bash's own case, NAMES empty, keeps).
     if (lines.base_none and list.len == 0)
         return msg.refuse("base none allows nothing: name at least one call with allow", .{});
-    // The logged: `log` less `nolog`; render takes the allowed from them,
-    // and what is not in @known.
-    const logged: []const []const u8 = if (lines.logged.items.len == 0) &.{} else blk: {
+    // The logged: the declaration's and `log`'s, less `nolog`'s; render
+    // takes the allowed from them, and what is not in @known.
+    const declared_logged: []const u8 = if (lines.base_none) "" else if (logged_path) |p|
+        (try expand.readOperand(gpa, p)) orelse ""
+    else
+        "";
+    const logged: []const []const u8 = if (lines.logged.items.len == 0 and declared_logged.len == 0) &.{} else blk: {
         var l: expand.Expansion = .init(gpa, &dump);
+        try l.lines(declared_logged);
         try l.lines(lines.logged.items);
         break :blk try l.names();
     };

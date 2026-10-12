@@ -1,0 +1,2 @@
+flong check: @GOLDEN@/decl/layer-merged-and-refused.json: flong.box.limits.CPUWeight is 0, outside 1-10000.
+flong check: @GOLDEN@/decl/layer-merged-and-refused.json: flong.box.seccomp.syscalls has "fstatat64", which is not a system call on x86_64: name each call as the kernel does, and a group in seccomp.allow or seccomp.deny.

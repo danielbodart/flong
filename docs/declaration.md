@@ -39,12 +39,23 @@ A list marked ordered keeps its order, so a list of commands runs
 them one after another; the NixOS module concatenates its
 definitions in `mkOrder` order (`mkBefore`, `mkAfter`).
 
+A project may bring a layer of its own, a JSON object of these
+fields, any of them left out, merged over the declaration as a JSON
+Merge Patch (RFC 7396): an object merges field by field, `null`
+removes what is beneath, and anything else replaces it. `flong check
+--layer project LAYER.json` judges one. A field marked host only is
+the host's to set, never a project's, and so is everything below it;
+a field marked as one a project only tightens takes a value at least
+as strict as the one beneath it. The schema says the same as
+`x-scope`: `host` or `tighten`.
+
 ## Fields
 
 ### `user`
 
 - type: `string`
 - required
+- host only
 
 User inside the container, which everything in the container runs
 as.
@@ -63,6 +74,7 @@ whatever its uid.
 - type: `command, or null`
 - default: `null`
 - ordered
+- host only
 
 The entrypoint, as an argument list: the program, then its fixed
 arguments. The launcher's own arguments are appended, and it is
@@ -87,6 +99,7 @@ neither.
 - type: `command, or null`
 - default: `null`
 - ordered
+- host only
 
 A command printing the entrypoint's argument list, variables to
 add to its environment and files to seed into its home, for an
@@ -179,6 +192,7 @@ before its container's record exists leaves nothing to run it from.
 - type: `command, or null`
 - default: `null`
 - ordered
+- host only
 
 A command printing the directory to bind into the container at its
 own path and start in: `PATH`, bound read-write, or `PATH:ro`,
@@ -206,6 +220,7 @@ allowed is `guard`'s job, not this one's.
 - type: `list of command`
 - default: `[]`
 - ordered
+- host only
 
 Commands printing more of the invoking user's directories to bind, one
 per line, each at its own path inside the container: `PATH`, bound
@@ -235,6 +250,7 @@ than edit, not for making an untrusted one safe.
 - type: `list of command`
 - default: `[]`
 - ordered
+- host only
 
 Commands run as the invoking user before launch, in order, to check
 that the launch is one this declaration means to make. A consistency
@@ -263,6 +279,7 @@ it, so a guard that asks a question can ask it twice.
 - type: `list of command`
 - default: `[]`
 - ordered
+- host only
 
 Commands run by the launcher as the invoking user, in order, once
 per container, as soon as the container's namespaces exist --
@@ -300,6 +317,7 @@ running: it is held until these and any `network` have finished.
 - type: `list of command`
 - default: `[]`
 - ordered
+- host only
 
 Commands run as the invoking user after a container ends, in order, to
 release whatever `postStart` made outside it. `$machine` is in the
@@ -406,6 +424,7 @@ Port in the container; `hostPort` if null.
 
 - type: `string matching [0-9A-Fa-f.:]+, or null`
 - default: `null`
+- host only
 
 The host address `forwardPorts` binds, an IPv4 or IPv6 address:
 every address when null, the default. A listener inside is then
@@ -425,6 +444,7 @@ field, which then replaces this and `forwardInterface` both.
 
 - type: `string matching [A-Za-z0-9._-]+, or null`
 - default: `null`
+- host only
 
 The host interface `forwardPorts` binds, by name, as pasta's
 `%INTERFACE` (Linux 5.7 or later): every interface when null, the
@@ -435,6 +455,7 @@ At most 15 bytes, each a letter, a digit, `.`, `_` or `-`.
 
 - type: `bool`
 - default: `false`
+- host only
 
 A forwarded connection from the host's loopback arrives on
 the container's loopback, rather than from the container's own
@@ -460,6 +481,7 @@ loopback is reachable, the gateway address included.
 
 - type: `object of target to lower`
 - default: `{}`
+- host only
 
 Paths mounted as an overlay of `{ target = lower; }`: the lower
 directory is readable and every write goes to an upper layer that
@@ -476,6 +498,7 @@ land.
 
 - type: `string`
 - required
+- host only
 
 Where the overlay is mounted in the container.
 
@@ -483,6 +506,7 @@ Where the overlay is mounted in the container.
 
 - type: `string`
 - required
+- host only
 
 The host directory it shows, read-only, beneath the writes.
 
@@ -491,6 +515,7 @@ The host directory it shows, read-only, beneath the writes.
 - type: `list of string matching /.*`
 - default: `[]`
 - ordered
+- host only
 
 Paths in the container replaced by an empty node of the same kind
 that nobody can read. For carving one file out of a directory a
@@ -524,6 +549,7 @@ at any depth, is not checked.
 - type: `list of string matching /.*`
 - default: `[]`
 - ordered
+- host only
 
 Host paths no mount of a container may reach: no source may equal,
 lie inside or contain one. For a directory whose contents steer
@@ -625,6 +651,7 @@ EPERM, and clone3 ENOSYS).
 
 - type: `one of "parity", "strict", or null`
 - default: `"strict"`
+- a project only tightens it
 
 `parity` is exactly the allow-list systemd-nspawn installs
 for a container. `strict` is parity without `@keyring`,
@@ -645,6 +672,7 @@ container's own pid namespace.
 
 - type: `bool`
 - default: `false`
+- host only
 
 For an entrypoint that sandboxes its own children, such as
 Chromium's sandbox, `codex sandbox` or a nested bwrap: the
@@ -659,7 +687,9 @@ network namespace.
 - default: `[]`
 - ordered
 
-Syscall names or `@groups` added to the profile.
+Syscall names or `@groups` added to the profile. A name is better
+said in `syscalls`, which overrides this; the list is kept for a
+release, and for `@groups`.
 
 ### `seccomp.deny`
 
@@ -668,13 +698,55 @@ Syscall names or `@groups` added to the profile.
 - ordered
 
 Syscall names or `@groups` removed, after the profile, the
-loosenings and `allow`, which it overrides. A project's
-`seccompPolicy` lines come after it and override it in turn.
+loosenings and `allow`, which it overrides. `syscalls` overrides
+it in turn, and a project's `seccompPolicy` lines override all of
+them. A name is better said in `syscalls`; the list is kept for a
+release, and for `@groups`.
+
+### `seccomp.syscalls`
+
+- type: `object of name to one of "allow", "deny", "log"`
+- default: `{}`
+
+One entry a system call, by its name on this machine's
+architecture, saying what the filter does with it: `"allow"` adds
+it to the profile, `"deny"` removes it, so it gets `errno`, and
+`"log"` lets it through and has the kernel log it, as `log` does
+for every call. A name the architecture has no call by is
+refused by `flong check`, and one systemd's lists lack by the
+build.
+
+It is applied last, after the tier, `debug`, `nestedSandbox`,
+`allow` and `deny`, so a call named here is what it says whatever
+they say of it, a `@group` of theirs included: `"ptrace": "deny"`
+refuses ptrace under `debug`, and `"ptrace": "allow"` allows it
+though `deny` has `@debug`. A project's `seccompPolicy` lines come
+after it, and override it as they override the rest: a project's
+`allow`, or its `nolog`, takes a `"log"` call back.
+
+A map rather than lists, so a layer merged over the declaration
+as a JSON Merge Patch (RFC 7396) adds, changes or, with `null`,
+removes one call's entry without restating the others.
+
+### `seccomp.syscalls.*.name`
+
+- type: `string`
+- required
+
+The system call's name, as this architecture's kernel spells it.
+
+### `seccomp.syscalls.*.action`
+
+- type: `one of "allow", "deny", "log"`
+- required
+
+What the filter does with it.
 
 ### `seccomp.errno`
 
 - type: `one of "EPERM", "EACCES", "ENOSYS"`
 - default: `"EPERM"`
+- host only
 
 What a call in `@known` that the filter does not allow
 returns. ENOSYS makes a program fall back as it would on
@@ -697,6 +769,7 @@ Not for untrusted entrypoints, and it warns.
 - type: `list of command`
 - default: `[]`
 - ordered
+- host only
 
 Commands printing a project's own changes to the `seccomp` filter,
 for a policy that is only known at launch. Run as the invoking user
@@ -981,6 +1054,16 @@ them, `deny` included, by design: an `allow` puts back a call
 What a call in `@known` the filter does not allow gets: an errno's
 number (`1`, `13` or `38`, for `seccomp.errno`), or `log` for
 `seccomp.log`.
+
+### `seccompProject.logged`
+
+- type: `string, or null`
+- default: `null`
+- computed
+
+The file of the calls `seccomp.syscalls` logs, one a line, sorted,
+or null for none. The project's lines start from them as from
+their own `log` lines: an `allow`, or a `nolog`, takes one back.
 
 ### `commandPath`
 

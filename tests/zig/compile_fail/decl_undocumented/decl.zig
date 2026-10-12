@@ -9,3 +9,11 @@ pub const Declaration = struct {
 
     pub const computed = [_][]const u8{};
 };
+
+pub const Scope = enum { project, host, tighten };
+
+pub fn scopeOf(comptime T: type, comptime name: []const u8) Scope {
+    _ = T;
+    _ = name;
+    return .project;
+}

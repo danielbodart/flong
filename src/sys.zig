@@ -49,6 +49,9 @@ pub const O = linux.O;
 pub const AT = linux.AT;
 pub const Stat = linux.Stat;
 pub const S = linux.S;
+/// The system calls by number, as Zig names them (syscalls.zig corrects
+/// the names to the kernel's).
+pub const SYS = linux.SYS;
 /// flock(2)'s operations (asm-generic/fcntl.h; std.os.linux has none, and
 /// std.posix's is banned).
 pub const LOCK = struct {

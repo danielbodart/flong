@@ -1,0 +1,5 @@
+--layer
+project
+--base
+@GOLDEN@/decl/an-unknown-field.json
+@GOLDEN@/decl/layer-a-project-layer.json

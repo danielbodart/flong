@@ -1,0 +1,4 @@
+{
+  "seccomp": { "syscalls": { "fstatat64": "allow" } },
+  "limits": { "CPUWeight": 0 }
+}

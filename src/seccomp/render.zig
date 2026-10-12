@@ -1,7 +1,11 @@
-//! render.zig: `flong-seccomp render DUMP NAMES DENY`, the tier filter's
-//! policy, as flong-seccomp-render printed it (policy.nix:81-108): the
-//! names allowed, the rest of @known refused with DENY or logged, and
-//! everything else ENOSYS. DENY is 1, 13, 38 or log. The same code renders
+//! render.zig: `flong-seccomp render DUMP NAMES DENY [LOGGED]`, the tier
+//! filter's policy, as flong-seccomp-render printed it (policy.nix:81-108):
+//! the names allowed, the rest of @known refused with DENY or logged, and
+//! everything else ENOSYS. DENY is 1, 13, 38 or log. LOGGED, flong's own,
+//! is a file of names, sorted, one a line, as NAMES is read: those of
+//! them @known has and NAMES lacks are logged in place of DENY, as a
+//! project's `log` lines are (seccomp.syscalls' `"log"`). Without it the
+//! policy is the bash's, byte for byte. The same code renders
 //! at build time and, through project, at launch, so both compile the same
 //! text. @known now comes from DUMP, which policy.nix's `known` held
 //! (policy.nix:33).
@@ -163,8 +167,8 @@ const Comm = struct {
 
 /// `flong-seccomp render DUMP NAMES DENY`: its exit status.
 pub fn main(gpa: std.mem.Allocator, args: []const [*:0]const u8) u8 {
-    if (args.len != 3) {
-        msg.bare("usage: flong-seccomp render DUMP NAMES 1|13|38|log", .{});
+    if (args.len != 3 and args.len != 4) {
+        msg.bare("usage: flong-seccomp render DUMP NAMES 1|13|38|log [LOGGED]", .{});
         return 2;
     }
     msg.prog = prog;
@@ -172,28 +176,44 @@ pub fn main(gpa: std.mem.Allocator, args: []const [*:0]const u8) u8 {
         msg.say("not 1, 13, 38 or log: {s}", .{args[2]});
         return 2;
     };
-    return run(gpa, args[0], args[1], deny) catch |err| switch (err) {
+    const logged_path: ?[*:0]const u8 = if (args.len == 4) args[3] else null;
+    return run(gpa, args[0], args[1], deny, logged_path) catch |err| switch (err) {
         error.Reported => 1,
     };
 }
 
-fn run(gpa: std.mem.Allocator, dump_path: [*:0]const u8, names_path: [*:0]const u8, deny: Deny) msg.Error!u8 {
-    // NAMES is a path even when it is "-", as bash's `<"$1"` opens it.
-    const names_file = try msg.check(fd.openFile(fd.cwd, names_path, .{}, 0), "{s}", .{names_path});
+fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
+}
+
+/// The names of the file at `path`, as `mapfile -t <"$path"` reads them.
+pub fn readNames(gpa: std.mem.Allocator, path: [*:0]const u8) msg.Error![]const []const u8 {
+    // A path even when it is "-", as bash's `<"$1"` opens it.
+    const file = try msg.check(fd.openFile(fd.cwd, path, .{}, 0), "{s}", .{path});
     // mapfile takes a read error for the end, silently: a directory is no
     // names.
-    const text: []const u8 = switch (fd.readAll(names_file, gpa) catch return nomem()) {
+    const text: []const u8 = switch (fd.readAll(file, gpa) catch return nomem()) {
         .ok => |t| t,
         .err => "",
     };
-    names_file.close();
-    const names = mapfile(gpa, text) catch return nomem();
-    const known: []const []const u8 = if (deny == .enosys) &.{} else blk: {
+    file.close();
+    return mapfile(gpa, text) catch return nomem();
+}
+
+fn run(gpa: std.mem.Allocator, dump_path: [*:0]const u8, names_path: [*:0]const u8, deny: Deny, logged_path: ?[*:0]const u8) msg.Error!u8 {
+    const names = try readNames(gpa, names_path);
+    const logged: []const []const u8 = if (logged_path) |p| blk: {
+        // render walks them beside @known, so in its order.
+        const l = try readNames(gpa, p);
+        std.mem.sort([]const u8, @constCast(l), {}, lessThan);
+        break :blk l;
+    } else &.{};
+    const known: []const []const u8 = if (deny == .enosys and logged.len == 0) &.{} else blk: {
         const dump = expand.Dump.parse(gpa, try expand.readPath(gpa, dump_path)) catch return nomem();
         break :blk try expand.known(gpa, &dump);
     };
     var out: std.ArrayList(u8) = .empty;
-    const sorted = render(gpa, &out, known, names, deny, &.{}) catch return nomem();
+    const sorted = render(gpa, &out, known, names, deny, logged) catch return nomem();
     try msg.check(fd.Stdio.out.writeAll(out.items), "writing the policy", .{});
     return if (sorted) 0 else 1;
 }

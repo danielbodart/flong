@@ -1,0 +1,2 @@
+flong check: @GOLDEN@/decl/an-unknown-field.json:10:3: unexpected field "post_start"
+flong check: @GOLDEN@/decl/an-unknown-field.json:10:3: note: supported: "user", "command", "exec", "workspace", "binds", "guard", "postStart", "postStop", "network", "overlays", "masks", "protect", "limits", "seccomp", "seccompPolicy", "container", "closure", "cuid", "cgid", "steps8", "containerMounts", "name", "environment", "seccompTierFilter", "seccompFixedFilters", "seccompProject", "commandPath", "postStartProgram", "postStopProgram"

@@ -1,0 +1,5 @@
+--layer
+project
+--base
+@GOLDEN@/decl/minimal.json
+@GOLDEN@/decl/layer-the-tier-loosened.json

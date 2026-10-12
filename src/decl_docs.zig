@@ -24,6 +24,10 @@
 //!              mkMerge keep working; `single` for anything else
 //!   nixOption  false for `Declaration.computed` and everything below one:
 //!              Nix works those out and generates no option for them
+//!   x-scope    `host` for a field a project's layer may never set, and
+//!              everything below one, every computed field among them;
+//!              `tighten` for one it may set only to a stricter value
+//!              (decl.Scope); absent for the rest, which a project may set
 //!
 //! and a type is an object whose `type` is one of, with `nullable: true`
 //! added when null is a value:
@@ -41,6 +45,8 @@
 //!   pathAttrs {name, value}         Nix `attrsOf path`, a JSON object
 //!                                   whose names are the `name` field and
 //!                                   values the `value` field of decl's type
+//!   attrsOf {name, value, of}       Nix `attrsOf`, the same, its values
+//!                                   of the type `of` rather than paths
 //!   struct {fields}                 a submodule; `fields` are entries
 //!   either {options}                a union: each option is a type with
 //!                                   its union field as `tag`; a void field
@@ -110,6 +116,12 @@ pub fn metaOf(comptime T: type, comptime name: []const u8) Meta {
     return m;
 }
 
+/// A field's scope where it lies `within` another's: everything below a
+/// host field is the host's.
+fn scopeIn(comptime within: decl.Scope, comptime T: type, comptime name: []const u8) decl.Scope {
+    return if (within == .host) .host else decl.scopeOf(T, name);
+}
+
 fn isComputed(comptime name: []const u8) bool {
     for (decl.Declaration.computed) |c| {
         if (std.mem.eql(u8, c, name)) return true;
@@ -150,21 +162,22 @@ fn ordered(comptime T: type) bool {
 /// Writes decl-options.json, the whole of it, ending in a newline.
 pub fn writeSchema(w: *std.Io.Writer) std.Io.Writer.Error!void {
     var s: std.json.Stringify = .{ .writer = w, .options = .{ .whitespace = .indent_2 } };
-    try writeFields(&s, decl.Declaration, "", true);
+    try writeFields(&s, decl.Declaration, "", true, .project);
     try w.writeByte('\n');
 }
 
-fn writeFields(s: *std.json.Stringify, comptime T: type, comptime prefix: []const u8, comptime option: bool) std.Io.Writer.Error!void {
+fn writeFields(s: *std.json.Stringify, comptime T: type, comptime prefix: []const u8, comptime option: bool, comptime within: decl.Scope) std.Io.Writer.Error!void {
     try s.beginArray();
     inline for (@typeInfo(T).@"struct".fields) |f| {
         const path = if (prefix.len == 0) f.name else prefix ++ "." ++ f.name;
         const is_option = comptime option and !(T == decl.Declaration and isComputed(f.name));
+        const scope = comptime scopeIn(within, T, f.name);
         const default = f.defaultValue();
         try s.beginObject();
         try s.objectField("path");
         try s.write(path);
         try s.objectField("type");
-        try writeType(s, f.type, path, metaOf(T, f.name), null, is_option);
+        try writeType(s, f.type, path, metaOf(T, f.name), null, is_option, scope);
         try s.objectField("default");
         if (default) |d| try writeValue(s, f.type, d) else try s.write(null);
         try s.objectField("required");
@@ -175,6 +188,10 @@ fn writeFields(s: *std.json.Stringify, comptime T: type, comptime prefix: []cons
         try s.write(if (comptime ordered(f.type)) "ordered" else "single");
         try s.objectField("nixOption");
         try s.write(is_option);
+        if (scope != .project) {
+            try s.objectField("x-scope");
+            try s.write(@tagName(scope));
+        }
         try s.endObject();
     }
     try s.endArray();
@@ -189,6 +206,7 @@ fn writeType(
     comptime m: Meta,
     comptime tag: ?[]const u8,
     comptime option: bool,
+    comptime scope: decl.Scope,
 ) std.Io.Writer.Error!void {
     const U = unwrap(T);
     try s.beginObject();
@@ -228,20 +246,25 @@ fn writeType(
                 try s.write("string");
             }
         } else if (comptime isAttrs(p.child)) {
-            try s.write("pathAttrs");
+            const V = @FieldType(p.child, p.child.attrs.value);
+            try s.write(if (comptime isString(V)) "pathAttrs" else "attrsOf");
             try s.objectField("name");
             try s.write(p.child.attrs.name);
             try s.objectField("value");
             try s.write(p.child.attrs.value);
+            if (comptime !isString(V)) {
+                try s.objectField("of");
+                try writeType(s, V, path ++ ".*", metaOf(p.child, p.child.attrs.value), null, option, scope);
+            }
         } else {
             try s.write("list");
             try s.objectField("of");
-            try writeType(s, p.child, path ++ ".*", m, null, option);
+            try writeType(s, p.child, path ++ ".*", m, null, option, scope);
         },
         .@"struct" => {
             try s.write("struct");
             try s.objectField("fields");
-            try writeFields(s, U, path, option);
+            try writeFields(s, U, path, option, scope);
         },
         .@"union" => |u| {
             if (u.tag_type == null) @compileError(path ++ ": an untagged union");
@@ -261,7 +284,7 @@ fn writeType(
                     try s.endArray();
                     try s.endObject();
                 } else {
-                    try writeType(s, x.type, path, metaOf(U, x.name), x.name, option);
+                    try writeType(s, x.type, path, metaOf(U, x.name), x.name, option, scope);
                 }
             }
             try s.endArray();
@@ -290,7 +313,7 @@ fn writeValue(s: *std.json.Stringify, comptime T: type, v: T) std.Io.Writer.Erro
             try s.beginObject();
             for (v) |x| {
                 try s.objectField(@field(x, p.child.attrs.name));
-                try s.write(@field(x, p.child.attrs.value));
+                try writeValue(s, @FieldType(p.child, p.child.attrs.value), @field(x, p.child.attrs.value));
             }
             try s.endObject();
         } else {
@@ -347,6 +370,8 @@ pub const Entry = struct {
     /// `Declaration.computed`, or below one: the NixOS module works it out,
     /// and a declaration written by hand sets it.
     computed: bool,
+    /// Who may set it in a layer (decl.Scope), the schema's `x-scope`.
+    scope: decl.Scope,
     /// The doc comment, Markdown, lines kept.
     doc: []const u8,
 };
@@ -354,7 +379,7 @@ pub const Entry = struct {
 /// Every field, in declaration order, a struct's fields after it.
 pub const rows: []const Entry = blk: {
     @setEvalBranchQuota(1_000_000);
-    const all = entriesOf(decl.Declaration, "", false);
+    const all = entriesOf(decl.Declaration, "", false, .project);
     // The reference heads the computed fields once, so they come last.
     var seen = false;
     for (all) |e| {
@@ -364,35 +389,37 @@ pub const rows: []const Entry = blk: {
     break :blk &table;
 };
 
-fn entriesOf(comptime T: type, comptime prefix: []const u8, comptime computed: bool) []const Entry {
+fn entriesOf(comptime T: type, comptime prefix: []const u8, comptime computed: bool, comptime within: decl.Scope) []const Entry {
     var out: []const Entry = &.{};
     for (@typeInfo(T).@"struct".fields) |f| {
         const path = if (prefix.len == 0) f.name else prefix ++ "." ++ f.name;
         const c = computed or (T == decl.Declaration and isComputed(f.name));
+        const scope = scopeIn(within, T, f.name);
         out = out ++ [_]Entry{.{
             .path = path,
             .type = typeText(f.type, metaOf(T, f.name)),
             .default = if (f.defaultValue()) |d| jsonValue(f.type, d) else null,
             .ordered = ordered(f.type),
             .computed = c,
+            .scope = scope,
             .doc = docFor(T, f.name, path),
         }};
-        out = out ++ childrenOf(f.type, path, c);
+        out = out ++ childrenOf(f.type, path, c, scope);
     }
     return out;
 }
 
 /// The fields a value of `T` holds, when it holds any: a struct's, a list
 /// element's under `*`, a union option's under the union's own path.
-fn childrenOf(comptime T: type, comptime path: []const u8, comptime computed: bool) []const Entry {
+fn childrenOf(comptime T: type, comptime path: []const u8, comptime computed: bool, comptime scope: decl.Scope) []const Entry {
     const U = unwrap(T);
     if (U == decl.Command or isString(U)) return &.{};
     return switch (@typeInfo(U)) {
-        .pointer => |p| childrenOf(p.child, path ++ ".*", computed),
-        .@"struct" => entriesOf(U, path, computed),
+        .pointer => |p| childrenOf(p.child, path ++ ".*", computed, scope),
+        .@"struct" => entriesOf(U, path, computed, scope),
         .@"union" => |u| blk: {
             var out: []const Entry = &.{};
-            for (u.fields) |x| out = out ++ childrenOf(x.type, path, computed);
+            for (u.fields) |x| out = out ++ childrenOf(x.type, path, computed, scope);
             break :blk out;
         },
         else => &.{},
@@ -417,7 +444,7 @@ fn typeText(comptime T: type, comptime m: Meta) []const u8 {
         .pointer => |p| if (isString(U))
             (if (m.pattern) |pattern| "string matching " ++ pattern else "string")
         else if (isAttrs(p.child))
-            "object of " ++ p.child.attrs.name ++ " to " ++ p.child.attrs.value
+            "object of " ++ p.child.attrs.name ++ " to " ++ attrsValueText(p.child)
         else
             "list of " ++ typeText(p.child, m),
         .@"struct" => "struct",
@@ -436,6 +463,13 @@ fn typeText(comptime T: type, comptime m: Meta) []const u8 {
     return if (U != T) base ++ ", or null" else base;
 }
 
+/// An attribute set's value in the reference: the value field's name when
+/// it is a string (`lower`), its type otherwise.
+fn attrsValueText(comptime A: type) []const u8 {
+    const V = @FieldType(A, A.attrs.value);
+    return if (isString(V)) A.attrs.value else typeText(V, metaOf(A, A.attrs.value));
+}
+
 /// A value as a declaration's JSON writes it, which is as Nix writes it
 /// (`writeValue`): an enum's tag and a void union field as a string, a
 /// union's other fields as their value, pathAttrs as an object, and a
@@ -450,7 +484,7 @@ fn jsonValue(comptime T: type, comptime v: T) []const u8 {
             jsonString(v)
         else if (isAttrs(p.child)) blk: {
             var s: []const u8 = "";
-            for (v, 0..) |x, n| s = s ++ (if (n == 0) "{ " else ", ") ++ jsonString(@field(x, p.child.attrs.name)) ++ ": " ++ jsonString(@field(x, p.child.attrs.value));
+            for (v, 0..) |x, n| s = s ++ (if (n == 0) "{ " else ", ") ++ jsonString(@field(x, p.child.attrs.name)) ++ ": " ++ jsonValue(@FieldType(p.child, p.child.attrs.value), @field(x, p.child.attrs.value));
             break :blk if (s.len == 0) "{}" else s ++ " }";
         } else if (v.len == 0)
             "[]"
@@ -541,6 +575,19 @@ const reference_ordered =
     \\
 ;
 
+const reference_scope =
+    \\A project may bring a layer of its own, a JSON object of these
+    \\fields, any of them left out, merged over the declaration as a JSON
+    \\Merge Patch (RFC 7396): an object merges field by field, `null`
+    \\removes what is beneath, and anything else replaces it. `flong check
+    \\--layer project LAYER.json` judges one. A field marked host only is
+    \\the host's to set, never a project's, and so is everything below it;
+    \\a field marked as one a project only tightens takes a value at least
+    \\as strict as the one beneath it. The schema says the same as
+    \\`x-scope`: `host` or `tighten`.
+    \\
+;
+
 const reference_computed =
     \\The NixOS module works these out of `containers.<name>`, the closure it
     \\builds and the rest of the declaration, and has no option for them. A
@@ -579,6 +626,8 @@ pub fn writeReference(w: *std.Io.Writer, style: Style) std.Io.Writer.Error!void 
     try w.writeByte('\n');
     try writeProse(w, reference_ordered, "", style);
     try w.writeByte('\n');
+    try writeProse(w, reference_scope, "", style);
+    try w.writeByte('\n');
 
     try heading(w, 2, "Fields", style);
     var in_computed = false;
@@ -616,6 +665,17 @@ fn cell(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
     };
 }
 
+/// What the reference says of a field's scope, where it says anything:
+/// a computed field's is the host's, which `computed` says already.
+fn scopeWords(e: Entry) ?[]const u8 {
+    if (e.computed) return null;
+    return switch (e.scope) {
+        .project => null,
+        .host => "host only",
+        .tighten => "a project only tightens it",
+    };
+}
+
 fn writeEntry(w: *std.Io.Writer, e: Entry, style: Style) std.Io.Writer.Error!void {
     switch (style) {
         .text => {
@@ -623,6 +683,7 @@ fn writeEntry(w: *std.Io.Writer, e: Entry, style: Style) std.Io.Writer.Error!voi
             if (e.default) |d| try w.print("    default: {s}\n", .{d}) else try w.writeAll("    required\n");
             if (e.ordered) try w.writeAll("    ordered\n");
             if (e.computed) try w.writeAll("    computed\n");
+            if (scopeWords(e)) |x| try w.print("    {s}\n", .{x});
             try w.writeByte('\n');
             try writeProse(w, e.doc, "    ", style);
             try w.writeByte('\n');
@@ -632,6 +693,7 @@ fn writeEntry(w: *std.Io.Writer, e: Entry, style: Style) std.Io.Writer.Error!voi
             if (e.default) |d| try w.print("- default: `{s}`\n", .{d}) else try w.writeAll("- required\n");
             if (e.ordered) try w.writeAll("- ordered\n");
             if (e.computed) try w.writeAll("- computed\n");
+            if (scopeWords(e)) |x| try w.print("- {s}\n", .{x});
             try w.writeByte('\n');
             try w.writeAll(e.doc);
             try w.writeByte('\n');
@@ -821,6 +883,46 @@ test "the schema says each kind of field as the grammar does" {
         try testing.expect(!find(top, p).?.get("nixOption").?.bool);
     }
     try testing.expectEqual(std.math.maxInt(u32), find(top, "cuid").?.get("type").?.object.get("max").?.integer);
+
+    // seccomp.syscalls: an attribute set of an enum, which Nix reads as
+    // attrsOf, its default the empty set.
+    const calls = find(top, "seccomp.syscalls").?;
+    const calls_type = calls.get("type").?.object;
+    try testing.expectEqualStrings("attrsOf", calls_type.get("type").?.string);
+    try testing.expectEqualStrings("name", calls_type.get("name").?.string);
+    try testing.expectEqualStrings("action", calls_type.get("value").?.string);
+    try testing.expectEqualStrings("enum", calls_type.get("of").?.object.get("type").?.string);
+    try testing.expectEqual(3, calls_type.get("of").?.object.get("tags").?.array.items.len);
+    try testing.expectEqual(0, calls.get("default").?.object.count());
+    try testing.expectEqualStrings("single", calls.get("merge").?.string);
+    // overlays stays pathAttrs, with no `of`.
+    try testing.expect(find(top, "overlays").?.get("type").?.object.get("of") == null);
+}
+
+test "x-scope: host for what a project may never set, tighten for the tier" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const top = (try std.json.parseFromSliceLeaky(std.json.Value, a, try schema(a), .{})).array.items;
+    const host = [_][]const u8{
+        "user",                   "command",                  "exec",                          "workspace",
+        "binds",                  "guard",                    "postStart",                     "postStop",
+        "network.forwardAddress", "network.forwardInterface", "network.hostLoopbackToSession", "overlays",
+        "masks",                  "protect",                  "seccomp.nestedSandbox",         "seccomp.errno",
+        "seccompPolicy",          "container",                "closure",                       "cuid",
+        "cgid",                   "steps8",                   "containerMounts",               "containerMounts.*.kind",
+        "name",                   "environment",              "environment.*.value",           "seccompTierFilter",
+        "seccompFixedFilters",    "seccompProject",           "seccompProject.logged",         "commandPath",
+        "postStartProgram",       "postStopProgram",
+    };
+    for (host) |p| {
+        const x = find(top, p) orelse return error.NoSuchPath;
+        try testing.expectEqualStrings("host", (x.get("x-scope") orelse return error.NoScope).string);
+    }
+    try testing.expectEqualStrings("tighten", find(top, "seccomp.tier").?.get("x-scope").?.string);
+    for ([_][]const u8{ "network", "network.forwardPorts", "network.forwardPorts.*.hostPort", "network.hostPorts", "limits", "limits.MemoryMax", "seccomp", "seccomp.debug", "seccomp.allow", "seccomp.deny", "seccomp.syscalls", "seccomp.log" }) |p| {
+        try testing.expect(find(top, p).?.get("x-scope") == null);
+    }
 }
 
 test "a default is written as Nix would write it" {
@@ -845,6 +947,13 @@ test "a default is written as Nix would write it" {
     const overlays: []const decl.Overlay = &.{.{ .target = "/home/a/.state", .lower = "/var/lib/state" }};
     try writeValue(&s, []const decl.Overlay, overlays);
     try testing.expectEqualStrings("{\"/home/a/.state\":\"/var/lib/state\"}", out.written());
+
+    var calls_out: std.Io.Writer.Allocating = .init(a);
+    var cs: std.json.Stringify = .{ .writer = &calls_out.writer };
+    const calls: []const decl.SyscallRule = &.{ .{ .name = "ptrace", .action = .deny }, .{ .name = "io_uring_setup", .action = .log } };
+    try writeValue(&cs, []const decl.SyscallRule, calls);
+    try testing.expectEqualStrings("{\"ptrace\":\"deny\",\"io_uring_setup\":\"log\"}", calls_out.written());
+    try testing.expectEqualStrings("{ \"ptrace\": \"deny\" }", comptime jsonValue([]const decl.SyscallRule, &.{.{ .name = "ptrace", .action = .deny }}));
 }
 
 fn reference(arena: std.mem.Allocator, style: Style) ![]const u8 {
@@ -914,6 +1023,8 @@ test "the reference spells each type and default as JSON does" {
         .{ .path = "limits.CPUWeight", .type = "integer 1..10000, or null", .default = "null" },
         .{ .path = "seccomp.tier", .type = "one of \"parity\", \"strict\", or null", .default = "\"strict\"" },
         .{ .path = "seccomp.errno", .type = "one of \"EPERM\", \"EACCES\", \"ENOSYS\"", .default = "\"EPERM\"" },
+        .{ .path = "seccomp.syscalls", .type = "object of name to one of \"allow\", \"deny\", \"log\"", .default = "{}" },
+        .{ .path = "seccomp.syscalls.*.action", .type = "one of \"allow\", \"deny\", \"log\"", .default = null },
         .{ .path = "cuid", .type = "integer 0..4294967295", .default = null },
         .{ .path = "seccompProject", .type = "struct, or null", .default = "null" },
     }) |c| {
@@ -961,9 +1072,9 @@ test "the reference, in text and in Markdown" {
     const text = try reference(a, .text);
     try testing.expect(std.mem.startsWith(u8, text, "The declaration\n===============\n\nA declaration is one JSON object"));
     try testing.expect(std.mem.endsWith(u8, text, ".\n") and !std.mem.endsWith(u8, text, "\n\n"));
-    try testing.expect(std.mem.indexOf(u8, text, "\nFields\n------\n\nuser\n    type: string\n    required\n\n    User inside the container") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\nseccomp.tier\n    type: one of \"parity\", \"strict\", or null\n    default: \"strict\"\n\n    `parity` is exactly") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\nguard\n    type: list of command\n    default: []\n    ordered\n\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\nFields\n------\n\nuser\n    type: string\n    required\n    host only\n\n    User inside the container") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\nseccomp.tier\n    type: one of \"parity\", \"strict\", or null\n    default: \"strict\"\n    a project only tightens it\n\n    `parity` is exactly") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\nguard\n    type: list of command\n    default: []\n    ordered\n    host only\n\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\ncuid\n    type: integer 0..4294967295\n    required\n    computed\n\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "provided by\n    pasta (https://passt.top):") != null);
     try testing.expect(std.mem.indexOf(u8, text, "**") == null);
@@ -980,8 +1091,8 @@ test "the reference, in text and in Markdown" {
     const md = try reference(a, .markdown);
     try testing.expect(std.mem.startsWith(u8, md, "# The declaration\n\n<!-- Generated by `flong help decl --markdown`"));
     try testing.expect(std.mem.endsWith(u8, md, ".\n") and !std.mem.endsWith(u8, md, "\n\n"));
-    try testing.expect(std.mem.indexOf(u8, md, "\n## Fields\n\n### `user`\n\n- type: `string`\n- required\n\nUser inside") != null);
-    try testing.expect(std.mem.indexOf(u8, md, "\n### `seccomp.tier`\n\n- type: `one of \"parity\", \"strict\", or null`\n- default: `\"strict\"`\n\n") != null);
+    try testing.expect(std.mem.indexOf(u8, md, "\n## Fields\n\n### `user`\n\n- type: `string`\n- required\n- host only\n\nUser inside") != null);
+    try testing.expect(std.mem.indexOf(u8, md, "\n### `seccomp.tier`\n\n- type: `one of \"parity\", \"strict\", or null`\n- default: `\"strict\"`\n- a project only tightens it\n\n") != null);
     try testing.expect(std.mem.indexOf(u8, md, "\n## Computed fields\n\n") != null);
     // A table cell's `|` is escaped, and its newlines are spaces.
     try testing.expect(std.mem.indexOf(u8, md, "| `A \\| B` | a union: a value of one of its options, with nothing around it; an option in quotes is that string |\n") != null);

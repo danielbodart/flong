@@ -1,0 +1,5 @@
+--base
+@GOLDEN@/decl/full.json
+--layer
+project
+@GOLDEN@/decl/layer-over-a-base-with-a-network.json

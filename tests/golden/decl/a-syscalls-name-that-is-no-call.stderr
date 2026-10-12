@@ -1,0 +1,3 @@
+flong check: @GOLDEN@/decl/a-syscalls-name-that-is-no-call.json: flong.box.seccomp.syscalls has "fstatat64", which is not a system call on x86_64: name each call as the kernel does, and a group in seccomp.allow or seccomp.deny.
+flong check: @GOLDEN@/decl/a-syscalls-name-that-is-no-call.json: flong.box.seccomp.syscalls has "Ptrace", which is not a system call on x86_64: name each call as the kernel does, and a group in seccomp.allow or seccomp.deny.
+flong check: @GOLDEN@/decl/a-syscalls-name-that-is-no-call.json: flong.box.seccomp.syscalls has "@keyring", which is not a system call on x86_64: name each call as the kernel does, and a group in seccomp.allow or seccomp.deny.

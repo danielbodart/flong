@@ -863,23 +863,27 @@ fn mapOf(container: u32, host: u32, range: subid.Range) Error!subid.Map {
     };
 }
 
-/// `flong-seccomp project DUMP NAMES DENY $state/seccomp <<<"$policy"`
+/// `flong-seccomp project DUMP NAMES DENY $state/seccomp [LOGGED] <<<"$policy"`
 /// (:217-222): the compiled filter's path, from its stdout; a failure is
 /// "the project's seccomp policy was refused", after what the compiler
 /// said.
 fn compilePolicy(gpa: Allocator, d: *const Declaration, tools: Tools, state: []const u8, policy: []const u8, envp: cmd.Envp) Error![]const u8 {
     const project = d.seccompProject orelse return msg.refuse("the project's seccomp policy was refused", .{});
-    const argv = [_][:0]const u8{
+    const all = [_][:0]const u8{
         tools.seccomp,
         "project",
         gpa.dupeZ(u8, project.dump) catch return oom(),
         gpa.dupeZ(u8, project.names) catch return oom(),
         gpa.dupeZ(u8, project.deny) catch return oom(),
         std.fmt.allocPrintSentinel(gpa, "{s}/seccomp", .{state}, 0) catch return oom(),
+        if (project.logged) |l| gpa.dupeZ(u8, l) catch return oom() else "",
     };
+    // LOGGED only when the declaration logs a call, so the argv is the
+    // bash's otherwise.
+    const argv = if (project.logged != null) all[0..] else all[0 .. all.len - 1];
     // A here-string is its text and a newline.
     const input = std.mem.concat(gpa, u8, &.{ policy, "\n" }) catch return oom();
-    const o = try cmd.captureInput(gpa, &argv, envp, input, cmd.output_max);
+    const o = try cmd.captureInput(gpa, argv, envp, input, cmd.output_max);
     if (o.status != 0) return msg.refuse("the project's seccomp policy was refused", .{});
     return cmd.substitute(o.out);
 }

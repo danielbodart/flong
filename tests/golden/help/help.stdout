@@ -3,6 +3,7 @@ usage: flong launch DECL.json [-- ARGUMENT...]
        NAME [ARGUMENT...]
        flong list
        flong check DECL.json
+       flong check --layer project [--base DECL.json] LAYER.json
        flong schema
        flong help [decl [--markdown]]
        flong version
@@ -66,10 +67,25 @@ flong check DECL.json
     line and column. Exit status: 0 when it passes, 1 when anything is
     refused or the file cannot be read, 2 on a usage error.
 
+flong check --layer project [--base DECL.json] LAYER.json
+    Judge a project's layer: a JSON object of a declaration's fields,
+    any of them left out, to be merged over DECL.json as a JSON Merge
+    Patch (RFC 7396), where an object merges field by field and null
+    removes what is beneath. Refused: a field the host alone sets
+    (`flong help decl` marks each "host only"), or a null removing
+    one; a network where DECL.json has none; seccomp.tier less strict
+    than DECL.json's (strict, then parity, then null); and whatever
+    flong check refuses of DECL.json with the layer merged over it.
+    Without --base, the base is a declaration's defaults: tier strict
+    and no network, each value judged on its own. Each refusal is one
+    line, `flong check: LAYER.json: ...`; the exit status is flong
+    check's.
+
 flong schema
     Print every field of a declaration as JSON: its path, type,
-    default, description, and how Nix merges it. The NixOS module
-    builds its options from it.
+    default, description, how Nix merges it, and, as x-scope, whether
+    a project's layer may set it. The NixOS module builds its options
+    from it.
 
 flong help [decl [--markdown]]
     This text; with decl, every field of a declaration, its type,

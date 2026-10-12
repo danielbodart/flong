@@ -30,11 +30,13 @@
 //! any declaration that parses: tests/zig/fuzz.zig holds it to that.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const sys = @import("sys");
 const msg = @import("msg");
 const decl = @import("decl");
 const decl_docs = @import("decl_docs");
 const spec = @import("spec");
+const layer = @import("layer.zig");
 
 const Allocator = std.mem.Allocator;
 const Declaration = decl.Declaration;
@@ -44,7 +46,7 @@ const usage_status = 2;
 /// Any refusal, and a file that cannot be read or parsed.
 const refused = 1;
 
-const usage = "usage: flong check DECL.json";
+const usage = "usage: flong check DECL.json\n       flong check --layer project [--base DECL.json] LAYER.json";
 
 /// Names a declaration cannot have: its command is a link to flong named
 /// after it (DESIGN.md, "The declaration's command"), and flong reads
@@ -58,14 +60,22 @@ pub fn main(argv: []const [*:0]const u8) noreturn {
     msg.prog = "flong check";
     // A refusal lists every path it is about, however long.
     msg.mode = .whole;
-    if (argv.len != 2) {
+    const args = parseArgs(argv[1..]) orelse {
         msg.bare(usage, .{});
         sys.exitGroup(usage_status);
-    }
-    const path = std.mem.span(argv[1]);
+    };
+    const path = args.path;
     // One arena, never freed: the process ends with the check.
     var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     const arena = arena_state.allocator();
+    if (args.layer) {
+        const said = layer.judge(arena, path, if (args.base) |b| .{ .file = b } else .defaults) catch |err| switch (err) {
+            error.Reported => sys.exitGroup(refused),
+            error.OutOfMemory => outOfMemory(),
+        };
+        for (said) |r| msg.say("{s}: {s}", .{ path, r });
+        sys.exitGroup(if (said.len == 0) 0 else refused);
+    }
     const d = decl.load(arena, path) catch |err| switch (err) {
         error.Reported => sys.exitGroup(refused),
         error.OutOfMemory => outOfMemory(),
@@ -73,6 +83,47 @@ pub fn main(argv: []const [*:0]const u8) noreturn {
     const refusals = validate(arena, &d) catch outOfMemory();
     for (refusals) |r| msg.say("{s}: {s}", .{ path, r });
     sys.exitGroup(if (refusals.len == 0) 0 else refused);
+}
+
+/// What `flong check` was asked: a declaration, or a project's layer over
+/// a base.
+const Args = struct {
+    path: [:0]const u8,
+    layer: bool = false,
+    base: ?[:0]const u8 = null,
+};
+
+/// `DECL.json`, or `--layer project [--base DECL.json] LAYER.json`, the
+/// options in either order, each once, and spelt with one dash or two;
+/// null for anything else.
+fn parseArgs(argv: []const [*:0]const u8) ?Args {
+    var a: Args = .{ .path = undefined };
+    var path: ?[:0]const u8 = null;
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const w = std.mem.span(argv[i]);
+        if (path != null) return null;
+        if (isOption(w, "layer")) {
+            if (a.layer or i + 1 == argv.len) return null;
+            i += 1;
+            if (!std.mem.eql(u8, std.mem.span(argv[i]), "project")) return null;
+            a.layer = true;
+        } else if (isOption(w, "base")) {
+            if (a.base != null or i + 1 == argv.len) return null;
+            i += 1;
+            a.base = std.mem.span(argv[i]);
+        } else {
+            path = w;
+        }
+    }
+    a.path = path orelse return null;
+    // A base is what a layer is merged over.
+    if (a.base != null and !a.layer) return null;
+    return a;
+}
+
+fn isOption(w: []const u8, comptime name: []const u8) bool {
+    return std.mem.eql(u8, w, "--" ++ name) or std.mem.eql(u8, w, "-" ++ name);
 }
 
 fn outOfMemory() noreturn {
@@ -102,7 +153,7 @@ pub fn validate(arena: Allocator, d: *const Declaration) Allocator.Error![]const
     return c.out.items;
 }
 
-const Checker = struct {
+pub const Checker = struct {
     arena: Allocator,
     d: *const Declaration,
     n: []const u8,
@@ -125,8 +176,15 @@ const Checker = struct {
     /// container, as decl_docs.zig reads them) keeps to it. `path` is the
     /// option's, a list's elements under the list's; `in_list` says "has"
     /// of an element where a field "is".
-    fn walk(c: *Checker, comptime T: type, v: T, comptime path: []const u8, comptime in_list: bool, comptime m: decl_docs.Meta) Allocator.Error!void {
+    pub fn walk(c: *Checker, comptime T: type, v: T, comptime path: []const u8, comptime in_list: bool, comptime m: decl_docs.Meta) Allocator.Error!void {
         const verb = if (in_list) "has" else "is";
+        if (T == decl.SyscallRule and !decl.isSyscall(v.name)) {
+            // Said without the name when it holds a NUL, which would cut
+            // the message short.
+            if (hasNul(v.name))
+                return c.say("flong.{s}.{s} has a name with a NUL byte in it, which no system call has.", .{ c.n, path });
+            return c.say("flong.{s}.{s} has \"{s}\", which is not a system call on {s}: name each call as the kernel does, and a group in seccomp.allow or seccomp.deny.", .{ c.n, path, v.name, @tagName(builtin.cpu.arch) });
+        }
         if (T == decl.Command) {
             if (v.len == 0) try c.say("flong.{s}.{s} {s} an empty command, which names no program to run.", .{ c.n, path, verb });
             for (v) |word| if (hasNul(word))
@@ -346,6 +404,7 @@ const Checker = struct {
         var what: std.ArrayList([]const u8) = .empty;
         if (s.allow.len != 0) try what.append(c.arena, "seccomp.allow");
         if (s.deny.len != 0) try what.append(c.arena, "seccomp.deny");
+        if (s.syscalls.len != 0) try what.append(c.arena, "seccomp.syscalls");
         if (s.log) try what.append(c.arena, "seccomp.log");
         if (c.d.seccompPolicy.len != 0) try what.append(c.arena, "seccompPolicy");
         if (what.items.len == 0) return;
@@ -702,6 +761,10 @@ fn atomMatches(atom: []const u8, ch: u8) bool {
 
 const testing = std.testing;
 
+test {
+    _ = layer;
+}
+
 test "matches: decl.zig's patterns, whole strings only" {
     try testing.expect(matches("/.*", "/"));
     try testing.expect(matches("/.*", "/a/b"));
@@ -912,6 +975,21 @@ test "the container's environment: names, the launch's own, and nothing for a sh
     };
     try testing.expectEqual(want.len, r.len);
     for (want, r) |w, got| try testing.expect(std.mem.startsWith(u8, got, w));
+}
+
+test "seccomp.syscalls names calls of this architecture, by the kernel's names" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const ok = try refusalsOf(a, ", \"seccomp\": { \"syscalls\": { \"ptrace\": \"deny\", \"newfstatat\": \"log\", \"io_uring_setup\": \"allow\" } }\n");
+    try testing.expectEqual(0, ok.len);
+    const r = try refusalsOf(a, ", \"seccomp\": { \"tier\": null, \"syscalls\": { \"fstatat64\": \"allow\", \"@keyring\": \"deny\", \"a\\u0000b\": \"log\" } }\n");
+    try testing.expectEqual(4, r.len);
+    const arch = @tagName(builtin.cpu.arch);
+    try testing.expectEqualStrings(try std.fmt.allocPrint(a, "flong.agent.seccomp.syscalls has \"fstatat64\", which is not a system call on {s}: name each call as the kernel does, and a group in seccomp.allow or seccomp.deny.", .{arch}), r[0]);
+    try testing.expect(std.mem.indexOf(u8, r[1], "has \"@keyring\", which is not a system call") != null);
+    try testing.expectEqualStrings("flong.agent.seccomp.syscalls has a name with a NUL byte in it, which no system call has.", r[2]);
+    try testing.expect(std.mem.indexOf(u8, r[3], "sets seccomp.tier = null and seccomp.syscalls,") != null);
 }
 
 test "the ranges decl.zig declares" {

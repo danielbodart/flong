@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/layer-not-an-object.json: a layer is a JSON object of the declaration's fields, not an array

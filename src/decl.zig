@@ -39,6 +39,7 @@
 const std = @import("std");
 const fd = @import("fd");
 const msg = @import("msg");
+const syscalls = @import("syscalls.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -556,7 +557,51 @@ pub const Declaration = struct {
     /// The strings that must match a pattern (Nix's `strMatching`), by
     /// field; a list's pattern is its elements'.
     pub const patterns = .{ .masks = "/.*", .protect = "/.*" };
+
+    /// Who may set a field (`Scope`), by field, where it is not
+    /// `project`: every computed field is `host` besides.
+    pub const scopes = .{
+        .user = .host,
+        .command = .host,
+        .exec = .host,
+        .workspace = .host,
+        .binds = .host,
+        .guard = .host,
+        .postStart = .host,
+        .postStop = .host,
+        .overlays = .host,
+        .masks = .host,
+        .protect = .host,
+        .seccompPolicy = .host,
+    };
 };
+
+/// Who may set a field in a layer merged over the declaration
+/// (`flong check --layer project`, the schema's `x-scope`): `project`,
+/// anyone; `host`, only the host's own configuration, never a project's
+/// file; `tighten`, a project only to a value at least as strict as the
+/// one beneath it (`seccomp.tier`: `strict` over `parity` over none).
+/// What a host field holds is the host's too.
+pub const Scope = enum { project, host, tighten };
+
+/// The scope of `T`'s field `name`, from `T.scopes`, a computed field
+/// of `Declaration` being `host`.
+pub fn scopeOf(comptime T: type, comptime name: []const u8) Scope {
+    if (T == Declaration) for (Declaration.computed) |c| {
+        if (std.mem.eql(u8, c, name)) return .host;
+    };
+    if (@hasDecl(T, "scopes") and @hasField(@TypeOf(T.scopes), name)) return @field(T.scopes, name);
+    return .project;
+}
+
+/// How strict a tier is, for `Scope.tighten`: no allow-list at all, then
+/// `parity`, then `strict`.
+pub fn tierRank(t: ?Tier) u2 {
+    return if (t) |x| switch (x) {
+        .parity => 1,
+        .strict => 2,
+    } else 0;
+}
 
 /// `network`: pasta's ports.
 pub const Network = struct {
@@ -620,6 +665,7 @@ pub const Network = struct {
     hostPorts: []const u16 = &.{},
 
     pub const patterns = .{ .forwardAddress = "[0-9A-Fa-f.:]+", .forwardInterface = "[A-Za-z0-9._-]+" };
+    pub const scopes = .{ .forwardAddress = .host, .forwardInterface = .host, .hostLoopbackToSession = .host };
 };
 
 /// The longest interface name Linux has: IFNAMSIZ less its NUL.
@@ -787,12 +833,36 @@ pub const Seccomp = struct {
     /// together. The entrypoint still cannot reach the container's
     /// network namespace.
     nestedSandbox: bool = false,
-    /// Syscall names or `@groups` added to the profile.
+    /// Syscall names or `@groups` added to the profile. A name is better
+    /// said in `syscalls`, which overrides this; the list is kept for a
+    /// release, and for `@groups`.
     allow: []const []const u8 = &.{},
     /// Syscall names or `@groups` removed, after the profile, the
-    /// loosenings and `allow`, which it overrides. A project's
-    /// `seccompPolicy` lines come after it and override it in turn.
+    /// loosenings and `allow`, which it overrides. `syscalls` overrides
+    /// it in turn, and a project's `seccompPolicy` lines override all of
+    /// them. A name is better said in `syscalls`; the list is kept for a
+    /// release, and for `@groups`.
     deny: []const []const u8 = &.{},
+    /// One entry a system call, by its name on this machine's
+    /// architecture, saying what the filter does with it: `"allow"` adds
+    /// it to the profile, `"deny"` removes it, so it gets `errno`, and
+    /// `"log"` lets it through and has the kernel log it, as `log` does
+    /// for every call. A name the architecture has no call by is
+    /// refused by `flong check`, and one systemd's lists lack by the
+    /// build.
+    ///
+    /// It is applied last, after the tier, `debug`, `nestedSandbox`,
+    /// `allow` and `deny`, so a call named here is what it says whatever
+    /// they say of it, a `@group` of theirs included: `"ptrace": "deny"`
+    /// refuses ptrace under `debug`, and `"ptrace": "allow"` allows it
+    /// though `deny` has `@debug`. A project's `seccompPolicy` lines come
+    /// after it, and override it as they override the rest: a project's
+    /// `allow`, or its `nolog`, takes a `"log"` call back.
+    ///
+    /// A map rather than lists, so a layer merged over the declaration
+    /// as a JSON Merge Patch (RFC 7396) adds, changes or, with `null`,
+    /// removes one call's entry without restating the others.
+    syscalls: []const SyscallRule = &.{},
     /// What a call in `@known` that the filter does not allow
     /// returns. ENOSYS makes a program fall back as it would on
     /// an older kernel.
@@ -809,7 +879,28 @@ pub const Seccomp = struct {
     /// syscall-filter` lists them. The build refuses one it does not
     /// list.
     pub const patterns = .{ .allow = "@?[a-z0-9_-]+", .deny = "@?[a-z0-9_-]+" };
+    pub const scopes = .{ .tier = .tighten, .nestedSandbox = .host, .errno = .host };
 };
+
+/// One of `seccomp.syscalls`: Nix's `{ name = action; }`, an attribute set,
+/// read from a JSON object into a list of pairs in its order.
+pub const SyscallRule = struct {
+    /// The system call's name, as this architecture's kernel spells it.
+    name: []const u8,
+    /// What the filter does with it.
+    action: SyscallAction,
+
+    pub const attrs = .{ .name = "name", .value = "action" };
+};
+
+/// What `seccomp.syscalls` says of one call.
+pub const SyscallAction = enum { allow, deny, log };
+
+/// Whether `name` is a system call of the architecture flong is built
+/// for, as its kernel names one: what `seccomp.syscalls` takes.
+pub fn isSyscall(name: []const u8) bool {
+    return syscalls.known(name);
+}
 
 pub const Tier = enum { parity, strict };
 pub const Errno = enum { EPERM, EACCES, ENOSYS };
@@ -865,6 +956,10 @@ pub const SeccompProject = struct {
     /// number (`1`, `13` or `38`, for `seccomp.errno`), or `log` for
     /// `seccomp.log`.
     deny: []const u8,
+    /// The file of the calls `seccomp.syscalls` logs, one a line, sorted,
+    /// or null for none. The project's lines start from them as from
+    /// their own `log` lines: an `allow`, or a `nolog`, takes one back.
+    logged: ?[]const u8 = null,
 };
 
 /// The largest declaration `load` reads. A rendered one is a few
@@ -918,6 +1013,24 @@ pub fn parse(arena: Allocator, source: []const u8, diag: ?*Diag) Error!Declarati
     const end = try p.peek();
     if (end.type != .end_of_document) return p.fail(end.at, null, "more after the declaration's closing '}}'", .{});
     return d;
+}
+
+/// Parses JSON `source` as one value of `T`, as `parse` reads a field of
+/// that type, for a field of a layer judged on its own (check.zig's
+/// `--layer`).
+pub fn parseAs(arena: Allocator, comptime T: type, source: []const u8, diag: ?*Diag) Error!T {
+    var p: Parser = .{
+        .arena = arena,
+        .scanner = std.json.Scanner.initCompleteInput(arena, source),
+        .source = source,
+    };
+    errdefer if (diag) |d| {
+        d.* = p.diag;
+    };
+    const v = try p.value(T, false);
+    const end = try p.peek();
+    if (end.type != .end_of_document) return p.fail(end.at, null, "more after the value", .{});
+    return v;
 }
 
 /// The JSON reader `parse` drives: a token at a time from std.json's
@@ -1068,8 +1181,9 @@ const Parser = struct {
         return r;
     }
 
-    /// pathAttrs: an object, each name a `T`'s `attrs.name` and its value
-    /// the `attrs.value`, in the object's order. A name given twice is
+    /// An attribute set (pathAttrs, `Overlay`; `SyscallRule`): an object,
+    /// each name a `T`'s `attrs.name` and its value the `attrs.value`, of
+    /// that field's type, in the object's order. A name given twice is
     /// refused, as a field is.
     fn attrs(p: *Parser, comptime T: type, t: Peeked, comptime wrong: []const u8) Error![]const T {
         if (t.type != .object_begin) return p.fail(t.at, null, wrong, .{});
@@ -1085,7 +1199,7 @@ const Parser = struct {
             }
             var x: T = undefined;
             @field(x, T.attrs.name) = name;
-            @field(x, T.attrs.value) = try p.value([]const u8, false);
+            @field(x, T.attrs.value) = try p.value(@FieldType(T, T.attrs.value), false);
             try list.append(p.arena, x);
         }
         _ = try p.next();
@@ -1241,7 +1355,7 @@ pub fn load(arena: Allocator, path: [:0]const u8) (msg.Error || error{OutOfMemor
 
 /// `path`'s bytes, refused past `max_bytes`: read in pieces, so a file
 /// that never ends (a FIFO, /dev/zero) costs a MiB and not the memory.
-fn readBounded(arena: Allocator, path: [:0]const u8) (msg.Error || error{OutOfMemory})![]const u8 {
+pub fn readBounded(arena: Allocator, path: [:0]const u8) (msg.Error || error{OutOfMemory})![]const u8 {
     const f = try msg.check(fd.openFile(fd.cwd, path, .{}, 0), "{s}", .{path});
     defer f.close();
     var buf: std.ArrayList(u8) = .empty;
@@ -1315,6 +1429,7 @@ const full =
     \\    "nestedSandbox": true,
     \\    "allow": ["@keyring", "userfaultfd"],
     \\    "deny": ["@swap"],
+    \\    "syscalls": { "ptrace": "deny", "io_uring_setup": "log", "userfaultfd": "allow" },
     \\    "errno": "ENOSYS",
     \\    "log": true
     \\  },
@@ -1339,7 +1454,8 @@ const full =
     \\  "seccompProject": {
     \\    "dump": "/nix/store/x-flong-seccomp-groups",
     \\    "names": "/nix/store/x-flong-seccomp-names",
-    \\    "deny": "log"
+    \\    "deny": "log",
+    \\    "logged": "/nix/store/x-flong-seccomp-logged"
     \\  }
     \\}
 ;
@@ -1408,6 +1524,10 @@ test "a full declaration parses, every field as written" {
     try testing.expect(d.seccomp.debug and d.seccomp.nestedSandbox and d.seccomp.log);
     try testing.expectEqualStrings("userfaultfd", d.seccomp.allow[1]);
     try testing.expectEqualStrings("@swap", d.seccomp.deny[0]);
+    try testing.expectEqual(3, d.seccomp.syscalls.len);
+    try testing.expectEqualStrings("io_uring_setup", d.seccomp.syscalls[1].name);
+    try testing.expectEqual(.log, d.seccomp.syscalls[1].action);
+    try testing.expectEqual(.allow, d.seccomp.syscalls[2].action);
     try testing.expectEqual(.ENOSYS, d.seccomp.errno);
     try testing.expectEqualStrings("approve", d.seccompPolicy[0][1]);
 
@@ -1423,6 +1543,7 @@ test "a full declaration parses, every field as written" {
     try testing.expectEqualStrings("PATH", d.environment[0].name);
     try testing.expectEqualStrings("en_US.UTF-8", d.environment[1].value);
     try testing.expectEqualStrings("log", d.seccompProject.?.deny);
+    try testing.expectEqualStrings("/nix/store/x-flong-seccomp-logged", d.seccompProject.?.logged.?);
 }
 
 test "a minimal declaration takes module.nix's defaults" {
@@ -1444,7 +1565,7 @@ test "a minimal declaration takes module.nix's defaults" {
     try testing.expectEqual(.strict, d.seccomp.tier.?);
     try testing.expectEqual(.EPERM, d.seccomp.errno);
     try testing.expect(!d.seccomp.debug and !d.seccomp.nestedSandbox and !d.seccomp.log);
-    try testing.expectEqual(0, d.seccomp.allow.len + d.seccomp.deny.len);
+    try testing.expectEqual(0, d.seccomp.allow.len + d.seccomp.deny.len + d.seccomp.syscalls.len);
 
     // `network = { };` is a network with no ports, and forwardPorts'
     // default is the empty list, not "auto".
@@ -1517,6 +1638,8 @@ test "a field given twice is refused at its second" {
     try testing.expectEqualStrings("field \"user\" given twice", r.text);
     const o = try refusal(a, minimalWith(",\n  \"overlays\": { \"/a\": \"/b\", \"/a\": \"/c\" }"));
     try testing.expectEqualStrings("\"/a\" given twice", o.text);
+    const c = try refusal(a, minimalWith(",\n  \"seccomp\": { \"syscalls\": { \"ptrace\": \"allow\", \"ptrace\": \"deny\" } }"));
+    try testing.expectEqualStrings("\"ptrace\" given twice", c.text);
 }
 
 test "a wrong type is refused at its value" {
@@ -1539,6 +1662,9 @@ test "a wrong type is refused at its value" {
         .{ "\"limits\": { \"CPUWeight\": \"50\" }", "expected an integer, or null" },
         .{ "\"network\": { \"hostPorts\": [-1] }", "expected an integer from 0 to 65535, found -1" },
         .{ "\"overlays\": [{ \"target\": \"/a\", \"lower\": \"/b\" }]", "expected an object" },
+        .{ "\"seccomp\": { \"syscalls\": [\"ptrace\"] }", "expected an object" },
+        .{ "\"seccomp\": { \"syscalls\": { \"ptrace\": \"permit\" } }", "unexpected value \"permit\"" },
+        .{ "\"seccomp\": { \"syscalls\": { \"ptrace\": null } }", "expected a string" },
         .{ "\"containerMounts\": [{ \"kind\": \"overlay\", \"dest\": \"/x\" }]", "unexpected value \"overlay\"" },
         .{ "\"exec\": \"hello\"", "expected an array, or null" },
     }) |c| {

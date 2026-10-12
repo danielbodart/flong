@@ -1,0 +1,6 @@
+flong check: @GOLDEN@/decl/layer-values-of-the-wrong-type.json: seccomp.tier: unexpected value "lax" (supported: "parity", "strict")
+flong check: @GOLDEN@/decl/layer-values-of-the-wrong-type.json: seccomp.syscalls: unexpected value "maybe" (supported: "allow", "deny", "log")
+flong check: @GOLDEN@/decl/layer-values-of-the-wrong-type.json: seccomp.allow: expected an array
+flong check: @GOLDEN@/decl/layer-values-of-the-wrong-type.json: limits.CPUWeight: expected an integer, or null
+flong check: @GOLDEN@/decl/layer-values-of-the-wrong-type.json: network: expected an object, or null
+flong check: @GOLDEN@/decl/layer-values-of-the-wrong-type.json: "colour" is not a field of the declaration

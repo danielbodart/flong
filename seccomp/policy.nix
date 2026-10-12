@@ -40,7 +40,11 @@ let
   };
 
   # A declaration's names: its tier, then its loosenings and allow entries,
-  # then its deny entries, which win over all of them.
+  # then its deny entries, which win over all of them; then its syscalls
+  # map, which wins over everything before it, call by call. The expander
+  # takes the adds less the subtractions whatever their order, so the map
+  # is a second expansion over the first's names: an "allow" added back
+  # whatever deny took, a "deny" or "log" taken out whatever added it.
   namesFor =
     s:
     let
@@ -49,14 +53,37 @@ let
         ++ lib.optional s.nestedSandbox "@mount"
         ++ s.allow
         ++ map (x: "-${x}") s.deny;
+      listed =
+        if extras == [ ] then
+          tierNames.${s.tier}
+        else
+          expand [
+            tierNames.${s.tier}
+            (writeText "flong-seccomp-extra" (lib.concatLines extras))
+          ];
+      calls = s.syscalls or { };
+      mapped = lib.mapAttrsToList (n: a: if a == "allow" then n else "-${n}") calls;
     in
-    if extras == [ ] then
-      tierNames.${s.tier}
+    if calls == { } then
+      listed
     else
       expand [
-        tierNames.${s.tier}
-        (writeText "flong-seccomp-extra" (lib.concatLines extras))
+        listed
+        (writeText "flong-seccomp-calls" (lib.concatLines mapped))
       ];
+
+  # The calls a declaration's syscalls map logs, expanded and so sorted
+  # and checked, or null when it logs none: what render and project log in
+  # place of the errno.
+  loggedFor =
+    s:
+    let
+      logged = lib.attrNames (lib.filterAttrs (_: a: a == "log") (s.syscalls or { }));
+    in
+    if logged == [ ] then
+      null
+    else
+      expand [ (writeText "flong-seccomp-logged" (lib.concatLines logged)) ];
 
   # What a @known call outside the names gets: an errno, or `log`.
   deny =
@@ -72,7 +99,7 @@ let
       .${s.errno};
 
   # A declaration's tier filter, or null when it has no tier. `flong-seccomp
-  # render DUMP NAMES DENY` prints its policy: the names allowed, the rest
+  # render DUMP NAMES DENY [LOGGED]` prints its policy: the names allowed, the rest
   # of the dump's @known refused with DENY or logged, and everything else
   # ENOSYS (src/seccomp/render.zig). The same code renders at build time and,
   # in `project`, at launch, so both compile the same text.
@@ -81,9 +108,14 @@ let
     if s.tier == null then
       null
     else
+      let
+        logged = loggedFor s;
+      in
       runCommand "flong-seccomp.bpf" { } ''
         set -o pipefail
-        ${compiler}/bin/flong-seccomp render ${dump} ${namesFor s} ${deny s} |
+        ${compiler}/bin/flong-seccomp render ${dump} ${namesFor s} ${deny s} ${
+          lib.optionalString (logged != null) "${logged}"
+        } |
           ${compiler}/bin/flong-seccomp > $out
       '';
 
@@ -97,8 +129,9 @@ let
   );
 
   # A project's policy is compiled at launch by `flong-seccomp project DUMP
-  # NAMES DENY DIR < POLICY` (src/seccomp/project.zig), which module.nix
-  # hands the launch with this dump, the declaration's names and its deny.
+  # NAMES DENY DIR [LOGGED] < POLICY` (src/seccomp/project.zig), which
+  # module.nix hands the launch with this dump, the declaration's names, its
+  # deny and its logged.
 in
 {
   inherit
@@ -106,6 +139,7 @@ in
     expand
     tierNames
     namesFor
+    loggedFor
     deny
     filterFor
     fixed

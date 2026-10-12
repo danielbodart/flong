@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/layer-a-network-where-there-is-none.json: network is given where the base has none, and a project's layer cannot add one: whether a container has a network, and its network.forwardAddress, network.forwardInterface, network.hostLoopbackToSession, are the host's to set

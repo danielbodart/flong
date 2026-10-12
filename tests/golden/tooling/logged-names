@@ -1,0 +1,4 @@
+io_uring_setup
+ptrace
+read
+not_a_call

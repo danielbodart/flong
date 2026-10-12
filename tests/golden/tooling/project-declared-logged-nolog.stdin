@@ -1,0 +1,2 @@
+nolog io_uring_setup
+log kcmp

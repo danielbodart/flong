@@ -1,0 +1,5 @@
+-layer
+project
+-base
+@GOLDEN@/decl/minimal.json
+@GOLDEN@/decl/layer-merged-and-refused.json

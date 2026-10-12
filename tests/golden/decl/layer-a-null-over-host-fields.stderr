@@ -1,0 +1,2 @@
+flong check: @GOLDEN@/decl/layer-a-null-over-host-fields.json: seccomp: null would remove seccomp.nestedSandbox, seccomp.errno with it, which are the host's to set
+flong check: @GOLDEN@/decl/layer-a-null-over-host-fields.json: network: null would remove network.forwardAddress, network.forwardInterface, network.hostLoopbackToSession with it, which are the host's to set

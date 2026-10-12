@@ -323,6 +323,8 @@ let
           ./src/decl.zig
           ./src/decl_docs.zig
           ./src/check.zig
+          ./src/layer.zig
+          ./src/syscalls.zig
           ./build/gen_decl_docs.zig
           ./src/fixtures
           ./tests/zig/abi.zig

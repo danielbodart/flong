@@ -4,6 +4,7 @@ usage: flong launch DECL.json [-- ARGUMENT...]
        NAME [ARGUMENT...]
        flong list
        flong check DECL.json
+       flong check --layer project [--base DECL.json] LAYER.json
        flong schema
        flong help [decl [--markdown]]
        flong version

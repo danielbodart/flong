@@ -1,0 +1,2 @@
+base none
+allow read write exit_group

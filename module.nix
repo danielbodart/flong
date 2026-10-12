@@ -413,6 +413,7 @@ let
         dump = "${seccomp.dump}";
         names = "${seccomp.namesFor s}";
         deny = seccomp.deny s;
+        logged = let l = seccomp.loggedFor s; in if l == null then null else "${l}";
       };
     };
 
@@ -439,7 +440,7 @@ let
       # A path as its string: toJSON would copy a path into the store.
       overlays = lib.mapAttrs (_: toString) c.overlays;
       limits = { inherit (c.limits) MemoryMax MemoryHigh MemorySwapMax TasksMax CPUQuota CPUWeight oomGroup; };
-      seccomp = { inherit (c.seccomp) tier debug nestedSandbox allow deny errno log; };
+      seccomp = { inherit (c.seccomp) tier debug nestedSandbox allow deny syscalls errno log; };
 
       # Computed.
       inherit (c) container;
@@ -725,7 +726,17 @@ let
     ++ lib.optional c.seccomp.log ''
       flong.${n} has seccomp.log = true, so it logs rather than refuses calls
       outside its tier: for learning a policy, not for untrusted payloads.
-    '';
+    ''
+    # A call by name is the syscalls map's now, one entry a call, which a
+    # layer can change alone; the lists keep their groups, and their names
+    # for a release.
+    ++ (let
+      named = lib.filter (x: ! lib.hasPrefix "@" x) (c.seccomp.allow ++ c.seccomp.deny);
+    in lib.optional (named != [ ]) ''
+      flong.${n} names calls in seccomp.allow or seccomp.deny (${lib.concatStringsSep ", " named}),
+      which seccomp.syscalls says call by call ("ptrace" = "allow"): the
+      lists' names go after this release, and their @groups stay.
+    '');
 
   # THE HOLDER: one user unit per caller, whose cgroup every session of
   # theirs lives under, delegated so the launcher can make a session's
@@ -849,6 +860,7 @@ let
         seccomp = { tier = "strict"; debug = true; };
         "seccomp.allow" = [ "@keyring" "userfaultfd" ];
         "seccomp.deny" = [ "@swap" ];
+        "seccomp.syscalls" = { io_uring_setup = "allow"; ptrace = "deny"; userfaultfd = "log"; };
       };
     }
     (builtins.fromJSON (builtins.readFile ./decl-options.json));

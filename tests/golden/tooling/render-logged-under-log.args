@@ -1,0 +1,5 @@
+render
+@DUMP@
+@GOLDEN@/tooling/expand-strict.stdout
+log
+@GOLDEN@/tooling/logged-names

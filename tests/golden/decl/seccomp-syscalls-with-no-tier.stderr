@@ -1,0 +1,1 @@
+flong check: @GOLDEN@/decl/seccomp-syscalls-with-no-tier.json: flong.box sets seccomp.tier = null and seccomp.syscalls, which change a tier's allow-list. With no tier there is no filter for them to act on. Set a tier, or drop them.
