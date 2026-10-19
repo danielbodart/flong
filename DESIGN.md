@@ -926,7 +926,12 @@ a range to `127.0.0.1/...`) changes that, and `auto:TOADDR` does not parse.
 set, `auto` alone the set of every port outside the host's ephemeral range
 (`net.ipv4.ip_local_port_range`, 32768 and up by default): a listener inside
 on 38123 is not published, where 2025_09's `auto` published it. Exclusions
-(`auto,~P`) now parse too.
+(`auto,~P`) now parse too, and flong uses one: `auto` is given as
+`auto,~1-N`, N one below the host's `net.ipv4.ip_unprivileged_port_start`
+as read at launch. pasta binds as the caller and can publish none of those,
+and `auto` alone retries each one a listener inside holds every second,
+logging `Listen failed ... Permission denied` each time (measured): frisket's
+steering listener, on 230, would log so in every session.
 
 ### DNS
 

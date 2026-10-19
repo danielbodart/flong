@@ -531,7 +531,7 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
         const fp = n.forwardPorts;
         const at = try bindPrefix(gpa, forwardBind(n, f.exec));
         try l.pasta_args.append(gpa, "-t");
-        try l.pasta_args.append(gpa, try bound(gpa, at, if (fp == .auto) "auto" else try portList(gpa, fp.ports, .tcp)));
+        try l.pasta_args.append(gpa, try bound(gpa, at, if (fp == .auto) try autoAbove(gpa, readOrEmpty(gpa, "/proc/sys/net/ipv4/ip_unprivileged_port_start")) else try portList(gpa, fp.ports, .tcp)));
         try l.pasta_args.append(gpa, "-u");
         try l.pasta_args.append(gpa, try bound(gpa, at, if (fp == .auto) "none" else try portList(gpa, fp.ports, .udp)));
         const host = try hostPorts(gpa, n.hostPorts);
@@ -814,6 +814,17 @@ fn bound(gpa: Allocator, at: []const u8, class: [:0]const u8) Allocator.Error![:
     return std.mem.concatWithSentinel(gpa, u8, &.{ at, class }, 0);
 }
 
+/// `auto`, less the ports below the host's unprivileged floor, the sysctl's
+/// text as read: pasta binds as the caller, so it can publish none of
+/// them, and `auto` alone retries each one a listener inside holds every
+/// second, logging the refusal each time (measured, pasta 2026_07_16).
+/// A floor of 0 or 1, or one that does not parse, excludes nothing.
+fn autoAbove(gpa: Allocator, floor_text: []const u8) Allocator.Error![:0]const u8 {
+    const floor = std.fmt.parseInt(u16, std.mem.trim(u8, floor_text, " \n"), 10) catch return "auto";
+    if (floor <= 1) return "auto";
+    return std.fmt.allocPrintSentinel(gpa, "auto,~1-{d}", .{floor - 1}, 0);
+}
+
 fn hostPorts(gpa: Allocator, ports: []const u16) Allocator.Error![:0]const u8 {
     if (ports.len == 0) return "none";
     var out: std.ArrayList(u8) = .empty;
@@ -1007,6 +1018,13 @@ test "forwardBind: exec's forward: replaces the declaration's address and interf
     try testing.expectEqualStrings("auto", try bound(a, "", "auto"));
     try testing.expectEqualStrings("127.9.9.9/auto", try bound(a, "127.9.9.9/", "auto"));
     try testing.expectEqualStrings("none", try bound(a, "127.9.9.9/", "none"));
+    // `auto` above the unprivileged floor, as /proc/sys gives it.
+    try testing.expectEqualStrings("auto,~1-1023", try autoAbove(a, "1024\n"));
+    try testing.expectEqualStrings("auto,~1-79", try autoAbove(a, "80"));
+    try testing.expectEqualStrings("auto", try autoAbove(a, "0\n"));
+    try testing.expectEqualStrings("auto", try autoAbove(a, "1"));
+    try testing.expectEqualStrings("auto", try autoAbove(a, ""));
+    try testing.expectEqualStrings("127.9.9.9/auto,~1-1023", try bound(a, "127.9.9.9/", try autoAbove(a, "1024\n")));
     try testing.expectEqualStrings("::1%lo/8080:80,18200:18200", try bound(a, "::1%lo/", "8080:80,18200:18200"));
 
     // splitBind: at the first %, an empty part none.

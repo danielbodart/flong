@@ -397,7 +397,9 @@ browser. A port another container already publishes at the same
 address is not, and that container is not ended for it. Nor is a
 port in the host's ephemeral range,
 `net.ipv4.ip_local_port_range`, 32768 and up by default: pasta
-forwards only the ports outside it.
+forwards only the ports outside it. Nor one below the host's
+`net.ipv4.ip_unprivileged_port_start`, which pasta could not
+bind: flong leaves those out of `auto`.
 
 ### `network.forwardPorts.*.protocol`
 
