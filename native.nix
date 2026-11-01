@@ -13,7 +13,11 @@
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:10-19
 # does, since zig_0_15 is that nixpkgs' (DESIGN.md, "Why Zig, and what it cost").
 # passt defaults to the locked nixpkgs-unstable's whatever pkgs is
-# (nix/passt.nix), as module.nix's does.
+# (nix/passt.nix), as module.nix's does. version names the two sets that
+# ship, launcher and seccomp: the flake's packages and nixosModules pass
+# 0-unstable-<commit date>, nixpkgs' name for a build from a commit; the
+# checks and a path import keep "0", so their store paths stay put across
+# commits that change nothing they build.
 {
   pkgs ?
     let
@@ -24,6 +28,7 @@
       sha256 = locked.narHash;
     }) { },
   passt ? import ./nix/passt.nix { inherit (pkgs.stdenv.hostPlatform) system; },
+  version ? "0",
 }:
 let
   inherit (pkgs) lib;
@@ -100,8 +105,8 @@ let
   # Every dependency in build.zig.zon, lazy ones included (fetchAll; its
   # default false fetches none, fetcher.nix:7-12, 37), as a fixed-output
   # derivation over build.zig and build.zig.zon alone. On a build.zig.zon
-  # change: hash = lib.fakeHash, build .#checks.x86_64-linux.native-test-debug,
-  # copy `got:`, rebuild.
+  # change, scripts/zig-deps.sh (the weekly update's) works `deps`' hash out
+  # again: a fake hash, `nix build -f native.nix deps`, Nix's `got:`.
   zigDeps =
     {
       pname,
@@ -139,6 +144,7 @@ let
   # which it turns into a library path and an rpath (NativePaths.zig:17-72).
   seccomp = zigSet {
     pname = "flong-seccomp";
+    inherit version;
     set = "seccomp";
     flags = "-Dself=$out";
     buildInputs = [ pkgs.libseccomp ];
@@ -204,6 +210,7 @@ let
   # printed, never gated (DESIGN.md, "What the port measured": binaries).
   launcher = zigSet {
     pname = "flong-launcher";
+    inherit version;
     set = "launcher";
     flags = "-Dtini=${pkgs.tini}/bin/tini -Dbwrap=${bwrap} -Dpasta=${pasta} -Dnewuidmap=${newuidmap} -Dnewgidmap=${newgidmap} -Dcache=${cacheTool} -Dseccomp=${seccompTool} -Dself=$out/bin/flong";
     files = [

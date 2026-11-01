@@ -17,5 +17,7 @@
       sha256 = locked.narHash;
     }) { },
   passt ? import ../nix/passt.nix { inherit (pkgs.stdenv.hostPlatform) system; },
+  # native.nix says which version is whose.
+  version ? "0",
 }:
-(import ../native.nix { inherit pkgs passt; }).launcher
+(import ../native.nix { inherit pkgs passt version; }).launcher

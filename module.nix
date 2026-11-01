@@ -242,7 +242,13 @@ let
   # from this nixpkgs, so its bubblewrap is the host's, but for pasta, which
   # is the flake's locked nixpkgs-unstable' (nix/passt.nix says why).
   lockedPasst = import ./nix/passt.nix { inherit (pkgs.stdenv.hostPlatform) system; };
-  flongLauncher = import ./launcher { inherit pkgs; passt = lockedPasst; };
+  flongLauncher = import ./launcher { inherit pkgs version; passt = lockedPasst; };
+
+  # The launcher's and flong-seccomp's version: 0-unstable-<commit date>
+  # from the flake's nixosModules, which knows the commit, as its packages
+  # are; "0" when this file is imported by path, as the checks do
+  # (native.nix says why).
+  version = config._module.args.flongVersion or "0";
 
   # A path as flong spells it to compare it (src/check.zig's norm, which
   # flong check and the launch's prologue use): /var/run is /run, and
@@ -380,7 +386,7 @@ let
   # compiler compiles a project's policy at launch (`flong-seccomp project`).
   # A filter's store path is named by its content, so declarations with
   # equal policies share it.
-  seccompCompiler = import ./seccomp { inherit pkgs; };
+  seccompCompiler = import ./seccomp { inherit pkgs version; };
   seccomp = import ./seccomp/policy.nix {
     inherit pkgs lib;
     systemd = config.systemd.package;

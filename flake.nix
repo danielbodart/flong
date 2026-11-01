@@ -13,9 +13,23 @@
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
+
+      # nixpkgs' version for a build from a commit, 0-unstable-YYYY-MM-DD,
+      # from the commit's date: it never claims to be a release (those are
+      # the tags, 0.<commits>.<build>), and a `github:` ref has it as a
+      # `git+https:` one does. The packages and the module's launcher carry
+      # it; the checks build "0" (native.nix says why).
+      date = self.lastModifiedDate;
+      version = "0-unstable-${builtins.substring 0 4 date}-${builtins.substring 4 2 date}-${builtins.substring 6 2 date}";
     in
     {
-      nixosModules.flong = ./module.nix;
+      # module.nix, handed the version through _module.args. The key makes
+      # two imports of it one, as module.nix's own path does.
+      nixosModules.flong = {
+        key = "github:danielbodart/flong#nixosModules.flong";
+        imports = [ ./module.nix ];
+        _module.args.flongVersion = version;
+      };
       nixosModules.default = self.nixosModules.flong;
 
       checks = forAllSystems (system:
@@ -123,7 +137,7 @@
       packages = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system}; in
         {
-          default = import ./launcher { inherit pkgs; };
+          default = import ./launcher { inherit pkgs version; };
 
           bench = pkgs.testers.runNixOSTest {
             imports = [ ./tests/bench.nix ];
@@ -133,7 +147,7 @@
           # caller that names syscalls by number: `flong-seccomp resolve
           # ARCH NR` turns a `log` rule's audit record (type=1326,
           # `arch=` and `syscall=`) into a name a policy can say.
-          seccomp = import ./seccomp { inherit pkgs; };
+          seccomp = import ./seccomp { inherit pkgs version; };
         });
 
       # golden-update rewrites tests/golden's .bpf files and LIBSECCOMP

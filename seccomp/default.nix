@@ -13,5 +13,7 @@
       url = "https://github.com/${locked.owner}/${locked.repo}/archive/${locked.rev}.tar.gz";
       sha256 = locked.narHash;
     }) { },
+  # native.nix says which version is whose.
+  version ? "0",
 }:
-(import ../native.nix { inherit pkgs; }).seccomp
+(import ../native.nix { inherit pkgs version; }).seccomp
