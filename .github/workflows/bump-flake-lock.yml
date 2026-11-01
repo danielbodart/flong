@@ -5,15 +5,19 @@
 # nixpkgs closure rather than several, already in the danielbodart cache
 # when nix-config asks for it.
 #
-# The new lock is checked as CI checks it, every check built and the other
-# outputs evaluated, before anything is committed: a bump that breaks the
-# build fails here and trunk keeps the lock it had. On one runner rather
-# than a leg per check, so slower, but nobody is waiting on it. Only
+# The new lock is checked as CI checks it before anything is committed: a
+# leg per check, each on a runner of its own, and the other outputs
+# evaluated. A bump that breaks the build fails here and trunk keeps the
+# lock it had. A leg each, as CI has, and not every check on one runner:
+# there the VM tests shared four vCPUs, and native's swap race, whose
+# control needs the swapper to keep pace with the walker, saw no escape
+# (run 41314788857). The lock goes from job to job as an output. Only
 # flake.lock is committed, named by the inputs that moved.
 #
 # A push made with GITHUB_TOKEN starts no workflow, so CI would neither
 # check nor release the bumped commit. The last step dispatches CI on trunk
-# with `release`, which publishes once its check passes, as a push does.
+# with `release`, which publishes once its check passes, as a push does,
+# and pushes flong's own outputs to Cachix by its allow-list.
 name: Bump flake.lock
 
 on:
@@ -30,8 +34,12 @@ concurrency:
   group: flake-lock
 
 jobs:
-  bump:
+  update:
     runs-on: ubuntu-latest
+    outputs:
+      moved: ${{ steps.update.outputs.moved }}
+      lock: ${{ steps.update.outputs.lock }}
+      checks: ${{ steps.update.outputs.checks }}
     steps:
       - uses: actions/checkout@v7
 
@@ -41,8 +49,43 @@ jobs:
             experimental-features = nix-command flakes
             system-features = nixos-test benchmark big-parallel kvm
 
-      # Read only: the action would push every path the build made, the VM
-      # tests' NixOS closures among them, and the free tier is 5 GB. CI,
+      - name: Update every input
+        id: update
+        run: |
+          nix flake update 2>&1 | tee update.log
+          git diff --quiet flake.lock && { echo "Nothing moved."; exit 0; }
+          moved=$(grep -oE "Updated input '[^']+'" update.log | cut -d"'" -f2 | paste -sd, - | sed 's/,/, /g')
+          {
+            echo "moved=${moved:-flake.lock}"
+            echo "lock=$(base64 -w0 flake.lock)"
+            echo "checks=$(nix eval --json .#checks.x86_64-linux --apply builtins.attrNames)"
+          } >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: [update]
+    if: needs.update.outputs.moved
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(needs.update.outputs.checks) }}
+    name: check (${{ matrix.check }})
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Take the new lock
+        env:
+          LOCK: ${{ needs.update.outputs.lock }}
+        run: base64 -d <<<"$LOCK" > flake.lock
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+
+      # Read only: the action would push every path the build made, a VM
+      # test's NixOS closure among them, and the free tier is 5 GB. CI,
       # dispatched below, pushes flong's own outputs by its allow-list.
       - uses: cachix/cachix-action@v17
         with:
@@ -50,29 +93,43 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           skipPush: true
 
-      - name: Update every input
-        id: update
-        run: |
-          nix flake update 2>&1 | tee update.log
-          if git diff --quiet flake.lock; then
-            echo "Nothing moved."
-          else
-            moved=$(grep -oE "Updated input '[^']+'" update.log | cut -d"'" -f2 | paste -sd, - | sed 's/,/, /g')
-            echo "moved=${moved:-flake.lock}" >> "$GITHUB_OUTPUT"
-          fi
+      - name: nix build ${{ matrix.check }}
+        run: nix build -L --no-link ".#checks.x86_64-linux.${{ matrix.check }}"
 
-      - name: Build what CI builds, with the new lock
-        if: steps.update.outputs.moved
-        run: |
-          mapfile -t checks < <(nix eval --json .#checks.x86_64-linux --apply builtins.attrNames | jq -r '.[]')
-          nix build --no-link --print-build-logs "${checks[@]/#/.#checks.x86_64-linux.}"
-          nix flake check --no-build
+  eval:
+    needs: [update]
+    if: needs.update.outputs.moved
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Take the new lock
+        env:
+          LOCK: ${{ needs.update.outputs.lock }}
+        run: base64 -d <<<"$LOCK" > flake.lock
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+
+      - name: nix flake check --no-build
+        run: nix flake check --no-build
+
+  commit:
+    needs: [update, check, eval]
+    if: needs.update.outputs.moved
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
 
       - name: Commit and push the lock
-        if: steps.update.outputs.moved
         env:
-          MOVED: ${{ steps.update.outputs.moved }}
+          LOCK: ${{ needs.update.outputs.lock }}
+          MOVED: ${{ needs.update.outputs.moved }}
         run: |
+          base64 -d <<<"$LOCK" > flake.lock
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -qm "Bump flake.lock: $MOVED" flake.lock
@@ -80,7 +137,6 @@ jobs:
           git push -q origin HEAD:trunk
 
       - name: Check and release the bumped trunk
-        if: steps.update.outputs.moved
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run ci.yml --ref trunk -f release=true
