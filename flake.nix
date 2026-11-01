@@ -1,9 +1,15 @@
 {
   description = "Ephemeral rootless containers that start in milliseconds";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # nixos-26.05, as every one of danielbodart's flakes and the NixOS config
+  # that takes them: what the checks build is what a 26.05 host builds.
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
-  outputs = { self, nixpkgs }:
+  # For pasta alone, which 26.05 has too old (nix/passt.nix reads it from
+  # flake.lock, so outputs takes nothing from it).
+  inputs.nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+  outputs = { self, nixpkgs, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
@@ -109,13 +115,16 @@
         // nixpkgs.lib.optionalAttrs (system == "x86_64-linux")
           (import ./tests/assertions.nix { inherit nixpkgs pkgs system; }));
 
-      # Launch times, in one VM: built on
-      # demand (`nix build .#bench`), never by `nix flake check`, because a
-      # time is a number to report and not a test. The result holds
-      # numbers.md. And flong-seccomp, for its subcommands.
+      # flong, the launcher set the module builds (default), and
+      # flong-seccomp, for its subcommands. And launch times, in one VM:
+      # built on demand (`nix build .#bench`), never by `nix flake check`,
+      # because a time is a number to report and not a test. The result
+      # holds numbers.md.
       packages = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system}; in
         {
+          default = import ./launcher { inherit pkgs; };
+
           bench = pkgs.testers.runNixOSTest {
             imports = [ ./tests/bench.nix ];
           };

@@ -12,8 +12,8 @@
 #
 # pkgs defaults to the flake's locked nixpkgs, as launcher/default.nix:10-19
 # does, since zig_0_15 is that nixpkgs' (DESIGN.md, "Why Zig, and what it cost").
-# passt defaults to pkgs', and module.nix gives the locked nixpkgs' whatever
-# its pkgs.
+# passt defaults to the locked nixpkgs-unstable's whatever pkgs is
+# (nix/passt.nix), as module.nix's does.
 {
   pkgs ?
     let
@@ -23,7 +23,7 @@
       url = "https://github.com/${locked.owner}/${locked.repo}/archive/${locked.rev}.tar.gz";
       sha256 = locked.narHash;
     }) { },
-  passt ? pkgs.passt,
+  passt ? import ./nix/passt.nix { inherit (pkgs.stdenv.hostPlatform) system; },
 }:
 let
   inherit (pkgs) lib;

@@ -2,12 +2,12 @@
 //! strerrorname_np(3), for the programs that link no libc and for messages
 //! that must stay byte-identical to the C's (ZIG.md, quirk 18).
 //!
-//! The table is glibc 2.42's for 0-134, taken from the locked nixpkgs'
-//! glibc; test-libc (tests/zig/libc_errno.zig) holds it equal to glibc's
-//! own for every number from 0 to 4096. It runs to 134, not 133: glibc 2.42
-//! added EFTYPE there, which Linux never returns. Anything beyond, and the
-//! two holes, 41 and 58, read as glibc reads them: "Unknown error N", with
-//! no name. The numbers are the generic Linux ones, which x86_64 and aarch64
+//! The table is glibc 2.42's for 0-133, taken from the locked nixpkgs'
+//! (nixos-26.05's) glibc; test-libc (tests/zig/libc_errno.zig) holds it
+//! equal to glibc's own for every number from 0 to 4096. Later glibcs add
+//! EFTYPE at 134, which Linux never returns: it goes in with the nixpkgs
+//! whose glibc has it. Anything beyond, and the two holes, 41 and 58, read
+//! as glibc reads them: "Unknown error N", with no name. The numbers are the generic Linux ones, which x86_64 and aarch64
 //! share (MIPS, Alpha, SPARC and PA-RISC differ, and flong builds for none).
 
 const std = @import("std");
@@ -45,7 +45,7 @@ pub fn describe(e: sys.E, buf: *[max_len]u8) []const u8 {
     return buf[0 .. unknown.len + digits];
 }
 
-// { strerrorname_np(n), strerror(n) } for n = 0..134, from glibc 2.42.
+// { strerrorname_np(n), strerror(n) } for n = 0..133, from glibc 2.42.
 const table = [_]struct { ?[]const u8, ?[]const u8 }{
     .{ "0", "Success" }, // 0
     .{ "EPERM", "Operation not permitted" }, // 1
@@ -181,7 +181,6 @@ const table = [_]struct { ?[]const u8, ?[]const u8 }{
     .{ "ENOTRECOVERABLE", "State not recoverable" }, // 131
     .{ "ERFKILL", "Operation not possible due to RF-kill" }, // 132
     .{ "EHWPOISON", "Memory page has hardware error" }, // 133
-    .{ "EFTYPE", "Inappropriate file type or format" }, // 134
 };
 
 comptime {
@@ -201,14 +200,13 @@ test "known numbers read as glibc's" {
     try testing.expectEqualStrings("Success", text(.SUCCESS).?);
     try testing.expectEqualStrings("0", name(.SUCCESS).?);
     try testing.expectEqualStrings("Memory page has hardware error", text(.HWPOISON).?);
-    try testing.expectEqualStrings("EFTYPE", name(@enumFromInt(134)).?);
 }
 
 test "holes and numbers beyond the table read as Unknown error N" {
     var buf: [max_len]u8 = undefined;
     try testing.expectEqualStrings("Unknown error 41", describe(@enumFromInt(41), &buf));
     try testing.expectEqualStrings("Unknown error 58", describe(@enumFromInt(58), &buf));
-    try testing.expectEqualStrings("Unknown error 135", describe(@enumFromInt(135), &buf));
+    try testing.expectEqualStrings("Unknown error 134", describe(@enumFromInt(134), &buf));
     try testing.expectEqualStrings("Unknown error 65535", describe(@enumFromInt(65535), &buf));
     try testing.expectEqual(null, name(@enumFromInt(41)));
     try testing.expectEqual(null, name(@enumFromInt(4095)));

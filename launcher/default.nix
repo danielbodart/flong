@@ -16,6 +16,6 @@
       url = "https://github.com/${locked.owner}/${locked.repo}/archive/${locked.rev}.tar.gz";
       sha256 = locked.narHash;
     }) { },
-  passt ? pkgs.passt,
+  passt ? import ../nix/passt.nix { inherit (pkgs.stdenv.hostPlatform) system; },
 }:
 (import ../native.nix { inherit pkgs passt; }).launcher

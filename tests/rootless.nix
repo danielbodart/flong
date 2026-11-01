@@ -173,11 +173,15 @@ in
 
     # The start timeout of every unit in a user's manager. systemd's default
     # is 90 s, the length the hook that sleeps had (6b5e42b), but a test
-    # node's is 300 s (nixpkgs' test-instrumentation.nix:245), which 90 s
+    # node's is 300 s (nixpkgs' test-instrumentation.nix:241-245), which 90 s
     # never reached. Lowered, the hook outlasts it in 15 s. The engine has no
     # clock of its own (DESIGN.md, "No timeouts"; the gate's 10 s went in
-    # ffbb78f).
-    systemd.user.settings.Manager.DefaultTimeoutStartSec = lib.mkForce "10s";
+    # ffbb78f). Forced over the instrumentation's lines, its device timeout
+    # kept: nixos-26.05 has extraConfig, not unstable's settings.Manager.
+    systemd.user.extraConfig = lib.mkForce ''
+      DefaultTimeoutStartSec=10s
+      DefaultDeviceTimeoutSec=300
+    '';
 
     # The tty filter is tested where TIOCSTI would inject, so it is the
     # filter that stops it and not the kernel's default.
