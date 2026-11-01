@@ -1,0 +1,206 @@
+# Every dependency moves once a week, in the window all of danielbodart's
+# repositories share: Sunday 21:23 UTC, two hours before nix-config takes its
+# own inputs on the same nixos-26.05, so what the checks here build is the
+# derivation nix-config builds, already in the danielbodart cache when it
+# asks. What moves: every flake input (nixpkgs; nixpkgs-unstable, for pasta),
+# and each tool in mise.toml to the latest patch of its minor (a minor moves
+# by hand, with zig_0_NN in native.nix). build.zig.zon's two lazy, dev-only
+# dependencies are pinned to tags and move by hand: Zig has no command that
+# finds a newer one.
+#
+# Nothing is committed unless the new files pass what CI runs, every channel:
+# `mise run check`, a leg per Nix check, each on a runner of its own as CI's
+# are (on one runner the VM tests shared four vCPUs, and native's swap race,
+# whose control needs the swapper to keep pace with the walker, saw no
+# escape: run 41314788857), and the other outputs evaluated. The files go
+# from job to job as an artifact. Then they are committed straight to trunk,
+# named by what moved, flong's own packages are pushed to Cachix, and if
+# anything in mise.toml's RELEASE_PATHS moved, CI is dispatched with
+# `release` (a push made with GITHUB_TOKEN starts no workflow). A week that
+# moved only flake.lock or mise.toml releases nothing: a release would be the
+# same module under a new version, and the lock goes out with the next
+# release a real change makes.
+name: Weekly update
+
+on:
+  schedule:
+    - cron: "23 21 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+# Shared with anything else that commits to trunk.
+concurrency:
+  group: update
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    outputs:
+      moved: ${{ steps.update.outputs.moved }}
+      checks: ${{ steps.update.outputs.checks }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+
+      - uses: jdx/mise-action@v5
+
+      - name: Move everything
+        id: update
+        run: |
+          moved=()
+
+          nix flake update 2>&1 | tee update.log
+          mapfile -t inputs < <(grep -oE "Updated input '[^']+'" update.log | cut -d"'" -f2)
+          moved+=("${inputs[@]}")
+
+          # Each tool to the latest patch of the minor mise.toml pins.
+          while read -r tool pinned; do
+            latest=$(mise latest "$tool@${pinned%.*}")
+            if [ -n "$latest" ] && [ "$latest" != "$pinned" ] && [ "$(grep -c "\"$pinned\"" mise.toml)" = 1 ]; then
+              sed -i "s/\"$pinned\"/\"$latest\"/" mise.toml
+              moved+=("$tool $pinned -> $latest")
+            fi
+          done < <(mise ls --current --local --json | jq -r 'to_entries[] | "\(.key) \(.value[0].requested_version)"')
+
+          if [ ${#moved[@]} -eq 0 ]; then echo "Nothing moved."; exit 0; fi
+          {
+            list=$(printf '%s, ' "${moved[@]}")
+            echo "moved=${list%, }"
+            echo "checks=$(nix eval --json .#checks.x86_64-linux --apply builtins.attrNames)"
+          } >> "$GITHUB_OUTPUT"
+
+      - if: steps.update.outputs.moved
+        uses: actions/upload-artifact@v7
+        with:
+          name: moved
+          path: |
+            flake.lock
+            mise.toml
+
+  check:
+    needs: [update]
+    if: needs.update.outputs.moved
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: moved
+
+      - name: libseccomp
+        run: sudo apt-get update -q && sudo apt-get install -y -q libseccomp-dev
+
+      - uses: jdx/mise-action@v5
+
+      - run: mise run check
+
+  nix:
+    needs: [update]
+    if: needs.update.outputs.moved
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(needs.update.outputs.checks) }}
+    name: nix (${{ matrix.check }})
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: moved
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+
+      # Read only: the action would push every path the build made, a VM
+      # test's NixOS closure among them, and the free tier is 5 GB. The
+      # commit job pushes flong's own packages.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: danielbodart
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+
+      - name: nix build ${{ matrix.check }}
+        run: nix build -L --no-link ".#checks.x86_64-linux.${{ matrix.check }}"
+
+  eval:
+    needs: [update]
+    if: needs.update.outputs.moved
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: moved
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+
+      - name: nix flake check --no-build
+        run: nix flake check --no-build
+
+  commit:
+    needs: [update, check, nix, eval]
+    if: needs.update.outputs.moved
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: moved
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v17
+        with:
+          name: danielbodart
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+
+      - name: Commit and push
+        env:
+          MOVED: ${{ needs.update.outputs.moved }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -qm "Weekly update: $MOVED" flake.lock mise.toml
+          git pull -q --rebase origin trunk
+          git push -q origin HEAD:trunk
+
+      # flong's own packages, never a VM test's closure (the free tier is
+      # 5 GB): the launcher and flong-seccomp.
+      - name: Push flong's packages to Cachix
+        run: nix build --no-link --print-out-paths .#default .#seccomp | cachix push danielbodart
+
+      - name: Release, if a release path moved
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          read -ra paths <<<"$(sed -n 's/^RELEASE_PATHS = "\(.*\)"$/\1/p' mise.toml)"
+          if [ -n "$(git diff --name-only HEAD~1 HEAD -- "${paths[@]}")" ]; then
+            gh workflow run ci.yml --ref trunk -f release=true
+          else
+            echo "Nothing a release is made of moved: no release."
+          fi
