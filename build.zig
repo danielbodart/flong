@@ -881,9 +881,11 @@ pub fn build(b: *std.Build) void {
                         }),
                     });
                     test_step.dependOn(&b.addRunArtifact(t).step);
-                } else {
-                    test_step.dependOn(&b.addFail("tests/zig/spec_test.zig needs a zig in /nix/store: its closure is a store path").step);
                 }
+                // Else spec_test is left out: its closure is a store path,
+                // and mise's zig, which `mise run check` runs, is not in
+                // one (there may be no /nix/store at all). Nix's zig is,
+                // so checks.native-test-debug and -release still run it.
                 // L2: each launch module's own tests, in the launch's graph.
                 for ([_][]const u8{ "passwd", "cgroup", "record", "ns" }) |name| {
                     const l = Launcher.launchModules(b, target, optimize);

@@ -4,15 +4,18 @@ on:
   push:
     branches: [trunk]
   pull_request:
-  # release: publish once the check passes, as a push to trunk does. The
-  # weekly flake.lock bump sets it, its push having started nothing.
+  # release: publish once the checks pass whatever changed. The weekly
+  # update sets it when it moved something a release is made of, its push
+  # having started nothing.
   workflow_dispatch:
     inputs:
       release:
         type: boolean
         default: false
 
-# One job per check, so the VM tests, the Zig builds and the assertion
+# check is the fast one, `mise run check` with mise's Zig: the unit and
+# property tests, fdlint, compile-fail and zig fmt. The rest is Nix's: one
+# job per check, so the VM tests, the Zig builds and the assertion
 # shards run on parallel runners and a slow one no longer holds up the
 # rest (the single `nix flake check` step took 9.5-12.8 min in runs
 # 35947311755, 35954009898 and 35958022199; the matrix takes about 5-6 min
@@ -20,7 +23,7 @@ on:
 # 35995141108 and 35996579837, its longest leg native-test-release, and
 # 3-4 min for one that does not, 3 min 18 s and 3 min 39 s in runs
 # 35991513067 and 35992523422). `list` names the checks,
-# `check` builds each (fail-fast off, so one red check does not hide
+# `nix` builds each (fail-fast off, so one red check does not hide
 # another), and `eval` evaluates the flake's other outputs.
 #
 # cachix/install-nix-action enables KVM on the standard runner ("Enabled
@@ -29,11 +32,33 @@ on:
 # lets Nix schedule them.
 #
 # The binary cache is Cachix's danielbodart (public, free tier, 5 GB).
-# Every job that builds reads it; a leg that is not a VM test pushes, and
-# only when CACHIX_AUTH_TOKEN is set, which it is not for a fork's pull
-# request, so there the cache is read-only.
+# Every job that builds reads it; a leg on trunk that is not a VM test
+# pushes flong's own outputs, and only when CACHIX_AUTH_TOKEN is set.
+# Elsewhere the cache is read-only.
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The tests link libseccomp, which is the host's (mise.toml).
+      - name: libseccomp
+        run: sudo apt-get update -q && sudo apt-get install -y -q libseccomp-dev
+
+      # zig, at the version mise.toml pins.
+      - uses: jdx/mise-action@v5
+
+      # Zig's global cache: the dependency fetch (minish, zwanzig) and the
+      # compiled standard library.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/zig
+          key: zig-${{ hashFiles('build.zig.zon', 'mise.toml') }}
+          restore-keys: zig-
+
+      - run: mise run check
+
   list:
     runs-on: ubuntu-latest
     outputs:
@@ -58,14 +83,14 @@ jobs:
       - id: list
         run: echo "checks=$(nix eval --json .#checks.x86_64-linux --apply builtins.attrNames)" >> "$GITHUB_OUTPUT"
 
-  check:
+  nix:
     needs: [list]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         check: ${{ fromJSON(needs.list.outputs.checks) }}
-    name: check (${{ matrix.check }})
+    name: nix (${{ matrix.check }})
     steps:
       - uses: actions/checkout@v7
 
@@ -112,7 +137,7 @@ jobs:
       # cache. A VM test missing from the list costs that time, not cache
       # space: the allow-list below matches none of a VM test's own paths.
       - name: Push flong's own outputs to Cachix
-        if: ${{ !cancelled() && !contains(fromJSON('["basic-a", "basic-b", "rootless-a", "rootless-b", "parity", "native"]'), matrix.check) }}
+        if: ${{ !cancelled() && github.ref == 'refs/heads/trunk' && !contains(fromJSON('["basic-a", "basic-b", "rootless-a", "rootless-b", "parity", "native"]'), matrix.check) }}
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
           CHECK: ${{ matrix.check }}
@@ -148,35 +173,50 @@ jobs:
       - name: nix flake check --no-build
         run: nix flake check --no-build
 
-  # CONTINUOUS RELEASE. Trunk-based: every push to trunk that passes every
-  # check above is published, with no manual step and no tag to cut by hand.
-  # Gated on a push to trunk, or a dispatch on trunk with `release` (never a
-  # pull request), and on every leg of `check` and `eval` having succeeded,
-  # so a red commit never ships.
+  # CONTINUOUS RELEASE. Trunk-based: a push to trunk that passes every check
+  # above is published, with no manual step and no tag to cut by hand, when
+  # it changed what a release is made of: anything in mise.toml's
+  # RELEASE_PATHS since the last release tag (`mise run release-due`), the
+  # module and the code it builds. The workflows, docs, tests, flake.nix and
+  # flake.lock alone release nothing. A dispatch with `release` publishes
+  # whatever changed. Never a pull request, and never unless `check` and
+  # every leg of `nix` and `eval` succeeded, so a red commit never ships.
   #
   # The derived version (major.commit-count.run-number, scripts/version.sh)
   # makes every build a unique, monotonic release, so two pushes cannot collide
   # on a tag and a re-run of the same commit does not either.
   release:
-    needs: [check, eval]
-    if: (github.event_name == 'push' || inputs.release) && github.ref == 'refs/heads/trunk' && needs.check.result == 'success' && needs.eval.result == 'success'
+    needs: [check, nix, eval]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/trunk' && needs.check.result == 'success' && needs.nix.result == 'success' && needs.eval.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       # fetch-depth: 0 because the minor is the commit count and the script
-      # REFUSES a shallow clone; fetch-tags so the previous tag resolves when
-      # the notes are generated below.
+      # REFUSES a shallow clone; fetch-tags so the previous tag resolves, for
+      # release-due and for the notes generated below.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
+
+      - uses: jdx/mise-action@v5
+
+      - name: Is a release due?
+        id: due
+        env:
+          FORCE: ${{ inputs.release }}
+        run: |
+          if [ "$FORCE" = true ]; then due=true; else due=$(mise run release-due 2>/dev/null | tail -n1); fi
+          echo "Release due: $due"
+          echo "due=$due" >> "$GITHUB_OUTPUT"
 
       # Notes from the COMMITS since the last release. Trunk-based means direct
       # pushes and no pull requests, so GitHub's PR-based --generate-notes
       # would come out empty. On the first release there is no prior tag, so
       # fall back to the head commit rather than dumping the whole history.
       - name: Create GitHub Release
+        if: steps.due.outputs.due == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

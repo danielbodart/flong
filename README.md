@@ -199,16 +199,33 @@ The variables each hook sees are in [docs/reference.md](docs/reference.md#hooks)
 More, with workarounds, in [docs/reference.md](docs/reference.md#limitations).
 [DESIGN.md](DESIGN.md) explains how it works and why.
 
+## Channels
+
+flong ships one channel, the distro one: a NixOS module
+(`nixosModules.default`) and the `flong` package (`packages.default`), built
+by nixpkgs (nixos-26.05, with pasta from nixos-unstable: 26.05's is too
+old), and pushed to the `danielbodart` Cachix. There is no tarball or image:
+the launcher compiles in the store paths of the programs it runs.
+
+- **Consume it** as a flake input pinned to a release,
+  `github:danielbodart/flong/v<version>`, and import
+  `flong.nixosModules.default`.
+- **Releases** are tags, `<VERSION>.<commit count>.<CI run number>`, made
+  by CI when a push to `trunk` that passes every check changed the module or
+  the code it builds (`RELEASE_PATHS` in `mise.toml`).
+- **Updates**: every Sunday at 21:23 UTC the weekly update moves the flake's
+  inputs and mise's Zig to its latest patch, checks them as CI does, and
+  commits them to `trunk`.
+
 ## Development
 
 ```console
+$ mise run check       # unit and property tests, lint, fmt (libseccomp: apt's, or `nix develop -c mise run check`)
+$ mise run build       # flong-seccomp, into zig-out/
 $ nix flake check      # every test, in NixOS VMs
 $ nix run .#gate       # the same, in parallel
 $ nix build .#bench    # times launches in a VM
 ```
-
-Every push to `trunk` that passes is tagged and released as
-`<VERSION>.<commit count>.<CI run number>`. Pin by flake input.
 
 ## Licence
 
