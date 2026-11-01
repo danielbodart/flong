@@ -201,21 +201,25 @@ More, with workarounds, in [docs/reference.md](docs/reference.md#limitations).
 
 ## Channels
 
-flong ships one channel, the distro one: a NixOS module
-(`nixosModules.default`) and the `flong` package (`packages.default`), built
-by nixpkgs (nixos-26.05, with pasta from nixos-unstable: 26.05's is too
-old), and pushed to the `danielbodart` Cachix. There is no tarball or image:
-the launcher compiles in the store paths of the programs it runs.
+- **Nix**: a flake input pinned to a release,
+  `github:danielbodart/flong/v<version>` (with
+  `inputs.nixpkgs.follows = "nixpkgs"`), and `nixosModules.default`; the
+  packages are `packages.default` (flong, the launcher the module builds)
+  and `packages.seccomp` (flong-seccomp), versioned `0-unstable-<date>`.
+  Built by nixpkgs (nixos-26.05, with pasta from nixos-unstable: 26.05's is
+  too old), pushed to the `danielbodart` Cachix.
+- Not shipped: Docker — flong is the container runtime, run by a NixOS
+  user, not something to run in a container.
+- Not shipped: Tarball + systemd — the launcher compiles in the store paths
+  of the programs it runs, so only Nix can build and install it.
 
-- **Consume it** as a flake input pinned to a release,
-  `github:danielbodart/flong/v<version>`, and import
-  `flong.nixosModules.default`.
-- **Releases** are tags, `<VERSION>.<commit count>.<CI run number>`, made
-  by CI when a push to `trunk` that passes every check changed the module or
-  the code it builds (`RELEASE_PATHS` in `mise.toml`).
-- **Updates**: every Sunday at 21:23 UTC the weekly update moves the flake's
-  inputs and mise's Zig to its latest patch, checks them as CI does, and
-  commits them to `trunk`.
+Updated weekly (Sunday 21:23 UTC): the flake's inputs, mise's Zig to the
+latest patch of its minor, and build.zig.zon's dev-only dependencies to
+their latest release tag that builds with that Zig. A release, a tag
+`<VERSION>.<commit count>.<CI run number>` made once every check passes, is
+cut when the module, the code it builds, `flake.nix` or `flake.lock` (whose
+nixos-unstable gives the module its pasta) changed since the last one
+(`RELEASE_PATHS` in `mise.toml`).
 
 ## Development
 

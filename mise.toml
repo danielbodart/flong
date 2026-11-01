@@ -10,24 +10,28 @@
 zig = "0.15.2"
 
 # What a release tag gives the flakes that take flong (chase, frisket): the
-# module and everything it builds. A change to any of these since the last
-# release tag is released (see release-due); the workflows, docs, tests,
-# flake.nix and flake.lock are not.
+# module and everything it builds, and, flong being Nix-only, its tag the
+# distro channel's release, flake.nix and flake.lock too: the module builds
+# pasta from the lock's nixos-unstable (nix/passt.nix), so a lock that moved
+# it is a new flong. A change to any of these since the last release tag is
+# released (see release-due); the workflows, docs and tests are not.
 [env]
-RELEASE_PATHS = "module.nix native.nix cache.nix nix launcher seccomp src build build.zig build.zig.zon decl-options.json VERSION"
+RELEASE_PATHS = "flake.nix flake.lock module.nix native.nix cache.nix nix launcher seccomp src build build.zig build.zig.zon decl-options.json VERSION"
 
 [tasks.check]
 description = "The unit and property tests, fdlint, compile-fail and zig fmt (test-libc, analyze and the VM tests run in nix flake check)"
 run = "zig build test lint compile-fail fmt -Ddev=true"
 
 [tasks.build]
-description = "flong-seccomp for this machine, into zig-out/ (the launcher compiles in store paths, so only Nix builds it)"
-run = 'zig build -Dset=seccomp -Dself="$PWD/zig-out/bin/flong-seccomp"'
+description = "flong's packages, the launcher and flong-seccomp, as Nix builds them (the launcher compiles in store paths, so only Nix can)"
+run = "nix build .#default .#seccomp"
 
+# `if mise run release-due; then ...`: CI's release job and the weekly
+# update ask it, and nothing else knows RELEASE_PATHS.
 [tasks.release-due]
-description = "Print true if anything in RELEASE_PATHS changed since the last release tag, else false"
+description = "Print true and succeed if anything in RELEASE_PATHS changed since the last release tag, else print false and fail"
 run = '''
 set -f
 last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null) || { echo true; exit 0; }
-if [ -n "$(git diff --name-only "$last" HEAD -- $RELEASE_PATHS)" ]; then echo true; else echo false; fi
+if [ -n "$(git diff --name-only "$last" HEAD -- $RELEASE_PATHS)" ]; then echo true; else echo false; exit 1; fi
 '''

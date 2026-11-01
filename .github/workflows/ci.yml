@@ -33,8 +33,14 @@ on:
 #
 # The binary cache is Cachix's danielbodart (public, free tier, 5 GB).
 # Every job that builds reads it; a leg on trunk that is not a VM test
-# pushes flong's own outputs, and only when CACHIX_AUTH_TOKEN is set.
-# Elsewhere the cache is read-only.
+# pushes flong's own outputs, and only when CACHIX_AUTH_TOKEN is set, and
+# the cache job pushes the packages (the checks build them as version
+# "0", native.nix says why). Elsewhere the cache is read-only.
+
+# bash -eo pipefail for every run step.
+defaults:
+  run:
+    shell: bash
 
 jobs:
   check:
@@ -177,8 +183,8 @@ jobs:
   # above is published, with no manual step and no tag to cut by hand, when
   # it changed what a release is made of: anything in mise.toml's
   # RELEASE_PATHS since the last release tag (`mise run release-due`), the
-  # module and the code it builds. The workflows, docs, tests, flake.nix and
-  # flake.lock alone release nothing. A dispatch with `release` publishes
+  # module and the code it builds, flake.nix and flake.lock. The workflows,
+  # docs and tests alone release nothing. A dispatch with `release` publishes
   # whatever changed. Never a pull request, and never unless `check` and
   # every leg of `nix` and `eval` succeeded, so a red commit never ships.
   #
@@ -207,7 +213,7 @@ jobs:
         env:
           FORCE: ${{ inputs.release }}
         run: |
-          if [ "$FORCE" = true ]; then due=true; else due=$(mise run release-due 2>/dev/null | tail -n1); fi
+          if [ "$FORCE" = true ] || mise run release-due; then due=true; else due=false; fi
           echo "Release due: $due"
           echo "due=$due" >> "$GITHUB_OUTPUT"
 
@@ -228,3 +234,31 @@ jobs:
             { echo 'First automated release.'; echo; git log -1 --pretty='- %s (%h)'; } > notes.md
           fi
           gh release create "v$V" --title "v$V" --notes-file notes.md --target "$GITHUB_SHA"
+
+  # flong's packages, the launcher and flong-seccomp at 0-unstable-<date>, as
+  # the module and nix-config build them, to the cache from trunk; never a
+  # VM test's closure (the free tier is 5 GB).
+  cache:
+    needs: [check, nix, eval]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/trunk'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v17
+        with:
+          name: danielbodart
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+
+      - name: Push flong's packages to Cachix
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then echo "No CACHIX_AUTH_TOKEN: nothing is pushed."; exit 0; fi
+          nix build --no-link --print-out-paths .#default .#seccomp | cachix push danielbodart
