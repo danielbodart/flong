@@ -90,7 +90,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addFail("needs -Ddev=true").step);
     } else if (b.lazyDependency("minish", .{ .target = target, .optimize = optimize })) |minish| {
         // Each module's own tests, with the modules it imports.
-        for ([_][]const u8{ "sys", "errno", "msg", "num", "fd", "mount", "sig", "proc", "names", "cgroup", "record" }) |name| {
+        for ([_][]const u8{ "sys", "errno", "msg", "num", "fd", "mount", "sig", "proc", "names", "cgroup", "record", "dbus", "manager" }) |name| {
             const m = modules(b, target, optimize);
             const t = b.addTest(.{ .name = name, .root_module = m.get(name) });
             test_step.dependOn(&b.addRunArtifact(t).step);
@@ -1283,6 +1283,7 @@ const Launcher = struct {
                 .{ .name = "names", .module = m.names },
                 .{ .name = "proc", .module = m.proc },
                 .{ .name = "passwd", .module = passwd },
+                .{ .name = "manager", .module = m.manager },
             },
         });
         const record = bb.createModule(.{
@@ -1676,6 +1677,8 @@ const Modules = struct {
     names: *std.Build.Module,
     cgroup: *std.Build.Module,
     record: *std.Build.Module,
+    dbus: *std.Build.Module,
+    manager: *std.Build.Module,
 
     fn get(m: Modules, name: []const u8) *std.Build.Module {
         inline for (@typeInfo(Modules).@"struct".fields) |f| {
@@ -1731,6 +1734,19 @@ fn modules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         },
     });
     const names = b.createModule(.{ .root_source_file = b.path("src/names.zig"), .target = target, .optimize = optimize });
+    const dbus = b.createModule(.{ .root_source_file = b.path("src/dbus.zig"), .target = target, .optimize = optimize });
+    const manager = b.createModule(.{
+        .root_source_file = b.path("src/manager.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sys", .module = sys },
+            .{ .name = "fd", .module = fd },
+            .{ .name = "msg", .module = msg },
+            .{ .name = "sig", .module = sig },
+            .{ .name = "dbus", .module = dbus },
+        },
+    });
     const cgroup = b.createModule(.{
         .root_source_file = b.path("src/cgroup.zig"),
         .target = target,
@@ -1741,6 +1757,7 @@ fn modules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             .{ .name = "msg", .module = msg },
             .{ .name = "sig", .module = sig },
             .{ .name = "names", .module = names },
+            .{ .name = "manager", .module = manager },
         },
     });
     const record = b.createModule(.{
@@ -1770,6 +1787,8 @@ fn modules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .names = names,
         .cgroup = cgroup,
         .record = record,
+        .dbus = dbus,
+        .manager = manager,
     };
 }
 

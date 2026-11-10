@@ -393,10 +393,10 @@ const Found = struct {
     files: []const spec.File,
 };
 
-/// The holder unit's cgroup, relative to user@UID.service, and how the
-/// launch starts it when absent (module.nix's holderUnit).
+/// The holder unit's cgroup, relative to user@UID.service (module.nix's
+/// holderUnit): its last component is the unit the user manager starts
+/// when it is absent (cgroup.holderFind).
 pub const holder = "app.slice/flong-sessions.service";
-pub const holder_start = [_][:0]const u8{ "/run/current-system/sw/bin/systemctl", "--user", "start", "flong-sessions.service" };
 
 /// How many user namespaces a nestedSandbox session may make below its
 /// own: a ceiling, not a need (Chromium's sandbox, `codex sandbox` and a
@@ -608,7 +608,6 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
         .seccomp = l.seccomp.items,
         .nested_userns = if (d.seccomp.nestedSandbox) nested_user_namespaces else 0,
         .holder = holder,
-        .holder_start = &holder_start,
         .limits = l.limits.items,
         .post_start = l.post_start.items,
         .post_stop = f.post_stop,

@@ -94,6 +94,8 @@ let
       ../src/proc.zig
       ../src/names.zig
       ../src/cgroup.zig
+      ../src/dbus.zig
+      ../src/manager.zig
       ../tests/zig/walker.zig
       ../tests/zig/procdriver.zig
       # Phase 7's L3, the terminal.
@@ -123,6 +125,8 @@ let
     steps = "launch-driver";
     files = specFiles ++ [
       ../src/cgroup.zig
+      ../src/dbus.zig
+      ../src/manager.zig
       ../src/record.zig
       ../src/passwd.zig
       ../src/ns.zig
@@ -154,6 +158,8 @@ let
     steps = "test-launch";
     files = specFiles ++ [
       ../src/cgroup.zig
+      ../src/dbus.zig
+      ../src/manager.zig
       ../src/record.zig
       ../src/passwd.zig
       ../src/ns.zig

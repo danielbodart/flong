@@ -999,8 +999,8 @@ cgroup cannot enable controllers (`EBUSY`).
 
 - **Started on demand.** Nothing wants the unit. The launcher finds its cgroup
   by path, from `/proc/self/cgroup` (one `open` on the warm path, against 7 ms
-  for `systemctl show`), and starts it with `systemctl --user start` when it
-  is absent (about 7 ms, once).
+  for `systemctl show`), and has the user manager start it when it is absent
+  (`StartUnit`, once; [Talking to systemd](#talking-to-systemd)).
 - **`Type=exec`**, so start returns once the sweeper has moved itself into
   `supervisor/`; before that, enabling a limit's controller in the holder
   fails with `EBUSY`.
@@ -1016,10 +1016,6 @@ cgroup cannot enable controllers (`EBUSY`).
   record format is a contract between versions.
 - **No `RuntimeDirectory=`**: stopping the unit would delete the records
   `postStop` needs.
-
-Containers show in `systemd-cgls` and `systemctl --user status
-flong-sessions.service`, not in `machinectl`.
-
 - **Started from outside the manager.** bwrap, the hook and pasta are created
   in their leaves with `clone3(CLONE_INTO_CGROUP)`, which the kernel allows
   only when the caller may write `cgroup.procs` in the leaf *and* in the
@@ -1031,19 +1027,22 @@ flong-sessions.service`, not in `machinectl`.
   `/proc/self/cgroup` and two `fstat`s) by asking where it is: under
   `user@UID.service`, it goes on; outside it, in a cgroup of its own (below),
   it goes on there; outside it, in a cgroup not its own, while you have a user
-  manager, it execs `systemd-run --user --scope --quiet --collect
-  --unit=flong-launch-PID -- flong launch WHAT -- ARGS` (`prologue.adopt`). The
-  manager makes the scope and asks the system manager to move the launcher
-  into it, which it allows for its own user's processes, and systemd-run then
-  execs the launch in place: the same process, terminal, process group,
-  directory and environment (with `INVOCATION_ID`). It costs a scope, the 23
-  ms measured below, once, and only off the desktop's path. It runs before the declaration is read, so
-  nothing of the launch runs twice; a systemd-run that cannot make the scope
-  says why and exits having run nothing, so there is no loop. The process
-  leaves the login's scope, as a desktop terminal's is never in it: logind no
-  longer counts it as the login's, which with `KillUserProcesses=no` changes
-  nothing at logout. A launcher still outside after that is refused by name,
-  never left to the clone's `EACCES`.
+  manager, it asks the manager for a scope with itself in it,
+  `flong-launch-PID.scope` in `app.slice` (`cgroup.adopt`,
+  `StartTransientUnit` with `PIDs=`; [Talking to systemd](#talking-to-systemd)),
+  as `systemd-run --scope` does. The manager makes the scope and asks the
+  system manager to move the launcher into it, which it allows for its own
+  user's processes, and the launch carries on once the job is done: the same
+  process, terminal, process group, directory and environment, nothing exec'd
+  and nothing run twice, since it comes before the declaration is read. It
+  costs a scope, the 23 ms measured below, once, and only off the desktop's
+  path. The process leaves the login's scope, as a desktop terminal's is never
+  in it: logind no longer counts it as the login's, which with
+  `KillUserProcesses=no` changes nothing at logout. A launcher still outside
+  after that is refused by name, never left to the clone's `EACCES`.
+
+Containers show in `systemd-cgls` and `systemctl --user status
+flong-sessions.service`, not in `machinectl`.
 
 A user with no user manager is refused, naming `users.users.<name>.linger`.
 There is no fallback outside the runtime directory: records must reset at
@@ -1053,6 +1052,31 @@ in a cgroup of its own outside the manager -- a system unit with `User=`, a
 containers under that cgroup instead (`DelegateSubgroup=` too, for declared
 limits, since a cgroup with a process in it cannot enable controllers for its
 children).
+
+### Talking to systemd
+
+The launcher asks the user manager for two things, and only through its
+public D-Bus API (`org.freedesktop.systemd1(5)`), over the user's bus at
+`/run/user/UID/bus` (`src/manager.zig`, the wire format in `src/dbus.zig`):
+`StartUnit` for the holder when its cgroup is absent, and
+`StartTransientUnit` for a launcher started outside the manager. Never the
+manager's private socket, `$XDG_RUNTIME_DIR/systemd/private`, which systemd
+does not document as an entry point, and no `systemctl` or `systemd-run`:
+no program by path, and nothing exec'd.
+
+A connection lives for one request. It authenticates as the user (SASL
+`EXTERNAL`, which the broker checks against the socket's peer credentials),
+then sends `Hello`, an `AddMatch` for the manager's `JobRemoved`,
+`Subscribe` and the request together: the broker and the manager each take a
+connection's messages in order, so the match and the subscription are in
+place before the job can end. The reply names the job, and the `JobRemoved`
+that names it ends the wait, whichever arrives first; a result other than
+`done`, an error reply to any of the four, a bus that is absent or sends
+what is not D-Bus is a refusal saying which. The wait has no timeout: before
+the launch has its signalfd a terminating signal ends it by its default, and
+after, as any other wait's ([Conventions](#conventions)). The codec writes
+little-endian method calls, reads either byte order, and refuses anything
+that does not hold together or is over 1 MiB, never trusting a length.
 
 ### The layout
 
@@ -2103,7 +2127,9 @@ does, when it is called and how it fails.
 | `src/names.zig`, `src/passwd.zig` | machine and container names; a user's name from `/etc/passwd`, without libc |
 | `src/spec.zig` | the input contract: the `Spec` value, `validate` (every check that needs nothing but the spec) and bwrap's argv |
 | `src/ns.zig` | U1 (newuidmap and newgidmap in parallel) and U2 (the split maps, `max_user_namespaces`); checkpoint 4 |
-| `src/cgroup.zig` | the nsdelegate check, finding or starting the holder, the container's cgroup, its limits and leaves; kill, wait, remove |
+| `src/cgroup.zig` | the nsdelegate check, the launcher's placement and adoption, finding or starting the holder, the container's cgroup, its limits and leaves; kill, wait, remove |
+| `src/manager.zig` | the user manager's client: `StartUnit` and `StartTransientUnit` over the user bus, each job waited for |
+| `src/dbus.zig` | the D-Bus wire format the client needs: method calls built, messages framed and read; no descriptors |
 | `src/record.zig` | the state directory, records and `leader=`, liveness, the sweep, `postStop`, the watch |
 | `src/tty.zig` | the foreground wait, the pty relay or passthrough, raw mode, the watchdog, `^]^]^]`, the wait for bwrap |
 | `src/main.zig` | `flong`'s root: the dispatch, the start settings and the one panic handler; each subcommand's `main` is handed argv from its word on; `flong help`'s text |
@@ -2330,8 +2356,7 @@ how the tests quote them. A list is empty when the launch has none.
 | `protect` | no mount source may equal, lie inside or contain it, compared canonicalised (a part that does not exist yet is appended, as spelt, to the canonical path of its longest existing prefix) |
 | `seccomp` | compiled BPF programs; each becomes one `--add-seccomp-fd`, in order |
 | `nested_userns` (`nested-userns`) | `nestedSandbox`: U2's `max_user_namespaces`, and `--assert-userns-disabled` goes; 0 is off |
-| `holder` | the holder's cgroup below `user@UID.service`: `app.slice/flong-sessions.service` |
-| `holder_start` (`holder-start`) | argv run when the holder is absent; its program an absolute path, since nothing searches `PATH` |
+| `holder` | the holder's cgroup below `user@UID.service`: `app.slice/flong-sessions.service`, whose last component is the unit the manager starts when it is absent |
 | `limits` (`limit`) | opt-in limits, each file once, one of `memory.max`, `memory.high`, `memory.swap.max`, `memory.oom.group`, `pids.max`, `cpu.max`, `cpu.weight`, `io.weight`, with a value |
 | `post_start` (`post-start`) | `postStart`'s commands, each at least its program, an absolute path; in order, the first failure ending the launch; none, no hook |
 | `post_stop` (`post-stop`) | `postStop`'s commands, the same way, each program under `/nix/store/`; in order, recorded for the sweep |
@@ -2388,7 +2413,7 @@ is what that step calls.
 
 | # | step | call | trace stage |
 |---|---|---|---|
-| −1 | outside the user manager in a cgroup not yours: exec `systemd-run --user --scope` with this launch, before the declaration is read | `cgroup.placement`, `prologue.adopt` | |
+| −1 | outside the user manager in a cgroup not yours: a scope of the manager's with the launcher in it, before the declaration is read | `cgroup.placement`, `cgroup.adopt` (`manager.startScope`) | |
 | 0 | SIGCHLD to its default; the prologue, which builds the spec, and before it names the container blocks signals, ignores SIGPIPE and opens the signalfd | `sig.defaultChld`, `assemble.run` (`sig.block`, `sig.ignorePipe`, `sig.openSignalfd`) | `prologue-start` |
 | 1 | from here until the record, a failure runs `postStop` for the container's name, once | `assemble.Early` | |
 | 2 | the spec's checks, refusing uid 0 first | `spec.validate` | `launcher-start` |

@@ -34,6 +34,7 @@ const sig = @import("sig");
 const names = @import("names");
 const proc = @import("proc");
 const passwd = @import("passwd");
+const manager = @import("manager");
 
 const Error = msg.Error;
 
@@ -300,27 +301,19 @@ fn openAbsolute(path: *const Path) sys.Result(fdt.Fd(.cgroup)) {
 }
 
 /// holder_under_manager (flong-cgroup.c:170-208): the user manager is
-/// there. Opens <manager>/<rel>, first starting the holder unit, with
-/// `start_argv`, when its cgroup is absent. The warm path is one open.
-fn holderUnderManager(gpa: std.mem.Allocator, manager: []const u8, rel: []const u8, start_argv: []const [:0]const u8) sig.Error!Holder {
-    const path = Path.of(&.{ manager, "/", rel }) orelse return msg.refuse("the holder's cgroup path is too long", .{});
+/// there. Opens <manager>/<rel>, first having the manager start the holder
+/// unit, `rel`'s last component, when its cgroup is absent
+/// (manager.startUnit). The warm path is one open.
+fn holderUnderManager(gpa: std.mem.Allocator, mgr: []const u8, rel: []const u8) sig.Error!Holder {
+    const path = Path.of(&.{ mgr, "/", rel }) orelse return msg.refuse("the holder's cgroup path is too long", .{});
     switch (openAbsolute(&path)) {
         .ok => |h| return holderTake(path, h),
         .err => |e| if (e != .NOENT) return msg.fail(e, "open the holder's cgroup {s}", .{path.slice()}),
     }
-    if (start_argv.len == 0)
-        return msg.refuse("the holder's cgroup {s} does not exist, and there is no way to start it", .{path.slice()});
-
-    var s = proc.Spawn.init(gpa, start_argv[0]) catch return msg.fail(.NOMEM, "malloc", .{});
-    for (start_argv[1..]) |a| s.arg(a) catch return msg.fail(.NOMEM, "malloc", .{});
-    const child = try s.start();
-    // An aborted or failed reap closes the pidfd and leaves the start to
-    // end on its own (quirk 8, kept: :195-198).
-    const status = child.await() catch |err| {
-        child.release();
-        return err;
-    };
-    if (status != 0) return msg.refuse("starting the holder failed ({s} exited {d})", .{ start_argv[0], status });
+    const unit = rel[if (std.mem.lastIndexOfScalar(u8, rel, '/')) |i| i + 1 else 0..];
+    if (!std.mem.endsWith(u8, unit, ".service"))
+        return msg.refuse("the holder's cgroup {s} does not exist, and {s} is no unit to start", .{ path.slice(), unit });
+    try manager.startUnit(gpa, sys.getuid(), unit);
 
     return switch (openAbsolute(&path)) {
         .ok => |h| holderTake(path, h),
@@ -421,7 +414,7 @@ pub const Placement = enum {
     /// outside the manager, in a cgroup that is not the caller's (a login
     /// session's scope, a system unit with no delegation), while the caller
     /// has a user manager: the launcher must move into a scope of the
-    /// manager's before anything is made (prologue.adopt)
+    /// manager's before anything is made (adopt)
     adopt,
 };
 
@@ -464,8 +457,26 @@ pub fn placement() Placement {
     const own = Path.of(&.{ root, if (std.mem.eql(u8, rel, "/")) "" else rel }) orelse return .inside;
     const uid = sys.getuid();
     if (managerEnd(own.slice(), uid) != null) return .inside;
-    const manager = standardManager(uid);
-    return placementOf(false, ownerAt(&own) == uid, ownerAt(&manager) == uid);
+    const mgr = standardManager(uid);
+    return placementOf(false, ownerAt(&own) == uid, ownerAt(&mgr) == uid);
+}
+
+/// The adoption (DESIGN.md, "The holder"): a launcher whose placement is
+/// `adopt` asks its user manager for a scope, flong-launch-PID.scope in
+/// app.slice, with itself in it (manager.startScope), and is under the
+/// manager once the job is done: the same process, carrying on. `what` is
+/// the declaration as the launch was given it, for the scope's
+/// description. A launcher the manager reports done but that is still
+/// outside is refused, naming where it is.
+pub fn adopt(gpa: std.mem.Allocator, what: []const u8) sig.Error!void {
+    const pid = sys.getpid();
+    const unit = std.fmt.allocPrint(gpa, "flong-launch-{d}.scope", .{pid}) catch return msg.fail(.NOMEM, "malloc", .{});
+    const description = std.fmt.allocPrint(gpa, "flong launch {s}", .{what}) catch return msg.fail(.NOMEM, "malloc", .{});
+    try manager.startScope(gpa, sys.getuid(), unit, pid, "app.slice", description);
+    if (placement() != .inside) {
+        const own = try ownCgroup();
+        return msg.refuse("the user manager started {s}, but the launcher is still in {s}", .{ unit, own.slice() });
+    }
 }
 
 /// cg_holder_find (flong-cgroup.c:240-277; flong-cgroup.h:35-56): the
@@ -473,7 +484,7 @@ pub fn placement() Placement {
 /// plain components the spec has checked. By the launcher's Placement:
 ///  1. inside: the user manager's cgroup is the launcher's own cgroup up to
 ///     and including its user@UID.service component, and the holder is
-///     <it>/<rel>, started with `start_argv` when absent.
+///     <it>/<rel>, its unit started by the manager when absent.
 ///  2. delegated: the launcher's own cgroup, when it is the caller's; with
 ///     limits, its parent, which must be the caller's too.
 ///  3. adopt: refused, naming both cgroups. The launch adopts itself into
@@ -482,24 +493,24 @@ pub fn placement() Placement {
 ///     the first clone3 into it with EACCES.
 ///  4. Otherwise refused, naming users.users.<name>.linger.
 /// Paths and the start's argv are in `gpa`, the launcher's arena.
-pub fn holderFind(gpa: std.mem.Allocator, rel: []const u8, start_argv: []const [:0]const u8, have_limits: bool) sig.Error!Holder {
+pub fn holderFind(gpa: std.mem.Allocator, rel: []const u8, have_limits: bool) sig.Error!Holder {
     const own = try ownCgroup();
     const uid = sys.getuid();
     if (managerEnd(own.slice(), uid)) |end| {
-        const manager = Path.of(&.{own.slice()[0..end]}).?;
-        switch (openAbsolute(&manager)) {
+        const mgr = Path.of(&.{own.slice()[0..end]}).?;
+        switch (openAbsolute(&mgr)) {
             .ok => |h| {
                 const u = owner(h);
                 h.close();
-                if (u != uid) return msg.refuse("the user manager's cgroup {s} is not yours", .{manager.slice()});
-                return holderUnderManager(gpa, manager.slice(), rel, start_argv);
+                if (u != uid) return msg.refuse("the user manager's cgroup {s} is not yours", .{mgr.slice()});
+                return holderUnderManager(gpa, mgr.slice(), rel);
             },
-            .err => |e| return msg.fail(e, "open the user manager's cgroup {s}", .{manager.slice()}),
+            .err => |e| return msg.fail(e, "open the user manager's cgroup {s}", .{mgr.slice()}),
         }
     }
-    const manager = standardManager(uid);
-    if (placementOf(false, ownerAt(&own) == uid, ownerAt(&manager) == uid) == .adopt)
-        return msg.refuse("the launcher's cgroup {s} is neither yours nor under your user manager's {s}, so no session can be made from it: launch from inside the manager", .{ own.slice(), manager.slice() });
+    const mgr = standardManager(uid);
+    if (placementOf(false, ownerAt(&own) == uid, ownerAt(&mgr) == uid) == .adopt)
+        return msg.refuse("the launcher's cgroup {s} is neither yours nor under your user manager's {s}, so no session can be made from it: launch from inside the manager", .{ own.slice(), mgr.slice() });
     return holderDelegated(gpa, own, have_limits);
 }
 

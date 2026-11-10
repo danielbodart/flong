@@ -170,52 +170,6 @@ pub fn relaunchSelf(
     return error.Reported;
 }
 
-/// The program that moves a launcher into its user manager's tree: a
-/// transient scope of the manager's, which systemd-run starts with this
-/// process in it (the manager asks the system manager to move it, which it
-/// allows for its own user's processes) and then execs the command in
-/// place, the same process, terminal, process group and directory, the
-/// environment with INVOCATION_ID added. Fixed, as holder_start's systemctl
-/// is (launch/assemble.zig), so no caller can name another.
-pub const adopt_with = "/run/current-system/sw/bin/systemd-run";
-
-/// The adoption (DESIGN.md, "The holder"): a launcher outside the user
-/// manager's tree, in a cgroup not its own, cannot create a session's
-/// processes in the holder (cgroup.Placement), so before anything else --
-/// before the declaration's commands run, since this runs the launch again
-/// from its start -- it execs
-/// `systemd-run --user --scope --quiet --collect --unit=flong-launch-PID
-/// -- SELF launch WHAT -- ARGS...`, SELF this very binary,
-/// readlink(/proc/self/exe), as relaunchSelf finds it, and WHAT the
-/// declaration as the launch was given it, a name or a file, so a
-/// declaration's link (`NAME -> flong`) comes back as `flong launch NAME`.
-/// The relaunch finds itself under the manager. systemd-run that cannot
-/// make the scope says why and exits non-zero having run nothing, so there
-/// is no loop to guard. It returns only when the exec failed, having said
-/// why: error.Reported.
-pub fn adopt(
-    gpa: Allocator,
-    what: []const u8,
-    args: []const [*:0]const u8,
-    envp: [*:null]const ?[*:0]const u8,
-) msg.Error {
-    var buf: [path_max]u8 = undefined;
-    const n = switch (sys.readlinkat(sys.AT.FDCWD, "/proc/self/exe", &buf)) {
-        .ok => |n| n,
-        .err => |e| return msg.fail(e, "readlink /proc/self/exe", .{}),
-    };
-    if (n >= buf.len) return msg.fail(.NAMETOOLONG, "readlink /proc/self/exe", .{});
-    buf[n] = 0;
-    const unit = std.fmt.allocPrintSentinel(gpa, "--unit=flong-launch-{d}", .{sys.getpid()}, 0) catch return msg.fail(.NOMEM, "exec {s}", .{adopt_with});
-    const what_z = gpa.dupeZ(u8, what) catch return msg.fail(.NOMEM, "exec {s}", .{adopt_with});
-    const head = [_][*:0]const u8{ adopt_with, "--user", "--scope", "--quiet", "--collect", unit.ptr, "--", buf[0..n :0].ptr, "launch", what_z.ptr, "--" };
-    const v = gpa.alloc([*:0]const u8, head.len + args.len) catch return msg.fail(.NOMEM, "exec {s}", .{adopt_with});
-    @memcpy(v[0..head.len], &head);
-    @memcpy(v[head.len..], args);
-    execArgv(gpa, adopt_with, v, null, envp);
-    return error.Reported;
-}
-
 /// execve(path, argv, envp) with SIGPIPE's default and `old_mask` back,
 /// saying why when it returns. The argv vector is built in `gpa`; if that
 /// fails the exec is said to fail with ENOMEM.

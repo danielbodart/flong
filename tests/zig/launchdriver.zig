@@ -21,8 +21,9 @@
 //!       left, as for ns
 //!   nsdelegate
 //!       cgroup.checkNsdelegate on this process's /proc/self/mountinfo
-//!   holder REL LIMITS [START...]
-//!       cgroup.holderFind(REL, START, LIMITS == "limits"): its path
+//!   holder REL LIMITS
+//!       cgroup.holderFind(REL, LIMITS == "limits"), the manager starting
+//!       REL's unit when its cgroup is absent: its path
 //!   session HOLDER CONTAINER MACHINE [FILE=VALUE...]
 //!       cgroup.sessionCreate under the holder HOLDER with those limits:
 //!       its path, each leaf's limit files as written, then closed and
@@ -268,10 +269,8 @@ fn run(gpa: std.mem.Allocator, args: []const [*:0]const u8) !void {
         try cgroup.checkNsdelegate(gpa);
         out("nsdelegate: yes", .{});
     } else if (std.mem.eql(u8, cmd, "holder")) {
-        if (a.len < 2) return error.Usage;
-        var start: std.ArrayList([:0]const u8) = .empty;
-        for (a[2..]) |w| try start.append(gpa, std.mem.span(w));
-        const h = try cgroup.holderFind(gpa, std.mem.span(a[0]), start.items, std.mem.eql(u8, std.mem.span(a[1]), "limits"));
+        if (a.len != 2) return error.Usage;
+        const h = try cgroup.holderFind(gpa, std.mem.span(a[0]), std.mem.eql(u8, std.mem.span(a[1]), "limits"));
         out("holder: {s}", .{h.path.slice()});
     } else if (std.mem.eql(u8, cmd, "session")) {
         if (a.len < 3) return error.Usage;

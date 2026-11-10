@@ -891,6 +891,25 @@ pub fn access(path: [*:0]const u8, mode: u32) Result(void) {
     return result(void, linux.syscall3(.faccessat, @bitCast(@as(isize, AT.FDCWD)), @intFromPtr(path), mode));
 }
 
+/// socket(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0): a stream socket to
+/// connect to a local path, the user manager's bus (manager.zig).
+pub fn socketUnixStream() Result(fd_t) {
+    return result(fd_t, linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0));
+}
+
+/// connect(2) of the unix stream socket `fd` to `path`, EINTR retried: a
+/// path that does not fit sun_path with its NUL is ENAMETOOLONG.
+pub fn connectUnix(fd: fd_t, path: []const u8) Result(void) {
+    var sa: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
+    if (path.len >= sa.path.len) return .{ .err = .NAMETOOLONG };
+    @memcpy(sa.path[0..path.len], path);
+    while (true) {
+        const r = result(void, linux.connect(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.un)));
+        if (r == .err and r.err == .INTR) continue;
+        return r;
+    }
+}
+
 /// inotify's event bits and init flag (linux/inotify.h).
 pub const IN = linux.IN;
 

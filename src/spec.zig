@@ -100,8 +100,6 @@ pub const Spec = struct {
     // containment
     /// the holder unit's cgroup, relative to user@UID.service
     holder: [:0]const u8,
-    /// run when the holder's cgroup is absent
-    holder_start: []const [:0]const u8 = &.{},
     limits: []const Limit = &.{},
 
     // hooks and network
@@ -462,8 +460,6 @@ fn across(s: *const Spec) Error!void {
         if (!idmapCovers(s.gidmap, g)) return msg.refuse("spec: group {d} is in no gidmap extent", .{g});
     }
     // Spawn execs without a PATH search.
-    if (s.holder_start.len > 0 and (s.holder_start[0].len == 0 or s.holder_start[0][0] != '/'))
-        return msg.refuse("spec: holder-start's program is not an absolute path: '{s}'", .{s.holder_start[0]});
     for (s.post_start) |cmd| {
         if (cmd[0].len == 0 or cmd[0][0] != '/')
             return msg.refuse("spec: post-start's program is not an absolute path: '{s}'", .{cmd[0]});

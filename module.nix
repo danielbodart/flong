@@ -741,8 +741,8 @@ let
   # milliseconds rather than at the next launch.
   #
   # Declared for every user's manager, and inert until one of them starts
-  # it: nothing wants it, and the launcher starts it on demand
-  # (holder-start) whenever its cgroup is absent.
+  # it: nothing wants it, and the launcher has the manager start it on
+  # demand (StartUnit, over the user bus) whenever its cgroup is absent.
   #
   # STOPPING IT STOPS EVERY SESSION. With the default KillMode=control-group,
   # anything that deactivates the unit kills its whole cgroup, sessions

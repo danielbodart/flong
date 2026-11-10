@@ -146,23 +146,35 @@ in
       assert out == "nsdelegate: yes\nrc=0\n", out
 
   with subtest("L2 cgroup: the holder under the user manager, found, started, not started"):
+      # A holder whose last component is no unit; one the manager has no
+      # unit for, its refusal through the bus; one found; and the module's
+      # l2-holder.service (tests/native.nix), started by the manager over
+      # the bus.
       out = machine.succeed(as_alice(
           "M=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup | sed 's|\\(/user@1000.service\\)/.*|\\1|'); "
           "echo manager=$M; "
           "flong-launch-driver holder l2-holder nolimits 2>&1; echo rc=$?; "
-          "flong-launch-driver holder l2-holder nolimits /run/current-system/sw/bin/false 2>&1; echo rc=$?; "
-          "flong-launch-driver holder l2-holder nolimits /run/current-system/sw/bin/mkdir $M/l2-holder 2>&1; echo rc=$?; "
+          "flong-launch-driver holder app.slice/l2-nosuch.service nolimits 2>&1; echo rc=$?; "
+          "mkdir $M/l2-holder; "
           "flong-launch-driver holder l2-holder nolimits 2>&1; echo rc=$?; "
-          "rmdir $M/l2-holder")).splitlines()
+          "rmdir $M/l2-holder; "
+          "flong-launch-driver holder app.slice/l2-holder.service nolimits 2>&1; echo rc=$?; "
+          "flong-launch-driver holder app.slice/l2-holder.service nolimits 2>&1; echo rc=$?")).splitlines()
       print("\n".join(out))
       M = out[0].split("=", 1)[1]
       assert M.endswith("/user.slice/user-1000.slice/user@1000.service"), out
-      assert out[1:] == [
-          f"flong launch: the holder's cgroup {M}/l2-holder does not exist, and there is no way to start it", "rc=1",
-          "flong launch: starting the holder failed (/run/current-system/sw/bin/false exited 1)", "rc=1",
-          f"holder: {M}/l2-holder", "rc=0",
-          f"holder: {M}/l2-holder", "rc=0",
+      assert out[1:3] == [
+          f"flong launch: the holder's cgroup {M}/l2-holder does not exist, and l2-holder is no unit to start", "rc=1",
       ], out
+      assert out[3].startswith("flong launch: the user manager refused StartUnit l2-nosuch.service: org.freedesktop.systemd1.NoSuchUnit: "), out
+      assert out[4:] == [
+          "rc=1",
+          f"holder: {M}/l2-holder", "rc=0",
+          f"holder: {M}/app.slice/l2-holder.service", "rc=0",
+          f"holder: {M}/app.slice/l2-holder.service", "rc=0",
+      ], out
+      machine.succeed("systemctl --user -M alice@ is-active l2-holder.service")
+      machine.succeed("systemctl --user -M alice@ stop l2-holder.service")
 
   with subtest("L2 cgroup: a session with a limit, an EINVAL limit leaving nothing, a controller missing"):
       # The shell moves into a leaf, so the unit's cgroup can give pids to

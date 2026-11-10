@@ -15,6 +15,7 @@
     { "kind": "open", "method_name": "openDirNoFollow" },
     { "kind": "open", "method_name": "openCgroup" },
     { "kind": "open", "method_name": "inotifyInit" },
+    { "kind": "open", "method_name": "connectUnix" },
     { "kind": "open", "method_name": "openSignalfd" },
     { "kind": "open", "method_name": "pipe" },
     { "kind": "open", "method_name": "pidfdOpen" },

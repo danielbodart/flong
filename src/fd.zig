@@ -35,6 +35,8 @@
 //! the terminal's (flong-tty.c): `pty_master`, `pty_slave` and `tty_out`,
 //! the terminal calls on Stdio, and `pollEntry`, for a poll over several
 //! descriptors.
+//! The user manager's client (manager.zig) adds `bus`, a unix stream
+//! socket connected to its bus by `connectUnix`.
 //!
 //!   Fd(k)       an owned handle: `close` once, then every copy is stale
 //!   Held(k)     `h.holdUntilExit()`: the same descriptor, no `close`, for
@@ -86,6 +88,9 @@ pub const Kind = enum(u8) {
     /// The caller's terminal opened again, O_NONBLOCK, for the relay's
     /// output (flong-tty.c:196-203).
     tty_out,
+    /// A unix stream socket connected to the user manager's bus
+    /// (manager.zig): read and written whole messages at a time.
+    bus,
 };
 
 /// A namespace setns enters, with the kind of descriptor naming it.
@@ -268,7 +273,7 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
         // ---- file ----
 
         pub fn read(self: Self, buf: []u8) sys.Result(usize) {
-            comptime need("read", &.{ .file, .pipe_r, .pty_master });
+            comptime need("read", &.{ .file, .pipe_r, .pty_master, .bus });
             return sys.read(self.raw(), buf);
         }
 
@@ -279,7 +284,7 @@ fn Handle(comptime k: Kind, comptime own: Ownership) type {
 
         /// Writes all of `bytes`, going on after a short write.
         pub fn writeAll(self: Self, bytes: []const u8) sys.Result(void) {
-            comptime need("write", &.{ .file, .pipe_w });
+            comptime need("write", &.{ .file, .pipe_w, .bus });
             return writeAllTo(self.raw(), bytes);
         }
 
@@ -559,6 +564,22 @@ pub fn pipe() Error!sys.Result(Pipe) {
         return err;
     };
     return .{ .ok = .{ .r = r, .w = w } };
+}
+
+/// A unix stream socket connected to `path` (manager.zig's bus). The
+/// connect's errno is an answer in `.err`, the socket closed.
+pub fn connectUnix(path: []const u8) Error!sys.Result(Fd(.bus)) {
+    const h = switch (try adopted(.bus, sys.socketUnixStream())) {
+        .ok => |h| h,
+        .err => |e| return .{ .err = e },
+    };
+    switch (sys.connectUnix(h.raw(), path)) {
+        .ok => return .{ .ok = h },
+        .err => |e| {
+            h.close();
+            return .{ .err = e };
+        },
+    }
 }
 
 /// pidfd_open(2) of `pid` (flong-util.c:326-334): ESRCH, the process gone,

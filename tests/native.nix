@@ -376,6 +376,18 @@ in
       subGidRanges = [ { startGid = 100000; count = 65536; } ];
     };
 
+    # A holder unit for launch-native's L2 cgroup case to have the user
+    # manager start over the bus: in app.slice and delegated, as the
+    # module's flong-sessions is, its one process asleep.
+    systemd.user.services.l2-holder = {
+      serviceConfig = {
+        Type = "exec";
+        Slice = "app.slice";
+        Delegate = "yes";
+        ExecStart = "${pkgs.coreutils}/bin/sleep infinity";
+      };
+    };
+
     environment.systemPackages = [
       pkgs.util-linux
       pkgs.strace

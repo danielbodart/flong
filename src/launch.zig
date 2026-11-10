@@ -199,17 +199,12 @@ fn fromDeclaration(start: sys.timespec, argv: []const [*:0]const u8, what: []con
     const arena = arena_state.allocator();
     // A launcher outside its user manager's tree, in a cgroup not its own
     // (an ssh or console login's scope), could make no session: the clone3
-    // of bwrap into the holder fails with EACCES (cgroup.Placement). It
-    // moves into a scope of the manager's first, by running the launch
-    // again from there, before the declaration is read or any of its
-    // commands run (prologue.adopt). A launch under the manager, or from a
-    // delegated cgroup of its own, goes on as it is.
-    switch (cgroup.placement()) {
-        .adopt => switch (prologue.adopt(arena, what, args, @ptrCast(envp.ptr))) {
-            error.Reported => proc.exit(prologue.exit_refused),
-        },
-        .inside, .delegated => {},
-    }
+    // of bwrap into the holder fails with EACCES (cgroup.Placement). It asks
+    // the manager for a scope of its own first and carries on in it
+    // (cgroup.adopt), before the declaration is read or any of its commands
+    // run. A launch under the manager, or from a delegated cgroup of its
+    // own, goes on as it is.
+    if (cgroup.placement() == .adopt) cgroup.adopt(arena, what) catch proc.exit(prologue.exit_refused);
     const path: [:0]const u8 = if (isFile(what)) arena.dupeZ(u8, what) catch outOfMemory() else switch (lookup.find(arena, what, envp) catch outOfMemory()) {
         .path => |p| p,
         .missing => |looked| {
@@ -362,7 +357,7 @@ fn run(l: *Launch) sig.Error!u8 {
 
     // 7. nsdelegate; the holder, found or started (:716-718).
     try cgroup.checkNsdelegate(l.arena);
-    l.holder = try cgroup.holderFind(l.arena, s.holder, s.holder_start, s.limits.len > 0);
+    l.holder = try cgroup.holderFind(l.arena, s.holder, s.limits.len > 0);
     const holder = &l.holder.?;
 
     // 8. The inline sweep (:720-722).

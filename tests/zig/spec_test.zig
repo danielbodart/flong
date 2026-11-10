@@ -355,9 +355,8 @@ fn crossOrder(comptime n: usize) fn (*spec.Spec) void {
             if (n <= 3) s.uid = 70000;
             if (n <= 4) s.gid = 70000;
             if (n <= 5) s.groups = &.{70000};
-            if (n <= 6) s.holder_start = &.{"sh"};
-            if (n <= 7) s.post_start = &.{&.{"sh"}};
-            if (n <= 8) s.pasta_wait = true;
+            if (n <= 6) s.post_start = &.{&.{"sh"}};
+            if (n <= 7) s.pasta_wait = true;
         }
     }.f;
 }
@@ -380,9 +379,8 @@ const cases = [_]Case{
     case("cross-order-3", crossOrder(3), "spec: user's uid 70000 is in no uidmap extent"),
     case("cross-order-4", crossOrder(4), "spec: user's gid 70000 is in no gidmap extent"),
     case("cross-order-5", crossOrder(5), "spec: group 70000 is in no gidmap extent"),
-    case("cross-order-6", crossOrder(6), "spec: holder-start's program is not an absolute path: 'sh'"),
-    case("cross-order-7", crossOrder(7), "spec: post-start's program is not an absolute path: 'sh'"),
-    case("cross-order-8", crossOrder(8), "spec: pasta-arg or pasta-wait without network"),
+    case("cross-order-6", crossOrder(6), "spec: post-start's program is not an absolute path: 'sh'"),
+    case("cross-order-7", crossOrder(7), "spec: pasta-arg or pasta-wait without network"),
     case("gidmap-count-0", set("gidmap", maps(&.{.{ .inside = 0, .outside = 100000, .count = 0 }})), "spec: gidmap 0 100000 0: the count is 0"),
     case("gidmap-host-root", set("gidmap", maps(&.{.{ .inside = 0, .outside = 0, .count = 65536 }})), "spec: gidmap 0 0 65536 reaches host id 0: flong never maps host root"),
     case("gidmap-overlap", set("gidmap", maps(&.{ .{ .inside = 0, .outside = 100000, .count = 65536 }, .{ .inside = 65535, .outside = 200000, .count = 2 } })), "spec: gidmap extents 0 100000 65536 and 65535 200000 2 overlap"),
@@ -392,7 +390,6 @@ const cases = [_]Case{
     case("holder-dotdot", set("holder", "flong.slice/../s"), "spec: holder has an empty, '.' or '..' component: 'flong.slice/../s'"),
     case("holder-empty", set("holder", ""), "spec: holder has an empty, '.' or '..' component: ''"),
     case("holder-name-max", set("holder", name_over), "spec: holder has a component longer than NAME_MAX"),
-    case("holder-start-relative", set("holder_start", @as([]const [:0]const u8, &.{"sh"})), "spec: holder-start's program is not an absolute path: 'sh'"),
     case("limit-empty", set("limits", @as([]const spec.Limit, &.{.{ .file = "memory.max", .value = "" }})), "spec: limit memory.max has an empty value"),
     case("limit-twice", set("limits", @as([]const spec.Limit, &.{ .{ .file = "pids.max", .value = "1" }, .{ .file = "pids.max", .value = "2" } })), "spec: limit pids.max given more than once"),
     case("limit-unknown", set("limits", @as([]const spec.Limit, &.{.{ .file = "cgroup.procs", .value = "1" }})), "spec: limit 'cgroup.procs' is not one of memory.max memory.high memory.swap.max memory.oom.group pids.max cpu.max cpu.weight io.weight"),
@@ -536,7 +533,6 @@ test "validate: every field set, each at an edge that passes (accepted-all)" {
     s.seccomp = &.{ "/s.bpf", "/s.bpf" };
     s.nested_userns = 2147483647;
     s.holder = "a/b.c";
-    s.holder_start = &.{ "/bin/sh", "--" };
     s.limits = &.{ .{ .file = "memory.max", .value = "max" }, .{ .file = "pids.max", .value = "0" } };
     s.post_start = &.{ &.{ "/h", "--", "" }, &.{"/g"} };
     s.post_stop = &.{ &.{"/nix/store/x/y"}, &.{ "/nix/store/x/z", "--" } };
@@ -697,8 +693,6 @@ const Gen = struct {
         for (protect) |*p| p.* = try g.cleanPath(.absolute);
         const seccomp = try g.a.alloc([:0]const u8, g.below(4));
         for (seccomp) |*p| p.* = try g.absPath();
-        const holder_start = try g.words(2);
-        if (holder_start.len > 0) holder_start[0] = try g.absPath();
         const post_start = try g.a.alloc(spec.Command, g.below(3));
         for (post_start) |*c| c.* = try g.command(try g.absPath());
         const post_stop = try g.a.alloc(spec.Command, g.below(3));
@@ -745,7 +739,6 @@ const Gen = struct {
             .seccomp = seccomp,
             .nested_userns = if (g.r.boolean()) 0 else 1 + g.r.uintLessThan(u64, std.math.maxInt(i32)),
             .holder = try g.cleanPath(.relative),
-            .holder_start = holder_start,
             .limits = limits.items,
             .post_start = post_start,
             .post_stop = post_stop,
@@ -816,7 +809,6 @@ const Rule = enum {
     hostname_empty,
     command_empty,
     pasta_without_network,
-    holder_start_relative,
     post_start_relative,
 };
 
@@ -1061,10 +1053,6 @@ fn mutate(g: Gen, rule: Rule, s: *spec.Spec) ![]const u8 {
                 s.pasta_wait = true;
             }
             return "spec: pasta-arg or pasta-wait without network";
-        },
-        .holder_start_relative => {
-            s.holder_start = &.{ "bin/start", "/x" };
-            return "spec: holder-start's program is not an absolute path: 'bin/start'";
         },
         .post_start_relative => {
             s.post_start = try append(a, spec.Command, s.post_start, &.{ "hook", "/x" });

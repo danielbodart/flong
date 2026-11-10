@@ -318,6 +318,8 @@ let
           ./src/sweeper.zig
           ./src/record.zig
           ./src/cgroup.zig
+          ./src/dbus.zig
+          ./src/manager.zig
           ./src/names.zig
           ./src/proc.zig
           ./src/sig.zig
