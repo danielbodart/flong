@@ -4,7 +4,7 @@
 //!
 //! Built: a method call, little-endian, with PATH, INTERFACE, MEMBER,
 //! DESTINATION and SIGNATURE in its header, and a body made of strings,
-//! object paths, uint32s, arrays, structs and variants (`Body`). Read: any
+//! object paths, uint32s, arrays, structs and variants (`Writer`). Read: any
 //! message of either byte order, framed by `frameLen` and taken apart by
 //! `parse` into its type, serial, REPLY_SERIAL, PATH, INTERFACE, MEMBER,
 //! ERROR_NAME and SIGNATURE, with a `Reader` over its body for the strings,
@@ -41,69 +41,84 @@ const max_depth = 64;
 
 /// A body, or a header's fields, built little-endian in `buf`; offsets
 /// align from the start of `buf`.
-pub const Body = struct {
+pub const Writer = struct {
     gpa: std.mem.Allocator,
     buf: std.ArrayList(u8) = .empty,
 
-    pub fn init(gpa: std.mem.Allocator) Body {
+    pub fn init(gpa: std.mem.Allocator) Writer {
         return .{ .gpa = gpa };
     }
 
-    fn pad(b: *Body, n: usize) !void {
+    /// What has been written.
+    pub fn bytes(w: *const Writer) []u8 {
+        return w.buf.items;
+    }
+
+    /// `b` as it is, after what has been written.
+    pub fn put(w: *Writer, b: []const u8) !void {
+        try w.buf.appendSlice(w.gpa, b);
+    }
+
+    fn pad(b: *Writer, n: usize) !void {
         while (b.buf.items.len % n != 0) try b.buf.append(b.gpa, 0);
     }
 
-    pub fn byte(b: *Body, v: u8) !void {
+    pub fn byte(b: *Writer, v: u8) !void {
         try b.buf.append(b.gpa, v);
     }
 
-    pub fn uint32(b: *Body, v: u32) !void {
+    pub fn uint32(b: *Writer, v: u32) !void {
         try b.pad(4);
         try b.buf.appendSlice(b.gpa, &std.mem.toBytes(std.mem.nativeToLittle(u32, v)));
     }
 
     /// A STRING or an OBJECT_PATH: its length, its bytes, a NUL.
-    pub fn string(b: *Body, s: []const u8) !void {
+    pub fn string(b: *Writer, s: []const u8) !void {
         try b.uint32(@intCast(s.len));
         try b.buf.appendSlice(b.gpa, s);
         try b.buf.append(b.gpa, 0);
     }
 
     /// A SIGNATURE: a byte of length, its bytes, a NUL.
-    pub fn signature(b: *Body, g: []const u8) !void {
+    pub fn signature(b: *Writer, g: []const u8) !void {
         try b.buf.append(b.gpa, @intCast(g.len));
         try b.buf.appendSlice(b.gpa, g);
         try b.buf.append(b.gpa, 0);
     }
 
     /// A STRUCT or DICT_ENTRY starts on 8.
-    pub fn structStart(b: *Body) !void {
+    pub fn structStart(b: *Writer) !void {
         try b.pad(8);
     }
 
     /// An ARRAY of elements aligned to `elem_align`: its length is
     /// written by `arrayEnd(the returned mark)`, counting from the first
     /// element, after the padding to it.
-    pub fn arrayStart(b: *Body, elem_align: usize) !ArrayMark {
+    pub fn arrayStart(b: *Writer, elem_align: usize) !ArrayMark {
         try b.uint32(0);
         const at = b.buf.items.len - 4;
         try b.pad(elem_align);
         return .{ .len_at = at, .start = b.buf.items.len };
     }
 
-    pub fn arrayEnd(b: *Body, m: ArrayMark) void {
+    pub fn arrayEnd(b: *Writer, m: ArrayMark) void {
         const n: u32 = @intCast(b.buf.items.len - m.start);
         b.buf.items[m.len_at..][0..4].* = std.mem.toBytes(std.mem.nativeToLittle(u32, n));
     }
 
+    /// An ARRAY with no elements, padded to where its first would be.
+    pub fn emptyArray(b: *Writer, elem_align: usize) !void {
+        b.arrayEnd(try b.arrayStart(elem_align));
+    }
+
     /// A VARIANT holding one STRING.
-    pub fn variantString(b: *Body, s: []const u8) !void {
+    pub fn variantString(b: *Writer, s: []const u8) !void {
         try b.signature("s");
         try b.string(s);
     }
 
     /// A VARIANT holding an ARRAY of UINT32.
-    pub fn variantUint32s(b: *Body, vs: []const u32) !void {
+    pub fn variantUint32s(b: *Writer, vs: []const u32) !void {
         try b.signature("au");
         const m = try b.arrayStart(4);
         for (vs) |v| try b.uint32(v);
@@ -126,10 +141,10 @@ pub const Call = struct {
 /// The whole message for `call` with serial `serial` and `body`, which
 /// `signature` describes.
 pub fn methodCall(gpa: std.mem.Allocator, serial: u32, call: Call, body: []const u8) ![]u8 {
-    var h: Body = .init(gpa);
+    var h: Writer = .init(gpa);
     try h.byte('l');
     try h.byte(@intFromEnum(Type.call));
-    try h.byte(0); // flags: a reply is wanted, and the manager may be started
+    try h.byte(0); // flags: a reply is wanted, and the destination may be started
     try h.byte(1); // protocol version
     try h.uint32(@intCast(body.len));
     try h.uint32(serial);
@@ -146,11 +161,11 @@ pub fn methodCall(gpa: std.mem.Allocator, serial: u32, call: Call, body: []const
     }
     h.arrayEnd(m);
     try h.pad(8);
-    try h.buf.appendSlice(gpa, body);
-    return h.buf.items;
+    try h.put(body);
+    return h.bytes();
 }
 
-fn field(h: *Body, code: u8, comptime g: []const u8, v: []const u8) !void {
+fn field(h: *Writer, code: u8, comptime g: []const u8, v: []const u8) !void {
     try h.structStart();
     try h.byte(code);
     try h.signature(g);
@@ -169,10 +184,6 @@ fn endianOf(b: u8) Malformed!Endian {
     };
 }
 
-fn align8(n: usize) usize {
-    return (n + 7) & ~@as(usize, 7);
-}
-
 /// The length of the whole message at the start of `buf`, once its fixed
 /// header is there (16 bytes); null while fewer have arrived.
 /// error.Malformed for a byte order that is neither, or a message longer
@@ -183,7 +194,7 @@ pub fn frameLen(buf: []const u8) Malformed!?usize {
     const body_len = std.mem.readInt(u32, buf[4..8], e);
     const fields_len = std.mem.readInt(u32, buf[12..16], e);
     if (body_len > max_message or fields_len > max_message) return error.Malformed;
-    const total = align8(16 + @as(usize, fields_len)) + body_len;
+    const total = std.mem.alignForward(usize, 16 + @as(usize, fields_len), 8) + body_len;
     if (total > max_message) return error.Malformed;
     return total;
 }
@@ -213,7 +224,7 @@ pub fn parse(buf: []const u8) Malformed!Message {
     const e = try endianOf(buf[0]);
     if (buf[3] != 1) return error.Malformed;
     const fields_len = std.mem.readInt(u32, buf[12..16], e);
-    const body_at = align8(16 + @as(usize, fields_len));
+    const body_at = std.mem.alignForward(usize, 16 + @as(usize, fields_len), 8);
     var m: Message = .{
         .type = @enumFromInt(buf[1]),
         .serial = std.mem.readInt(u32, buf[8..12], e),
@@ -225,13 +236,14 @@ pub fn parse(buf: []const u8) Malformed!Message {
     var r: Reader = .{ .buf = buf[0 .. 16 + fields_len], .endian = e, .pos = 16 };
     while (true) {
         // The last field is not padded out to 8 within the array.
-        if (align8(r.pos) >= r.buf.len) break;
+        if (std.mem.alignForward(usize, r.pos, 8) >= r.buf.len) break;
         try r.alignTo(8);
         const code = try r.byte();
         const g = try r.signature();
+        // A field the launcher does not read, of any type, container types
+        // included, is read past by its signature, as the specification
+        // says unknown fields must be.
         if (g.len != 1) {
-            // No field the launcher reads has a container type; one it does
-            // not know is still read past, by its type.
             try r.skip(g);
             continue;
         }
@@ -424,7 +436,7 @@ test "a body of a string, an array of (sv) and an empty array reads back" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
-    var b: Body = .init(gpa);
+    var b: Writer = .init(gpa);
     try b.string("flong-launch-7.scope");
     try b.string("fail");
     const props = try b.arrayStart(8);
@@ -435,7 +447,7 @@ test "a body of a string, an array of (sv) and an empty array reads back" {
     try b.string("Slice");
     try b.variantString("app.slice");
     b.arrayEnd(props);
-    b.arrayEnd(try b.arrayStart(8));
+    try b.emptyArray(8);
     const msg = try methodCall(gpa, 9, .{
         .destination = "org.freedesktop.systemd1",
         .path = "/org/freedesktop/systemd1",

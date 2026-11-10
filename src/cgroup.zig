@@ -14,10 +14,11 @@
 //! written unless the spec declares one, and a controller is enabled only
 //! when a declared limit needs it (flong-cgroup.h:1-17).
 //!
-//! The launch's half imports proc (the holder's start) and passwd (the
-//! refusal's name); the sweeper's build, which reaches only the sweep's
-//! half, gives cgroup neither, and Zig resolves an import only where it is
-//! used (build.zig's `launcher (phase 7)` block gives the launch's both).
+//! The launch's half imports manager (the holder's start and the
+//! launcher's adoption, over the user bus) and passwd (the refusal's
+//! name); the sweeper's build, which reaches only the sweep's half, gives
+//! cgroup neither, and Zig resolves an import only where it is used
+//! (build.zig's launchModules gives the launch's both).
 //!
 //! Everything is reached from descriptors once the holder is open: the
 //! container level, the session and its leaves are each opened with one
@@ -32,7 +33,6 @@ const fdt = @import("fd");
 const msg = @import("msg");
 const sig = @import("sig");
 const names = @import("names");
-const proc = @import("proc");
 const passwd = @import("passwd");
 const manager = @import("manager");
 
@@ -125,20 +125,63 @@ pub fn ownFrom(text: []const u8) Own {
     return .{ .path = line };
 }
 
-/// own_cgroup (flong-cgroup.c:92-117): this process's cgroup, the "0::"
-/// line of /proc/self/cgroup, as an absolute path under /sys/fs/cgroup.
-fn ownCgroup() Error!Path {
-    var buf: [path_max + 64]u8 = undefined;
-    const len = try readAt(fdt.cwd, "/proc/self/cgroup", &buf);
-    if (len == buf.len - 1) return msg.refuse("/proc/self/cgroup is too long", .{});
+/// Why /proc/self/cgroup named no cgroup (ownRead), for ownCgroup to say.
+const OwnFailure = union(enum) {
+    table_full,
+    open: sys.E,
+    read: sys.E,
+    too_long,
+    no_entry,
+    unexpected: []const u8,
+    path_too_long,
+};
+
+const own_file = "/proc/self/cgroup";
+
+/// own_cgroup's read and parse, saying nothing: this process's cgroup, the
+/// "0::" line of /proc/self/cgroup, as an absolute path under
+/// /sys/fs/cgroup, read into `buf` as readAt reads; or why not.
+fn ownRead(buf: *[path_max + 64]u8) union(enum) { path: Path, failed: OwnFailure } {
+    const f = switch (fdt.openFile(fdt.cwd, own_file, .{ .NOFOLLOW = true }, 0) catch return .{ .failed = .table_full }) {
+        .ok => |f| f,
+        .err => |e| return .{ .failed = .{ .open = e } },
+    };
+    defer f.close();
+    var len: usize = 0;
+    while (len < buf.len - 1) {
+        const n = switch (f.read(buf[len .. buf.len - 1])) {
+            .ok => |n| n,
+            .err => |e| return .{ .failed = .{ .read = e } },
+        };
+        if (n == 0) break;
+        len += n;
+    }
+    if (len == buf.len - 1) return .{ .failed = .too_long };
     const p = switch (ownFrom(buf[0..len])) {
         .path => |p| p,
-        .no_entry => return msg.refuse("no cgroup2 entry in /proc/self/cgroup", .{}),
-        .unexpected => |p| return msg.refuse("an unexpected cgroup in /proc/self/cgroup: {s}", .{p}),
+        .no_entry => return .{ .failed = .no_entry },
+        .unexpected => |p| return .{ .failed = .{ .unexpected = p } },
     };
     // The root cgroup is "/", which would give ".../cgroup/".
-    return Path.of(&.{ root, if (std.mem.eql(u8, p, "/")) "" else p }) orelse
-        msg.refuse("the launcher's cgroup path is too long", .{});
+    const path = Path.of(&.{ root, if (std.mem.eql(u8, p, "/")) "" else p }) orelse return .{ .failed = .path_too_long };
+    return .{ .path = path };
+}
+
+/// own_cgroup (flong-cgroup.c:92-117): ownRead's path, or why not said.
+fn ownCgroup() Error!Path {
+    var buf: [path_max + 64]u8 = undefined;
+    return switch (ownRead(&buf)) {
+        .path => |p| p,
+        .failed => |f| switch (f) {
+            .table_full => msg.refuse("open {s}: too many open descriptors", .{own_file}),
+            .open => |e| msg.fail(e, "open {s}", .{own_file}),
+            .read => |e| msg.fail(e, "read {s}", .{own_file}),
+            .too_long => msg.refuse("/proc/self/cgroup is too long", .{}),
+            .no_entry => msg.refuse("no cgroup2 entry in /proc/self/cgroup", .{}),
+            .unexpected => |p| msg.refuse("an unexpected cgroup in /proc/self/cgroup: {s}", .{p}),
+            .path_too_long => msg.refuse("the launcher's cgroup path is too long", .{}),
+        },
+    };
 }
 
 /// The uid that owns the cgroup behind `h`, or (uid_t)-1 when fstat fails
@@ -418,50 +461,37 @@ pub const Placement = enum {
     adopt,
 };
 
-/// placement's decision, from what it read: whether the launcher is under
-/// the manager, whether its own cgroup is the caller's, whether the manager
-/// is there and the caller's.
-pub fn placementOf(under_manager: bool, own_is_callers: bool, manager_is_callers: bool) Placement {
-    if (under_manager) return .inside;
+/// placementFor's decision for a launcher outside the manager, from
+/// whether its own cgroup is the caller's and whether the manager's is
+/// there and the caller's.
+pub fn placementOf(own_is_callers: bool, manager_is_callers: bool) Placement {
     if (own_is_callers) return .delegated;
     return if (manager_is_callers) .adopt else .delegated;
 }
 
-/// The launcher's Placement, read from /proc/self/cgroup and the owners of
-/// its cgroup and of the user manager's. Silent: what cannot be read is
-/// `inside`, the launch going on as it is, so that holderFind, in its
-/// place in the launch, says what is wrong as it always has. A `delegated`
-/// launcher whose cgroup is not its own is refused there too, naming
-/// linger.
-pub fn placement() Placement {
-    var buf: [path_max + 64]u8 = undefined;
-    const f = switch (fdt.openFile(fdt.cwd, "/proc/self/cgroup", .{ .NOFOLLOW = true }, 0) catch return .inside) {
-        .ok => |f| f,
-        .err => return .inside,
-    };
-    defer f.close();
-    var len: usize = 0;
-    while (len < buf.len) {
-        const n = switch (f.read(buf[len..])) {
-            .ok => |n| n,
-            .err => return .inside,
-        };
-        if (n == 0) break;
-        len += n;
-    }
-    if (len == buf.len) return .inside;
-    const rel = switch (ownFrom(buf[0..len])) {
-        .path => |p| p,
-        else => return .inside,
-    };
-    const own = Path.of(&.{ root, if (std.mem.eql(u8, rel, "/")) "" else rel }) orelse return .inside;
+/// The Placement of a launcher in the cgroup `own`, by its path and the
+/// owners of it and of the user manager's cgroup.
+fn placementFor(own: *const Path) Placement {
     const uid = sys.getuid();
     if (managerEnd(own.slice(), uid) != null) return .inside;
     const mgr = standardManager(uid);
-    return placementOf(false, ownerAt(&own) == uid, ownerAt(&mgr) == uid);
+    return placementOf(ownerAt(own) == uid, ownerAt(&mgr) == uid);
 }
 
-/// The adoption (DESIGN.md, "The holder"): a launcher whose placement is
+/// The launcher's Placement. Silent: a /proc/self/cgroup that cannot be
+/// read is `inside`, the launch going on as it is, so that holderFind, in
+/// its place in the launch, says what is wrong as it always has. A
+/// `delegated` launcher whose cgroup is not its own is refused there too,
+/// naming linger.
+pub fn placement() Placement {
+    var buf: [path_max + 64]u8 = undefined;
+    return switch (ownRead(&buf)) {
+        .path => |p| placementFor(&p),
+        .failed => .inside,
+    };
+}
+
+/// The adoption (DESIGN.md, "The holder" and "Talking to systemd"): a launcher whose placement is
 /// `adopt` asks its user manager for a scope, flong-launch-PID.scope in
 /// app.slice, with itself in it (manager.startScope), and is under the
 /// manager once the job is done: the same process, carrying on. `what` is
@@ -492,7 +522,7 @@ pub fn adopt(gpa: std.mem.Allocator, what: []const u8) sig.Error!void {
 ///     whose adoption did not hold; a holder under the manager would fail
 ///     the first clone3 into it with EACCES.
 ///  4. Otherwise refused, naming users.users.<name>.linger.
-/// Paths and the start's argv are in `gpa`, the launcher's arena.
+/// Paths are in `gpa`, the launcher's arena.
 pub fn holderFind(gpa: std.mem.Allocator, rel: []const u8, have_limits: bool) sig.Error!Holder {
     const own = try ownCgroup();
     const uid = sys.getuid();
@@ -508,9 +538,8 @@ pub fn holderFind(gpa: std.mem.Allocator, rel: []const u8, have_limits: bool) si
             .err => |e| return msg.fail(e, "open the user manager's cgroup {s}", .{mgr.slice()}),
         }
     }
-    const mgr = standardManager(uid);
-    if (placementOf(false, ownerAt(&own) == uid, ownerAt(&mgr) == uid) == .adopt)
-        return msg.refuse("the launcher's cgroup {s} is neither yours nor under your user manager's {s}, so no session can be made from it: launch from inside the manager", .{ own.slice(), mgr.slice() });
+    if (placementFor(&own) == .adopt)
+        return msg.refuse("the launcher's cgroup {s} is neither yours nor under your user manager's {s}, so no session can be made from it: launch from inside the manager", .{ own.slice(), standardManager(uid).slice() });
     return holderDelegated(gpa, own, have_limits);
 }
 
@@ -989,17 +1018,15 @@ test "managerEnd finds user@UID.service as a whole component" {
     try testing.expectEqualStrings(m, standardManager(1000).slice());
 }
 
-test "placementOf: under the manager, delegated, or adopted into it" {
-    // A terminal of the desktop's, or a unit of the user manager's.
-    try testing.expectEqual(Placement.inside, placementOf(true, true, true));
+test "placementOf: outside the manager, delegated or adopted into it" {
     // A system unit with User= and Delegate=yes, lingering or not.
-    try testing.expectEqual(Placement.delegated, placementOf(false, true, true));
-    try testing.expectEqual(Placement.delegated, placementOf(false, true, false));
+    try testing.expectEqual(Placement.delegated, placementOf(true, true));
+    try testing.expectEqual(Placement.delegated, placementOf(true, false));
     // An ssh or console login's scope, with a user manager: the case that
     // failed clone3 with EACCES.
-    try testing.expectEqual(Placement.adopt, placementOf(false, false, true));
+    try testing.expectEqual(Placement.adopt, placementOf(false, true));
     // No user manager and nothing delegated: holderFind refuses, naming linger.
-    try testing.expectEqual(Placement.delegated, placementOf(false, false, false));
+    try testing.expectEqual(Placement.delegated, placementOf(false, false));
 }
 
 test "ownFrom reads the 0:: line" {

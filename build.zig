@@ -1281,7 +1281,6 @@ const Launcher = struct {
                 .{ .name = "msg", .module = m.msg },
                 .{ .name = "sig", .module = m.sig },
                 .{ .name = "names", .module = m.names },
-                .{ .name = "proc", .module = m.proc },
                 .{ .name = "passwd", .module = passwd },
                 .{ .name = "manager", .module = m.manager },
             },
@@ -1757,7 +1756,6 @@ fn modules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             .{ .name = "msg", .module = msg },
             .{ .name = "sig", .module = sig },
             .{ .name = "names", .module = names },
-            .{ .name = "manager", .module = manager },
         },
     });
     const record = b.createModule(.{
