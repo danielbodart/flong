@@ -22,7 +22,11 @@ loads `/etc/flong/NAME.json` (then `$XDG_CONFIG_HOME/flong/NAME.json`) as
 Nothing in it runs as host root, and nothing asks for it.
 
 Its prologue, the part before the container exists, works out what only the
-launch can know (`src/launch/assemble.zig`):
+launch can know (`src/launch/assemble.zig`). Before any of it, before the
+declaration is even read, a launcher outside your user manager's tree, in a
+cgroup that is not yours (an ssh or console login's scope), moves itself into
+it and starts again ([The holder](#the-holder), "Started from outside the
+manager").
 
 1. Refuse a user of uid 0 or of primary group 0. Use `/run/user/$UID`, which
    must exist and be yours.
@@ -1016,11 +1020,37 @@ cgroup cannot enable controllers (`EBUSY`).
 Containers show in `systemd-cgls` and `systemctl --user status
 flong-sessions.service`, not in `machinectl`.
 
+- **Started from outside the manager.** bwrap, the hook and pasta are created
+  in their leaves with `clone3(CLONE_INTO_CGROUP)`, which the kernel allows
+  only when the caller may write `cgroup.procs` in the leaf *and* in the
+  nearest cgroup the leaf and the caller's own cgroup share: the rule for
+  moving a process, applied to a new one. Under the manager that ancestor is
+  at most `user@UID.service`, yours. From an ssh or console login it is
+  `user-UID.slice`, root's, and the clone fails with `EACCES`, however
+  delegated the holder is. So the launch begins (`cgroup.placement`, from
+  `/proc/self/cgroup` and two `fstat`s) by asking where it is: under
+  `user@UID.service`, it goes on; outside it, in a cgroup of its own (below),
+  it goes on there; outside it, in a cgroup not its own, while you have a user
+  manager, it execs `systemd-run --user --scope --quiet --collect
+  --unit=flong-launch-PID -- flong launch WHAT -- ARGS` (`prologue.adopt`). The
+  manager makes the scope and asks the system manager to move the launcher
+  into it, which it allows for its own user's processes, and systemd-run then
+  execs the launch in place: the same process, terminal, process group,
+  directory and environment (with `INVOCATION_ID`). It costs a scope, the 23
+  ms measured below, once, and only off the desktop's path. It runs before the declaration is read, so
+  nothing of the launch runs twice; a systemd-run that cannot make the scope
+  says why and exits having run nothing, so there is no loop. The process
+  leaves the login's scope, as a desktop terminal's is never in it: logind no
+  longer counts it as the login's, which with `KillUserProcesses=no` changes
+  nothing at logout. A launcher still outside after that is refused by name,
+  never left to the clone's `EACCES`.
+
 A user with no user manager is refused, naming `users.users.<name>.linger`.
 There is no fallback outside the runtime directory: records must reset at
-boot, and there would be no container cgroup to reap hook daemons. A system
-unit with `User=`, a `/run/user/<uid>` of yours and `Delegate=yes` runs its
-containers under its own cgroup instead (`DelegateSubgroup=` too, for declared
+boot, and there would be no container cgroup to reap hook daemons. A launcher
+in a cgroup of its own outside the manager -- a system unit with `User=`, a
+`/run/user/<uid>` of yours and `Delegate=yes`, user manager or not -- runs its
+containers under that cgroup instead (`DelegateSubgroup=` too, for declared
 limits, since a cgroup with a process in it cannot enable controllers for its
 children).
 
@@ -2358,6 +2388,7 @@ is what that step calls.
 
 | # | step | call | trace stage |
 |---|---|---|---|
+| −1 | outside the user manager in a cgroup not yours: exec `systemd-run --user --scope` with this launch, before the declaration is read | `cgroup.placement`, `prologue.adopt` | |
 | 0 | SIGCHLD to its default; the prologue, which builds the spec, and before it names the container blocks signals, ignores SIGPIPE and opens the signalfd | `sig.defaultChld`, `assemble.run` (`sig.block`, `sig.ignorePipe`, `sig.openSignalfd`) | `prologue-start` |
 | 1 | from here until the record, a failure runs `postStop` for the container's name, once | `assemble.Early` | |
 | 2 | the spec's checks, refusing uid 0 first | `spec.validate` | `launcher-start` |

@@ -900,6 +900,28 @@ in
             rt + " -p Delegate=yes -p DelegateSubgroup=launcher"))
         assert out.splitlines() == ["268435456", "64", "50000 100000", "1000"], out
 
+    @test("outside the user manager: adopted into it, or delegated")
+    def _():
+        # alice from a system unit: a cgroup of root's outside her manager,
+        # as an ssh or console login's scope is. The clone3 of bwrap into
+        # the holder failed there with EACCES, the nearest cgroup the two
+        # share being user-1000.slice; the launcher now moves itself into a
+        # scope of her manager's first, and the session runs.
+        alice = ("systemd-run --wait --pipe --quiet --collect -p User=alice "
+                 "-E XDG_RUNTIME_DIR=/run/user/1000 {props} -- /run/current-system/sw/bin/bash -c {script} </dev/null")
+        inner = ("export PATH=/run/wrappers/bin:/run/current-system/sw/bin; cd /srv/work; "
+                 "cat /proc/self/cgroup >&2; plain 'echo adopted-ok' 2>&1; echo rc=$?")
+        out = machine.succeed(alice.format(props="", script=shlex.quote(inner)))
+        assert "adopted-ok" in out.split() and out.split()[-1] == "rc=0", out
+        assert "Permission denied" not in out, out
+        # A system unit of hers with Delegate=yes: her own cgroup, so the
+        # session lives under it, as dave's does, user manager or not.
+        out = machine.succeed(alice.format(
+            props="-p Delegate=yes -p DelegateSubgroup=launcher",
+            script=shlex.quote("export PATH=/run/wrappers/bin:/run/current-system/sw/bin; cd /srv/work; "
+                               "limited 'cat /sys/fs/cgroup/memory.max; id -u'")))
+        assert out.splitlines() == ["268435456", "1000"], out
+
     @test("the declaration's mounts", part="b")
     def _():
         # Made here rather than by tmpfiles, whose syntax needs a space escaped.

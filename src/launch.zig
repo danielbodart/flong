@@ -197,6 +197,19 @@ pub fn named(argv: []const [*:0]const u8, name: []const u8, envp: []const [*:0]c
 fn fromDeclaration(start: sys.timespec, argv: []const [*:0]const u8, what: []const u8, args: []const [*:0]const u8, envp: []const [*:0]const u8) noreturn {
     var arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     const arena = arena_state.allocator();
+    // A launcher outside its user manager's tree, in a cgroup not its own
+    // (an ssh or console login's scope), could make no session: the clone3
+    // of bwrap into the holder fails with EACCES (cgroup.Placement). It
+    // moves into a scope of the manager's first, by running the launch
+    // again from there, before the declaration is read or any of its
+    // commands run (prologue.adopt). A launch under the manager, or from a
+    // delegated cgroup of its own, goes on as it is.
+    switch (cgroup.placement()) {
+        .adopt => switch (prologue.adopt(arena, what, args, @ptrCast(envp.ptr))) {
+            error.Reported => proc.exit(prologue.exit_refused),
+        },
+        .inside, .delegated => {},
+    }
     const path: [:0]const u8 = if (isFile(what)) arena.dupeZ(u8, what) catch outOfMemory() else switch (lookup.find(arena, what, envp) catch outOfMemory()) {
         .path => |p| p,
         .missing => |looked| {

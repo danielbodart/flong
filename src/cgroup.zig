@@ -360,49 +360,146 @@ fn holderDelegated(gpa: std.mem.Allocator, own: Path, have_limits: bool) Error!H
     return holderTake(parent, pfd.?);
 }
 
+/// The end of the user manager's component, user@UID.service, in `own`, an
+/// absolute cgroup path: `own` up to it is the manager's cgroup. Null when
+/// the cgroup is not under the manager, a login session's scope or a
+/// system unit's.
+fn managerEnd(own: []const u8, uid: sys.uid_t) ?usize {
+    var unit_buf: [64]u8 = undefined;
+    const unit = std.fmt.bufPrint(&unit_buf, "user@{d}.service", .{uid}) catch unreachable; // proven: 13 + 10 < 64
+    var p: usize = @min(root.len, own.len);
+    while (std.mem.indexOfScalarPos(u8, own, p, '/')) |slash| {
+        const c = own[slash + 1 ..];
+        if (std.mem.startsWith(u8, c, unit) and (c.len == unit.len or c[unit.len] == '/'))
+            return slash + 1 + unit.len;
+        p = slash + 1;
+    }
+    return null;
+}
+
+/// Where systemd puts `uid`'s user manager:
+/// /sys/fs/cgroup/user.slice/user-UID.slice/user@UID.service.
+fn standardManager(uid: sys.uid_t) Path {
+    var slice_buf: [64]u8 = undefined;
+    var unit_buf: [64]u8 = undefined;
+    return Path.of(&.{
+        root,
+        "/user.slice/",
+        std.fmt.bufPrint(&slice_buf, "user-{d}.slice/", .{uid}) catch unreachable, // proven: 11 + 10 < 64
+        std.fmt.bufPrint(&unit_buf, "user@{d}.service", .{uid}) catch unreachable, // proven: 13 + 10 < 64
+    }).?;
+}
+
+/// The uid that owns the cgroup at `path`, or null when it cannot be
+/// opened or stat'd: absent, or not ours to read.
+fn ownerAt(path: *const Path) ?sys.uid_t {
+    return switch (openAbsolute(path)) {
+        .ok => |h| blk: {
+            const u = owner(h);
+            h.close();
+            break :blk if (u == std.math.maxInt(sys.uid_t)) null else u;
+        },
+        .err => null,
+    };
+}
+
+/// Where a launch can make its session from, by the launcher's own cgroup
+/// (DESIGN.md, "The holder"). The session's processes are created in their
+/// leaves with clone3(CLONE_INTO_CGROUP), which the kernel allows only when
+/// the caller may write cgroup.procs both in the leaf and in the nearest
+/// cgroup the leaf and the caller's own cgroup share -- the rule for moving
+/// a process, applied to a new one. Under the user manager that ancestor is
+/// at most user@UID.service, the caller's; from a login session's scope it
+/// is user-UID.slice, root's, and the clone fails with EACCES.
+pub const Placement = enum {
+    /// under user@UID.service: the holder is the manager's
+    inside,
+    /// outside the manager, in a cgroup of the caller's own (a system unit
+    /// with User= and Delegate=yes): the holder is that cgroup, or its
+    /// parent for limits (holderDelegated)
+    delegated,
+    /// outside the manager, in a cgroup that is not the caller's (a login
+    /// session's scope, a system unit with no delegation), while the caller
+    /// has a user manager: the launcher must move into a scope of the
+    /// manager's before anything is made (prologue.adopt)
+    adopt,
+};
+
+/// placement's decision, from what it read: whether the launcher is under
+/// the manager, whether its own cgroup is the caller's, whether the manager
+/// is there and the caller's.
+pub fn placementOf(under_manager: bool, own_is_callers: bool, manager_is_callers: bool) Placement {
+    if (under_manager) return .inside;
+    if (own_is_callers) return .delegated;
+    return if (manager_is_callers) .adopt else .delegated;
+}
+
+/// The launcher's Placement, read from /proc/self/cgroup and the owners of
+/// its cgroup and of the user manager's. Silent: what cannot be read is
+/// `inside`, the launch going on as it is, so that holderFind, in its
+/// place in the launch, says what is wrong as it always has. A `delegated`
+/// launcher whose cgroup is not its own is refused there too, naming
+/// linger.
+pub fn placement() Placement {
+    var buf: [path_max + 64]u8 = undefined;
+    const f = switch (fdt.openFile(fdt.cwd, "/proc/self/cgroup", .{ .NOFOLLOW = true }, 0) catch return .inside) {
+        .ok => |f| f,
+        .err => return .inside,
+    };
+    defer f.close();
+    var len: usize = 0;
+    while (len < buf.len) {
+        const n = switch (f.read(buf[len..])) {
+            .ok => |n| n,
+            .err => return .inside,
+        };
+        if (n == 0) break;
+        len += n;
+    }
+    if (len == buf.len) return .inside;
+    const rel = switch (ownFrom(buf[0..len])) {
+        .path => |p| p,
+        else => return .inside,
+    };
+    const own = Path.of(&.{ root, if (std.mem.eql(u8, rel, "/")) "" else rel }) orelse return .inside;
+    const uid = sys.getuid();
+    if (managerEnd(own.slice(), uid) != null) return .inside;
+    const manager = standardManager(uid);
+    return placementOf(false, ownerAt(&own) == uid, ownerAt(&manager) == uid);
+}
+
 /// cg_holder_find (flong-cgroup.c:240-277; flong-cgroup.h:35-56): the
 /// holder for a launch. `rel` is the spec's holder, a relative path of
-/// plain components the spec has checked.
-///  1. The user manager's cgroup is the launcher's own cgroup up to and
-///     including its user@UID.service component, or, when the launcher
-///     runs outside it (a login session's scope),
-///     /user.slice/user-UID.slice/user@UID.service. If that exists, the
-///     holder is <it>/<rel>, started with `start_argv` when absent.
-///  2. With no user manager: the launcher's own cgroup, when it is the
-///     caller's; with limits, its parent, which must be the caller's too.
-///  3. Otherwise refused, naming users.users.<name>.linger.
+/// plain components the spec has checked. By the launcher's Placement:
+///  1. inside: the user manager's cgroup is the launcher's own cgroup up to
+///     and including its user@UID.service component, and the holder is
+///     <it>/<rel>, started with `start_argv` when absent.
+///  2. delegated: the launcher's own cgroup, when it is the caller's; with
+///     limits, its parent, which must be the caller's too.
+///  3. adopt: refused, naming both cgroups. The launch adopts itself into
+///     the manager before it gets here (launch.zig), so this is a launcher
+///     whose adoption did not hold; a holder under the manager would fail
+///     the first clone3 into it with EACCES.
+///  4. Otherwise refused, naming users.users.<name>.linger.
 /// Paths and the start's argv are in `gpa`, the launcher's arena.
 pub fn holderFind(gpa: std.mem.Allocator, rel: []const u8, start_argv: []const [:0]const u8, have_limits: bool) sig.Error!Holder {
     const own = try ownCgroup();
-    const o = own.slice();
-    var unit_buf: [64]u8 = undefined;
-    const unit = std.fmt.bufPrint(&unit_buf, "user@{d}.service", .{sys.getuid()}) catch unreachable; // proven: 13 + 10 < 64
-
-    var hit: ?usize = null;
-    var p = root.len;
-    while (std.mem.indexOfScalarPos(u8, o, p, '/')) |slash| {
-        const c = o[slash + 1 ..];
-        if (std.mem.startsWith(u8, c, unit) and (c.len == unit.len or c[unit.len] == '/')) {
-            hit = slash + 1 + unit.len;
-            break;
+    const uid = sys.getuid();
+    if (managerEnd(own.slice(), uid)) |end| {
+        const manager = Path.of(&.{own.slice()[0..end]}).?;
+        switch (openAbsolute(&manager)) {
+            .ok => |h| {
+                const u = owner(h);
+                h.close();
+                if (u != uid) return msg.refuse("the user manager's cgroup {s} is not yours", .{manager.slice()});
+                return holderUnderManager(gpa, manager.slice(), rel, start_argv);
+            },
+            .err => |e| return msg.fail(e, "open the user manager's cgroup {s}", .{manager.slice()}),
         }
-        p = slash + 1;
     }
-    var slice_buf: [64]u8 = undefined;
-    const manager = if (hit) |h|
-        Path.of(&.{o[0..h]}).?
-    else
-        Path.of(&.{ root, "/user.slice/", std.fmt.bufPrint(&slice_buf, "user-{d}.slice/", .{sys.getuid()}) catch unreachable, unit }).?; // proven: 16 + 10 < 64
-
-    switch (openAbsolute(&manager)) {
-        .ok => |h| {
-            const u = owner(h);
-            h.close();
-            if (u != sys.getuid()) return msg.refuse("the user manager's cgroup {s} is not yours", .{manager.slice()});
-            return holderUnderManager(gpa, manager.slice(), rel, start_argv);
-        },
-        .err => |e| if (e != .NOENT) return msg.fail(e, "open the user manager's cgroup {s}", .{manager.slice()}),
-    }
+    const manager = standardManager(uid);
+    if (placementOf(false, ownerAt(&own) == uid, ownerAt(&manager) == uid) == .adopt)
+        return msg.refuse("the launcher's cgroup {s} is neither yours nor under your user manager's {s}, so no session can be made from it: launch from inside the manager", .{ own.slice(), manager.slice() });
     return holderDelegated(gpa, own, have_limits);
 }
 
@@ -868,6 +965,30 @@ test "populated reads the first populated line" {
     try testing.expectEqual(Populated.absent, populated("frozen 0\n"));
     try testing.expectEqual(Populated.absent, populated("x\x00populated 0\n"));
     try testing.expectEqual(Populated.empty, populated("xpopulated 0"));
+}
+
+test "managerEnd finds user@UID.service as a whole component" {
+    const m = "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service";
+    try testing.expectEqual(@as(?usize, m.len), managerEnd(m ++ "/app.slice/x.scope", 1000));
+    try testing.expectEqual(@as(?usize, m.len), managerEnd(m, 1000));
+    try testing.expectEqual(@as(?usize, null), managerEnd("/sys/fs/cgroup/user.slice/user-1000.slice/session-11.scope", 1000));
+    try testing.expectEqual(@as(?usize, null), managerEnd("/sys/fs/cgroup/user.slice/user-1000.slice/user@10000.service", 1000));
+    try testing.expectEqual(@as(?usize, null), managerEnd(m, 1001));
+    try testing.expectEqual(@as(?usize, null), managerEnd("/sys/fs/cgroup/system.slice/run-u1.service", 1000));
+    try testing.expectEqualStrings(m, standardManager(1000).slice());
+}
+
+test "placementOf: under the manager, delegated, or adopted into it" {
+    // A terminal of the desktop's, or a unit of the user manager's.
+    try testing.expectEqual(Placement.inside, placementOf(true, true, true));
+    // A system unit with User= and Delegate=yes, lingering or not.
+    try testing.expectEqual(Placement.delegated, placementOf(false, true, true));
+    try testing.expectEqual(Placement.delegated, placementOf(false, true, false));
+    // An ssh or console login's scope, with a user manager: the case that
+    // failed clone3 with EACCES.
+    try testing.expectEqual(Placement.adopt, placementOf(false, false, true));
+    // No user manager and nothing delegated: holderFind refuses, naming linger.
+    try testing.expectEqual(Placement.delegated, placementOf(false, false, false));
 }
 
 test "ownFrom reads the 0:: line" {
