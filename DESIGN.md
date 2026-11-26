@@ -217,7 +217,13 @@ order, each starting with a tag (`cmd.parseExec`):
 - `arg:WORD`, the next word of the entrypoint's whole argument list, the first
   its program;
 - `file:MODE:PATH`, then exactly one field more, untagged, the file's content:
-  any bytes but a NUL.
+  any bytes but a NUL;
+- `forward:BIND` and `label:TEXT`, at most once each, where the forwarded
+  ports bind and what the terminal calls the container, for this launch
+  ([`network`](#network), [The terminal](#the-terminal));
+- `layer:JSON`, at most once, a project's layer over the declaration for
+  this launch: its `limits` and `network`'s `forwardPorts` and `hostPorts`,
+  judged and merged as [Layers](#layers) says.
 
 Every field is tagged so that no field means something by its position or by
 being empty: an empty argument is `arg:`. A positional protocol, variables up
@@ -232,8 +238,9 @@ field without a `=`, a MODE that is not one to four octal digits of at most
 `0777`, a `file:` field that is the last, no `arg:`, an empty program), a name
 that is empty, printed twice, a `TINI_*`, or one the launch or the container
 already sets, `PWD` among them, and a PATH that is not absolute and clean,
-printed twice or inside another file's, are each a refusal, 1, said under the
-declaration's name, at step 5; a PATH not under the entrypoint's home, which
+printed twice or inside another file's, and a `layer:` that is not JSON,
+gives a field the launch does not apply, or is refused as a project's layer,
+are each a refusal, 1, said under the declaration's name, at step 5; a PATH not under the entrypoint's home, which
 step 9 reads from the rootfs, is refused there. Nothing it prints overrides
 anything silently. The names and paths are judged through sets, so a MiB of
 them costs one pass.
@@ -1927,10 +1934,22 @@ host field set, whatever the value; a `null` over a struct holding one
 base has none, which would make one whose host fields nobody set; and a
 tier less strict than the base's. With `--base`, the merged result is then
 judged whole, as `flong check` judges any declaration; without, the base is
-the defaults (strict, no network), and each value is judged on its own. The
-merge itself is the caller's, not flong's: flong launches the declaration
-it is given, and a project's settings reach a launch through it, or, for
-the filter, through `seccompPolicy`'s lines.
+the defaults (strict, no network), and each value is judged on its own.
+
+**A launch's layer, `exec`'s `layer:JSON`** (`layer.forLaunch`), is a
+project's layer that flong merges itself, for the one launch, since only
+the launch knows which project it is. It is judged as `--layer project`
+judges one, and then held to what the launch applies after `exec` has run:
+`limits`, and `network`'s `forwardPorts` and `hostPorts`. The filter is
+compiled before `exec` runs, so a launch's changes to it are
+`seccompPolicy`'s lines and a layer's `seccomp` is refused, as is every
+other field and a `network` where the declaration has none. `limits` merges
+field by field, a `null` putting a field back to its default, unlimited; a
+port list replaces the declaration's whole, `"auto"` included, and `null`
+puts back no ports. The host's fields stay the declaration's: a layer's
+ports bind where `forwardAddress` or `forward:` says, never elsewhere.
+Every other project setting reaches a launch through the declaration the
+caller builds, or, for the filter, through `seccompPolicy`'s lines.
 
 ### The declaration's command
 

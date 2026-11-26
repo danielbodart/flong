@@ -155,7 +155,7 @@ every field in full; `flong help decl` prints the same.
 | `container` | `<name>` | The `containers.<name>` to run. |
 | `user` | *required* | The user inside. Mapped to your uid. |
 | `command` | `null` | The entrypoint's argument list. |
-| `exec` | `null` | Instead of `command`: a hook that prints the entrypoint, its environment and files to put in its home. |
+| `exec` | `null` | Instead of `command`: a hook that prints the entrypoint, its environment, files to put in its home, and a project's limits and ports for the launch (`layer:`). |
 | `network` | `null` | User-mode networking: `forwardPorts`, `hostPorts`, `hostLoopbackToSession`. |
 | `seccomp` | `strict` | Profile: `tier`, `debug`, `nestedSandbox`, `allow`, `deny`, `errno`, `log`. |
 | `limits` | `{ }` | cgroup limits: `MemoryMax`, `TasksMax`, `CPUQuota`, … |

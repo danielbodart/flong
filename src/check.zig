@@ -36,7 +36,7 @@ const msg = @import("msg");
 const decl = @import("decl");
 const decl_docs = @import("decl_docs");
 const spec = @import("spec");
-const layer = @import("layer.zig");
+pub const layer = @import("layer.zig");
 
 const Allocator = std.mem.Allocator;
 const Declaration = decl.Declaration;

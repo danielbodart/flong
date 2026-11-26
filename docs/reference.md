@@ -69,7 +69,15 @@ NUL-terminated fields:
 - `env:NAME=VALUE`, a variable;
 - `arg:WORD`, each word of the argument list (`arg:` is an empty word);
 - `file:MODE:PATH` then the content, a file written into the user's home
-  before the entrypoint starts.
+  before the entrypoint starts;
+- `forward:BIND`, where the forwarded ports bind for this launch;
+- `label:TEXT`, the name the terminal is told the container has;
+- `layer:JSON`, a project's layer for this launch: `limits` and
+  `network`'s `forwardPorts` and `hostPorts`, merged over the
+  declaration's. A limit merges field by field, a port list replaces the
+  declaration's, and `null` puts back the default. Any other field, a host
+  field, `seccomp` (use `seccompPolicy`) or a `network` the declaration
+  lacks refuses the launch.
 
 ```nix
 flong.sandbox.command = lib.mkForce null;

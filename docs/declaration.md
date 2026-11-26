@@ -130,6 +130,21 @@ tag:
   `container`'s, for this launch: the hostname and everything else
   keep `container`. 1 to 80 bytes of UTF-8 with no control
   character; a `;` or `\` is written escaped, as VTE reads them.
+- `layer:JSON`, at most once, a project's layer over this
+  declaration for this launch: a JSON object of its fields, judged
+  as `flong check --layer project` judges one -- a host field, a
+  `null` that would remove one, an unknown field or a value its
+  type does not take are refused -- and holding only what the
+  launch applies after `exec`: `limits` and `network`'s
+  `forwardPorts` and `hostPorts`. `seccomp`'s changes for a launch
+  are `seccompPolicy`'s lines, compiled before `exec` runs, and are
+  refused here, as is `network` where the declaration has none. It
+  is merged as a JSON Merge Patch: `limits` field by field, a
+  `null` putting a field back to its default, unlimited, and
+  `"limits": null` all of them; a port list replaces the
+  declaration's whole, `"auto"` included, and `null` puts back no
+  ports. The host's fields -- `forwardAddress`, `forwardInterface`,
+  `hostLoopbackToSession` -- stay the declaration's.
 
 The argument list is the entrypoint's whole: the launcher's
 arguments are not appended again. A program without a `/` is looked

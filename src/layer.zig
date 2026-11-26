@@ -299,6 +299,103 @@ fn withoutNulls(arena: Allocator, v: Value) Allocator.Error!Value {
     return .{ .object = out };
 }
 
+/// The fields a launch's layer -- `exec`'s `layer:` -- may give: what the
+/// launch applies once `exec` has run, as it builds the spec. Anything else
+/// is applied before `exec` runs, or is the host's.
+pub const launch_fields = "limits, network.forwardPorts and network.hostPorts";
+
+/// A launch's layer applied: the declaration's `limits` and `network` with
+/// the layer merged over them, or every refusal, each one line.
+pub const Launched = union(enum) {
+    ok: struct { limits: decl.Limits, network: ?decl.Network },
+    bad: []const []const u8,
+};
+
+/// `text`, `exec`'s `layer:`, as a project's layer over `d` for one launch
+/// (DESIGN.md, "Layers"): judged as `flong check --layer project` judges a
+/// layer -- a host field, a null that would remove one, a field the
+/// declaration does not have or a value its type does not take, each
+/// refused -- and then held to `launch_fields`, since a field applied
+/// before `exec` ran cannot change now: `seccomp`'s project changes are
+/// seccompPolicy's lines, compiled before it. `network` where `d` has none
+/// is refused, as the check refuses it. What is left is merged as RFC 7396
+/// merges it: `limits` field by field, null putting a field back to its
+/// default, unlimited, and null for `limits` all of them; a port list
+/// replacing the declaration's whole, `"auto"` included, and null putting
+/// back its default, no ports.
+pub fn forLaunch(arena: Allocator, d: *const Declaration, text: []const u8) Allocator.Error!Launched {
+    var l: Layer = .{ .arena = arena, .judge_values = true };
+    const layer = std.json.parseFromSliceLeaky(Value, arena, text, .{
+        .duplicate_field_behavior = .@"error",
+        .parse_numbers = false,
+    }) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        try l.say("not JSON{s}", .{if (err == error.DuplicateField) ": a field given twice" else ""});
+        return .{ .bad = l.out.items };
+    };
+    if (layer != .object) {
+        try l.say("a layer is a JSON object of the declaration's fields, not {s}", .{kindName(layer)});
+        return .{ .bad = l.out.items };
+    }
+    try l.fields(Declaration, layer.object, "");
+    if (l.out.items.len != 0) return .{ .bad = l.out.items };
+
+    var it = layer.object.iterator();
+    while (it.next()) |kv| {
+        const name = kv.key_ptr.*;
+        if (std.mem.eql(u8, name, "limits")) continue;
+        if (std.mem.eql(u8, name, "network")) {
+            if (d.network == null) {
+                try l.say("network is given where the declaration has none, and a project's layer cannot add one", .{});
+                continue;
+            }
+            if (kv.value_ptr.* != .object) continue;
+            var n = kv.value_ptr.object.iterator();
+            while (n.next()) |x| {
+                const f = x.key_ptr.*;
+                if (std.mem.eql(u8, f, "forwardPorts") or std.mem.eql(u8, f, "hostPorts")) continue;
+                try l.say("network.{s}: a launch's layer gives {s} alone", .{ f, launch_fields });
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, name, "seccomp")) {
+            try l.say("seccomp: a launch's changes to the filter are seccompPolicy's lines, compiled before exec runs; a launch's layer gives {s} alone", .{launch_fields});
+            continue;
+        }
+        try l.say("{s}: a launch's layer gives {s} alone", .{ name, launch_fields });
+    }
+    if (l.out.items.len != 0) return .{ .bad = l.out.items };
+
+    var limits = d.limits;
+    if (layer.object.get("limits")) |v| switch (v) {
+        .null => limits = .{},
+        .object => |o| inline for (@typeInfo(decl.Limits).@"struct".fields) |f| {
+            if (o.get(f.name)) |x| @field(limits, f.name) = if (x == .null)
+                f.defaultValue().?
+            else
+                try parsedAs(arena, f.type, x);
+        },
+        else => unreachable, // l.fields refused it
+    };
+    var network = d.network;
+    if (layer.object.get("network")) |v| if (v == .object) {
+        var n = network.?;
+        if (v.object.get("forwardPorts")) |x| n.forwardPorts = if (x == .null) .{ .ports = &.{} } else try parsedAs(arena, decl.ForwardPorts, x);
+        if (v.object.get("hostPorts")) |x| n.hostPorts = if (x == .null) &.{} else try parsedAs(arena, []const u16, x);
+        network = n;
+    };
+    return .{ .ok = .{ .limits = limits, .network = network } };
+}
+
+/// `v`, which `Layer.fields` has judged a `T` already, parsed as one.
+fn parsedAs(arena: Allocator, comptime T: type, v: Value) Allocator.Error!T {
+    const text = try std.json.Stringify.valueAlloc(arena, v, .{});
+    return decl.parseAs(arena, T, text, null) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.ParseJson => unreachable,
+    };
+}
+
 // ---- tests ----
 
 const testing = std.testing;
@@ -456,4 +553,79 @@ test "a value of the wrong type is said at its field" {
     try testing.expectEqualStrings("seccomp.tier: unexpected value \"loose\" (supported: \"parity\", \"strict\")", r[1]);
     try testing.expectEqualStrings("seccomp.debug: expected true or false", r[2]);
     try testing.expectEqualStrings("limits: expected an object", r[3]);
+}
+
+/// A declaration for `forLaunch`, with `more` after what has no default.
+fn launchBase(arena: Allocator, comptime more: []const u8) !Declaration {
+    return decl.parse(arena,
+        \\{"user":"alice","command":["hello"],"container":"agent","closure":"/nix/store/x-nixos-system-agent",
+        \\ "cuid":1000,"cgid":100,"steps8":"0123abcd","name":"agent"
+    ++ more ++ "}", null);
+}
+
+test "a launch's layer merges limits field by field and replaces a port list whole" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const d = try launchBase(a,
+        \\,"limits":{"MemoryMax":"8G","TasksMax":100,"CPUWeight":50}
+        \\,"network":{"forwardPorts":"auto","hostPorts":[5432],"forwardAddress":"127.0.0.1"}
+    );
+    const r = (try forLaunch(a, &d,
+        \\{"limits":{"MemoryMax":"2G","TasksMax":null,"oomGroup":true},
+        \\ "network":{"forwardPorts":[{"hostPort":8080}],"hostPorts":[6379,5432]}}
+    )).ok;
+    try testing.expectEqualStrings("2G", r.limits.MemoryMax.?.size);
+    try testing.expectEqual(null, r.limits.TasksMax);
+    try testing.expectEqual(@as(?u14, 50), r.limits.CPUWeight);
+    try testing.expect(r.limits.oomGroup);
+    const n = r.network.?;
+    try testing.expectEqual(@as(usize, 1), n.forwardPorts.ports.len);
+    try testing.expectEqual(@as(u16, 8080), n.forwardPorts.ports[0].hostPort);
+    try testing.expectEqualSlices(u16, &.{ 6379, 5432 }, n.hostPorts);
+    // The host's fields stay the declaration's.
+    try testing.expectEqualStrings("127.0.0.1", n.forwardAddress.?);
+
+    // null puts the default back: no limits, no ports; and an empty layer
+    // changes nothing.
+    const z = (try forLaunch(a, &d,
+        \\{"limits":null,"network":{"forwardPorts":null,"hostPorts":null}}
+    )).ok;
+    try testing.expectEqual(null, z.limits.MemoryMax);
+    try testing.expectEqual(@as(usize, 0), z.network.?.forwardPorts.ports.len);
+    try testing.expectEqual(@as(usize, 0), z.network.?.hostPorts.len);
+    const same = (try forLaunch(a, &d, "{}")).ok;
+    try testing.expectEqualStrings("8G", same.limits.MemoryMax.?.size);
+    try testing.expect(same.network.?.forwardPorts == .auto);
+}
+
+test "a launch's layer: a host field, seccomp, a field it does not apply, and a network made are refused" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const bare = try launchBase(a, "");
+    const r = (try forLaunch(a, &bare,
+        \\{"binds":[["x"]],"network":{"forwardAddress":"0.0.0.0"}}
+    )).bad;
+    try testing.expectEqualStrings("binds is the host's to set, and a project's layer may not set it", r[0]);
+    try testing.expectEqualStrings("network.forwardAddress is the host's to set, and a project's layer may not set it", r[1]);
+    const s = (try forLaunch(a, &bare,
+        \\{"seccomp":{"debug":true},"workspace_mode":1}
+    )).bad;
+    try testing.expectEqualStrings("\"workspace_mode\" is not a field of the declaration", s[0]);
+    const s2 = (try forLaunch(a, &bare,
+        \\{"seccomp":{"debug":true}}
+    )).bad;
+    try testing.expect(std.mem.startsWith(u8, s2[0], "seccomp: a launch's changes to the filter are seccompPolicy's lines"));
+    const n = (try forLaunch(a, &bare,
+        \\{"network":{"hostPorts":[5432]}}
+    )).bad;
+    try testing.expectEqualStrings("network is given where the declaration has none, and a project's layer cannot add one", n[0]);
+    const v = (try forLaunch(a, &bare,
+        \\{"limits":{"CPUWeight":0,"MemoryMax":"lots"}}
+    )).bad;
+    try testing.expect(v.len >= 1);
+    for ([_][]const u8{ "not json", "[1]", "{\"limits\":{},\"limits\":{}}" }) |t| {
+        try testing.expect((try forLaunch(a, &bare, t)) == .bad);
+    }
 }

@@ -404,6 +404,12 @@ in
       network.forwardPorts = "auto";
       network.forwardAddress = "127.9.9.9";
       exec = [ (script "exec-bound" ''
+        # --hostports: a project's layer for this launch gives the session
+        # the host's 18123, which the declaration does not name.
+        if [ "$1" = --hostports ]; then
+          printf '%s\0' 'layer:{"network":{"hostPorts":[18123]}}'
+          shift
+        fi
         printf '%s\0' forward:127.9.9.8 arg:bash arg:-c "arg:$1"
       '') ];
     };
@@ -666,6 +672,14 @@ in
           labeltwice) field label:a arg:true label:b ;;
           labelempty) field label: arg:true ;;
           labelcontrol) field $'label:a\eb' arg:true ;;
+          # A project's layer for this launch: limits the session's cgroup
+          # carries; and each layer the launch refuses.
+          layerlimits) field 'layer:{"limits":{"MemoryMax":"300M","TasksMax":77}}' arg:sleep arg:5 ;;
+          layerhost) field 'layer:{"binds":[["x"]]}' arg:true ;;
+          layerseccomp) field 'layer:{"seccomp":{"debug":true}}' arg:true ;;
+          layernetwork) field 'layer:{"network":{"hostPorts":[18123]}}' arg:true ;;
+          layertwice) field 'layer:{}' arg:true 'layer:{}' ;;
+          layerjson) field 'layer:{' arg:true ;;
           fail) echo "exec refuses this launch" >&2; exit 3 ;;
           slow) sleep 60; field arg:true ;;
         esac
@@ -1008,7 +1022,7 @@ in
           assert out == "/srv/work|rw||a=b|/srv/work|en_US.UTF-8|[a b][$HOME][]\n", out
           # Each refused, 1, saying why under the declaration's name.
           program = machine.succeed("grep -o '/nix/store/[a-z0-9]*-flong-test-exec' /etc/flong/execd.json | head -1").strip()
-          tags = "where each field is env:NAME=VALUE, arg:WORD, file:MODE:PATH followed by the file's content, forward:BIND, or label:TEXT"
+          tags = "where each field is env:NAME=VALUE, arg:WORD, file:MODE:PATH followed by the file's content, forward:BIND, label:TEXT, or layer:JSON"
           refusals = [
               ("fixed", "sets HOME, which the launch sets for every session"),
               ("pwd", "sets PWD, which the launch sets for every session"),
@@ -1037,6 +1051,11 @@ in
               ("labeltwice", 'printed "label:b", a second label: field'),
               ("labelempty", "printed an empty label: field"),
               ("labelcontrol", "printed a label: with a control character in it"),
+              ("layerhost", "printed a layer: binds is the host's to set, and a project's layer may not set it"),
+              ("layerseccomp", "printed a layer: seccomp: a launch's changes to the filter are seccompPolicy's lines, compiled before exec runs"),
+              ("layernetwork", "printed a layer: network is given where the declaration has none, and a project's layer cannot add one"),
+              ("layertwice", 'printed "layer:{}", a second layer: field'),
+              ("layerjson", "printed a layer: not JSON"),
               ("fail", "failed (status 3); the payload does not run"),
           ]
           for mode, said in refusals:
@@ -1679,6 +1698,14 @@ in
           machine.succeed("nc -d -w 3 127.9.9.8 18311 | grep -q from-exec")
           machine.wait_until_succeeds(NO_SESSIONS)
 
+      @test("exec's layer: gives a launch hostPorts the declaration does not name", part="a")
+      def _():
+          out = machine.succeed(by_caller("${execBoundPorts} '" + reach("127.0.0.1 18123") + "'"))
+          assert "host-18123" not in out, out
+          out = machine.succeed(by_caller("${execBoundPorts} --hostports '" + reach("127.0.0.1 18123") + "'"))
+          assert "host-18123" in out, out
+          machine.wait_until_succeeds(NO_SESSIONS)
+
       @test("a forwarded port reaches the session from the host", part="a")
       def _():
           # And a second listener on a port that is not forwarded, left up past
@@ -1792,6 +1819,21 @@ in
           assert tasks == "512", tasks
           # And nothing of that session survives it, which the subtests
           # after this one assume.
+          machine.wait_until_succeeds(NO_SESSIONS)
+          machine.succeed(NO_SESSION_CGROUPS)
+
+      @test("exec's layer: gives the session's cgroup the project's limits over the declaration's")
+      def _():
+          machine.succeed("rm -f /tmp/execd-*")
+          # demo declares no limits; the layer's are written into the
+          # sandbox leaf, read from the host as the declaration's are.
+          machine.succeed(by_caller("${execd} layerlimits") + " >/dev/null 2>&1 &")
+          name = session_of("demo")
+          leaf = f"{CG}/demo/{name}/sandbox"
+          limit = machine.succeed(f"cat {leaf}/memory.max").strip()
+          assert limit == str(300 * 1024 * 1024), limit
+          tasks = machine.succeed(f"cat {leaf}/pids.max").strip()
+          assert tasks == "77", tasks
           machine.wait_until_succeeds(NO_SESSIONS)
           machine.succeed(NO_SESSION_CGROUPS)
 

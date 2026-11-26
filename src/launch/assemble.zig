@@ -279,6 +279,20 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
         if (!blank(policy)) tier_bpf = try compilePolicy(gpa, d, tools, who.state, policy, try env.envp());
     }
     const exec: ?cmd.Exec = if (d.exec) |x| try execOf(gpa, d, x, args, try env.envp()) else null;
+    // A project's layer for this launch, `exec`'s `layer:`: its limits and
+    // ports merged over the declaration's for the spec, and anything else
+    // refused here, before the root is prepared (layer.forLaunch).
+    var layered = d.*;
+    if (exec) |x| if (x.layer) |text| switch (check.layer.forLaunch(gpa, d, text) catch return oom()) {
+        .ok => |o| {
+            layered.limits = o.limits;
+            layered.network = o.network;
+        },
+        .bad => |why| {
+            for (why) |w| msg.say("exec: {s} printed a layer: {s}", .{ d.exec.?[0], w });
+            return error.Reported;
+        },
+    };
 
     // 6. The depth rule, for the workspace and the caller's writable binds
     // (:225-247).
@@ -354,7 +368,7 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
     msg.mode = .cut;
     const environ = cmd.environ(gpa, env.base, env.vars.items) catch return error.NotRun;
     return .{
-        .spec = try specOf(gpa, d, p, .{
+        .spec = try specOf(gpa, &layered, p, .{
             .who = who,
             .ws = ws,
             .b = b,
@@ -673,7 +687,7 @@ fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const 
         .ok => |e| e,
         .bad => |bad| return switch (bad) {
             .unterminated => msg.refuse("exec: {s} printed a field without the NUL that ends it: every field, the last one too, ends with a NUL", .{x[0]}),
-            .untagged => |field| msg.refuse("exec: {s} printed \"{s}\", where each field is env:NAME=VALUE, arg:WORD, file:MODE:PATH followed by the file's content, forward:BIND, or label:TEXT", .{ x[0], field }),
+            .untagged => |field| msg.refuse("exec: {s} printed \"{s}\", where each field is env:NAME=VALUE, arg:WORD, file:MODE:PATH followed by the file's content, forward:BIND, label:TEXT, or layer:JSON", .{ x[0], field }),
             .not_a_variable => |field| msg.refuse("exec: {s} printed \"{s}\", which has no `=`: a variable is env:NAME=VALUE", .{ x[0], field }),
             .bad_mode => |field| msg.refuse("exec: {s} printed \"{s}\", whose mode is not one to four octal digits of at most 0777: a file is file:MODE:PATH, and its mode permission bits alone, never setuid, setgid or sticky", .{ x[0], field }),
             .no_path => |field| msg.refuse("exec: {s} printed \"{s}\", which has no `:` after its mode: a file is file:MODE:PATH", .{ x[0], field }),
@@ -682,6 +696,7 @@ fn execOf(gpa: Allocator, d: *const Declaration, x: decl.Command, args: []const 
             .empty_program => msg.refuse("exec: {s} printed an empty program as the payload's", .{x[0]}),
             .forward_twice => |field| msg.refuse("exec: {s} printed \"{s}\", a second forward: field", .{ x[0], field }),
             .label_twice => |field| msg.refuse("exec: {s} printed \"{s}\", a second label: field", .{ x[0], field }),
+            .layer_twice => |field| msg.refuse("exec: {s} printed \"{s}\", a second layer: field", .{ x[0], field }),
         },
     };
     if (e.label) |t| if (decl.labelBad(t)) |why| return switch (why) {
