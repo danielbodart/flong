@@ -426,7 +426,7 @@ let
       f = seccompFiltersOf c;
     in
     {
-      inherit (c) user command exec workspace binds guard postStart postStop masks protect seccompPolicy;
+      inherit (c) user command exec workspace approve binds guard postStart postStop masks protect seccompPolicy;
       network = if c.network == null then null else {
         forwardPorts =
           if c.network.forwardPorts == "auto" then "auto"
@@ -838,6 +838,7 @@ let
         command = lib.literalExpression ''[ (lib.getExe pkgs.hello) "--greeting=hello from a session" ]'';
         exec = lib.literalExpression ''[ "''${pkgs.writeShellScript "agent" "printf '%s\\0' \"env:PROJECT=$(basename \"$workspace\")\" arg:''${lib.getExe pkgs.hello}; for a in \"$@\"; do printf 'arg:%s\\0' \"$a\"; done; token=$(cat \"$XDG_RUNTIME_DIR/hello-token\") || exit; printf '%s\\0' file:0600:/home/alice/.config/hello/token \"$token\""}" ]'';
         workspace = lib.literalExpression ''[ "''${pkgs.writeShellScript "repo-root" "git -C \"$PWD\" rev-parse --show-toplevel"}" ]'';
+        approve = lib.literalExpression ''[ [ "''${pkgs.writeShellScript "approve" "my-signer verify \"$workspace/policy.json\" > \"$XDG_RUNTIME_DIR/my-gate/$machine.json\""}" ] ]'';
         binds = lib.literalExpression ''[ [ "''${pkgs.writeShellScript "shared-crates" "printf '%s:rw\\n' \"$workspace/../shared-crates\""}" ] ]'';
         postStart = lib.literalExpression ''[ [ "''${pkgs.writeShellScript "fence" "nsenter --user=\"$userns\" --net=\"$netns\" nft -f /etc/my-ruleset.nft"}" ] ]'';
         postStop = lib.literalExpression ''[ [ "''${pkgs.writeShellScript "release" "rm -f \"$XDG_RUNTIME_DIR/my-gate/$machine.sock\""}" ] ]'';
@@ -901,7 +902,7 @@ in
           default = [ ];
           description = ''
             Packages on `PATH` for every hook, all of which run on the host
-            as the invoking user: `workspace`, `binds`, `guard`,
+            as the invoking user: `workspace`, `approve`, `binds`, `guard`,
             `seccompPolicy`, `exec`, `postStart` and `postStop`. Not for the
             entrypoint, which runs inside the container with its own `PATH`:
             a tool the entrypoint needs belongs in the container's
@@ -920,9 +921,10 @@ in
             /etc/subgid (`users.users.<name>.subUidRanges`, or
             `autoSubUidGidRange`).
 
-            Its checks -- `workspace`, `binds`, `guard`, the depth rule -- are
-            consistency checks, not a boundary: the invoking user can run
-            flong launch directly with any declaration. flong launch's own
+            Its checks -- `workspace`, `approve`, `binds`, `guard`, the
+            depth rule -- are consistency checks, not a boundary: the
+            invoking user can run flong launch directly with any
+            declaration. flong launch's own
             checks and the container's `seccomp` filter are the boundary
             against the entrypoint, and the cached rootfs and the records
             are the invoking user's, as their `~/.bashrc` is. It exits with

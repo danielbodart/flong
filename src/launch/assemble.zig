@@ -8,9 +8,9 @@
 //!
 //!   1  the caller and the runtime directory (:67-97)    caller.zig
 //!   2  the workspace (:99-150)                          workspace.zig
-//!   3  the caller's binds (:152-195)                    binds.zig
-//!   4  the guard (:197-203)                             cmd.zig
-//!   5  the signals, the session's name, the project's policy
+//!   3  the signals, the session's name, `approve`      cmd.zig
+//!   4  the caller's binds (:152-195)                    binds.zig
+//!   5  the guard (:197-203), the project's policy
 //!      (:205-223), the payload's `exec`                 cmd.zig
 //!   6  the depth rule (:225-247)                        depth.zig
 //!   7  the maps (:249-290)                              subid.zig
@@ -32,15 +32,22 @@
 //! it (:314, 322, 352) relaunch flong with the process's own argv
 //! (prologue.relaunchSelf), so a declaration's link name is looked up again.
 //!
-//! From step 5 on the session has a name, `$machine`, and the commands that
-//! see it -- `seccompPolicy` and `exec` -- may have staged something for it
+//! Steps 3 to 5 are not the wrapper's order: it bound and guarded before it
+//! named the session. `approve` decides what the launch may be given -- a
+//! project's signed file, say -- and stages it under `$machine`, so it runs
+//! once the session is named and before `binds`, which then reads only what
+//! was approved rather than the checkout's file as it stands.
+//!
+//! From step 3 on the session has a name, `$machine`, and the commands that
+//! see it -- `approve`, `binds`, `guard`, `seccompPolicy` and `exec` -- may
+//! have staged something for it
 //! on the host that only `postStop` releases. So from there every way the
 //! prologue ends but a spec releases it: a refusal, a signal, and a
 //! relaunch, which runs the commands again under a new name, run postStop's
 //! commands for this one first (`Early`), as the record would have; once
 //! the spec is built, the launch takes that over (launch.zig). And the
 //! signals the launch reads from its signalfd are blocked, and the
-//! signalfd opened, at step 5 rather than after the prologue, so a
+//! signalfd opened, at step 3 rather than after the prologue, so a
 //! terminating signal during the commands or the prepare ends a wait and
 //! is released from, where it would have killed the launcher outright. A
 //! terminating signal still queued when a relaunch releases the name ends
@@ -125,7 +132,7 @@ pub const Assembled = struct {
     /// The environment the launch goes on with, the hooks' and pasta's
     /// base: the caller's, with what the wrapper exported.
     environ: []const [*:0]const u8,
-    /// The signal mask before step 5 blocked the launch's signals, which a
+    /// The signal mask before step 3 blocked the launch's signals, which a
     /// relaunch restores.
     old_mask: u64,
 };
@@ -237,23 +244,12 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
     try env.set("workspace", ws.path);
     try env.set("workspace_mode", @tagName(ws.mode));
 
-    // 3. The caller's binds, the commands' outputs concatenated: merged,
-    // folded into the workspace, $binds (:152-195).
-    const b = if (d.binds.len > 0)
-        try binds.parse(gpa, try cmd.outputOf(gpa, d.binds, args, try env.envp()), ws, dests)
-    else
-        binds.none(ws);
-    try env.set("workspace_mode", @tagName(b.workspace_mode));
-    try env.set("binds", b.text);
-
-    // 4. The guard: each command must pass, in order (:197-203).
-    if (d.guard.len > 0) try cmd.pass(gpa, d.guard, args, try env.envp());
-
-    // 5. The launch's signals, blocked and read from the signalfd from
+    // 3. The launch's signals, blocked and read from the signalfd from
     // here on, SIGPIPE ignored (the header); the session's name, exported
-    // for the policy and the hooks, and released from whatever ends the
-    // prologue now; the project's policy, compiled when it says anything
-    // (:205-223); the payload's `exec`, when it has one.
+    // for every command after it, and released from whatever ends the
+    // prologue now; then `approve`, each command in order, which stages
+    // what the launch may be given under that name before anything is
+    // bound. It sees no $binds: there are none yet.
     const old_mask = try sig.block();
     sig.ignorePipe();
     try sig.openSignalfd();
@@ -262,6 +258,21 @@ pub fn run(gpa: Allocator, d: *const Declaration, p: Process, tools: Tools) Erro
     var early: Early = .{ .post_stop = post_stop, .machine = machine };
     errdefer early.runPostStop();
     try env.set("machine", machine);
+    if (d.approve.len > 0) try cmd.pass(gpa, d.approve, args, try env.envp());
+
+    // 4. The caller's binds, the commands' outputs concatenated: merged,
+    // folded into the workspace, $binds (:152-195).
+    const b = if (d.binds.len > 0)
+        try binds.parse(gpa, try cmd.outputOf(gpa, d.binds, args, try env.envp()), ws, dests)
+    else
+        binds.none(ws);
+    try env.set("workspace_mode", @tagName(b.workspace_mode));
+    try env.set("binds", b.text);
+
+    // 5. The guard: each command must pass, in order (:197-203); the
+    // project's policy, compiled when it says anything (:205-223); the
+    // payload's `exec`, when it has one.
+    if (d.guard.len > 0) try cmd.pass(gpa, d.guard, args, try env.envp());
     var tier_bpf: []const u8 = d.seccompTierFilter orelse "";
     if (d.seccompPolicy.len > 0) {
         const policy = cmd.substitute(try cmd.outputOf(gpa, d.seccompPolicy, args, try env.envp()));
@@ -514,7 +525,7 @@ fn specAlloc(gpa: Allocator, d: *const Declaration, p: Process, f: Found, l: Lis
 
     // postStart's commands, each through the declaration's program, with
     // the launcher's arguments after it (:413-421). postStop's, through
-    // its own, are the list step 5 made for `Early` (`f.post_stop`), so
+    // its own, are the list step 3 made for `Early` (`f.post_stop`), so
     // what the record holds is what a launch that failed before it ran.
     for (d.postStart) |c| {
         var w: std.ArrayList([:0]const u8) = .empty;

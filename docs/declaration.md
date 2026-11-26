@@ -178,7 +178,7 @@ is overridden silently. The loader's names, `LD_*` and
 entrypoint: both run as `user` inside the container, with no
 capability.
 
-Once it has run, as once `seccompPolicy` has, `postStop` runs for
+Once it has run, as once `approve` has, `postStop` runs for
 the container's `$machine` once, whichever way the launcher ends it:
 a refusal, even before the container starts, or a terminating signal
 (`SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`), so whatever it staged
@@ -215,6 +215,36 @@ Later hooks see the path as `$workspace` and the mode as
 `$workspace_mode` (`ro` or `rw`). Deciding *which* directory is
 allowed is `guard`'s job, not this one's.
 
+### `approve`
+
+- type: `list of command`
+- default: `[]`
+- ordered
+- host only
+
+Commands run as the invoking user once the session is named and
+before anything is bound, in order, to approve what the launch may
+be given -- a project's signed file, say -- and stage it under
+`$machine`, so that `binds` and every hook after it read only what
+was approved rather than whatever the workspace holds by then.
+
+Runs *after* `workspace` and *before* `binds`, with `$workspace`,
+`$workspace_mode` and `$machine` in the environment, the
+launcher's arguments after its own, and the invoking user's stdin
+and stderr, so it can ask a person. There is no `$binds` yet. Each
+is a process of its own: every one must exit 0 for the launch to
+go on, and the first that does not refuses it.
+
+What it stages, `postStop` releases: from the moment the session
+is named, before these run, `postStop` runs for `$machine` once,
+whichever way the launcher ends it, a refusal of these included.
+They run again when the launcher relaunches itself, under a new
+`$machine`, the old one released first.
+
+Like `guard`, it grants nothing: the invoking user can run
+`flong launch` with any declaration. It orders a consumer's own
+approval ahead of what depends on it.
+
 ### `binds`
 
 - type: `list of command`
@@ -228,11 +258,12 @@ read-only, or `PATH:rw`, bound read-write. Their outputs are
 concatenated, in order. Empty output binds nothing, and so does
 the default, no command.
 
-Runs after `workspace`, with `$workspace` and `$workspace_mode`
-in the environment, so it can answer "what travels with THIS
-directory" rather than having to name a fixed set. Runs as the
-invoking user and gets the launcher's arguments after its own, exactly as
-`workspace` does; a non-zero exit aborts.
+Runs after `workspace` and `approve`, with `$workspace`,
+`$workspace_mode` and `$machine` in the environment, so it can
+answer "what travels with THIS directory" rather than having to
+name a fixed set, and read what `approve` staged for this launch.
+Runs as the invoking user and gets the launcher's arguments after
+its own, exactly as `workspace` does; a non-zero exit aborts.
 
 Every path is resolved with `realpath`, must be a directory, and is
 refused if it names a `:` or a newline, as the working directory is.
@@ -258,10 +289,10 @@ check, not a gate: the container grants nothing the invoking user
 did not already have, and they can run `flong launch` directly with
 any declaration.
 
-Runs *after* `workspace` and `binds`, with their answers in its
-environment: `$workspace`, absolute and symlink-resolved,
-`$workspace_mode`, and `$binds`, one `PATH:ro` or `PATH:rw` per
-line. Judge those rather than re-deriving a directory from `$PWD`
+Runs *after* `workspace`, `approve` and `binds`, with their
+answers in its environment: `$workspace`, absolute and
+symlink-resolved, `$workspace_mode`, `$machine`, and `$binds`, one
+`PATH:ro` or `PATH:rw` per line. Judge those rather than re-deriving a directory from `$PWD`
 -- they are exactly what will be bound, where anything a guard
 works out for itself agrees with the mounts only by coincidence.
 
@@ -1076,7 +1107,7 @@ their own `log` lines: an `allow`, or a `nolog`, takes one back.
 
 Directories put in front of `PATH`, in this order, for the commands
 the launch runs as the invoking user before the container exists --
-`workspace`, `binds`, `guard`, `seccompPolicy` -- and in the
+`workspace`, `approve`, `binds`, `guard`, `seccompPolicy` -- and in the
 environment the launch goes on with, which the hooks start from.
 Under NixOS, the `bin` directories of `flong.<name>.path`. Empty,
 the default, leaves `PATH` as the invoking user's.

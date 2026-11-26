@@ -161,7 +161,7 @@ pub const Declaration = struct {
     /// entrypoint: both run as `user` inside the container, with no
     /// capability.
     ///
-    /// Once it has run, as once `seccompPolicy` has, `postStop` runs for
+    /// Once it has run, as once `approve` has, `postStop` runs for
     /// the container's `$machine` once, whichever way the launcher ends it:
     /// a refusal, even before the container starts, or a terminating signal
     /// (`SIGTERM`, `SIGINT`, `SIGHUP`, `SIGQUIT`), so whatever it staged
@@ -193,17 +193,42 @@ pub const Declaration = struct {
     /// allowed is `guard`'s job, not this one's.
     workspace: ?Command = null,
 
+    /// Commands run as the invoking user once the session is named and
+    /// before anything is bound, in order, to approve what the launch may
+    /// be given -- a project's signed file, say -- and stage it under
+    /// `$machine`, so that `binds` and every hook after it read only what
+    /// was approved rather than whatever the workspace holds by then.
+    ///
+    /// Runs *after* `workspace` and *before* `binds`, with `$workspace`,
+    /// `$workspace_mode` and `$machine` in the environment, the
+    /// launcher's arguments after its own, and the invoking user's stdin
+    /// and stderr, so it can ask a person. There is no `$binds` yet. Each
+    /// is a process of its own: every one must exit 0 for the launch to
+    /// go on, and the first that does not refuses it.
+    ///
+    /// What it stages, `postStop` releases: from the moment the session
+    /// is named, before these run, `postStop` runs for `$machine` once,
+    /// whichever way the launcher ends it, a refusal of these included.
+    /// They run again when the launcher relaunches itself, under a new
+    /// `$machine`, the old one released first.
+    ///
+    /// Like `guard`, it grants nothing: the invoking user can run
+    /// `flong launch` with any declaration. It orders a consumer's own
+    /// approval ahead of what depends on it.
+    approve: []const Command = &.{},
+
     /// Commands printing more of the invoking user's directories to bind, one
     /// per line, each at its own path inside the container: `PATH`, bound
     /// read-only, or `PATH:rw`, bound read-write. Their outputs are
     /// concatenated, in order. Empty output binds nothing, and so does
     /// the default, no command.
     ///
-    /// Runs after `workspace`, with `$workspace` and `$workspace_mode`
-    /// in the environment, so it can answer "what travels with THIS
-    /// directory" rather than having to name a fixed set. Runs as the
-    /// invoking user and gets the launcher's arguments after its own, exactly as
-    /// `workspace` does; a non-zero exit aborts.
+    /// Runs after `workspace` and `approve`, with `$workspace`,
+    /// `$workspace_mode` and `$machine` in the environment, so it can
+    /// answer "what travels with THIS directory" rather than having to
+    /// name a fixed set, and read what `approve` staged for this launch.
+    /// Runs as the invoking user and gets the launcher's arguments after
+    /// its own, exactly as `workspace` does; a non-zero exit aborts.
     ///
     /// Every path is resolved with `realpath`, must be a directory, and is
     /// refused if it names a `:` or a newline, as the working directory is.
@@ -223,10 +248,10 @@ pub const Declaration = struct {
     /// did not already have, and they can run `flong launch` directly with
     /// any declaration.
     ///
-    /// Runs *after* `workspace` and `binds`, with their answers in its
-    /// environment: `$workspace`, absolute and symlink-resolved,
-    /// `$workspace_mode`, and `$binds`, one `PATH:ro` or `PATH:rw` per
-    /// line. Judge those rather than re-deriving a directory from `$PWD`
+    /// Runs *after* `workspace`, `approve` and `binds`, with their
+    /// answers in its environment: `$workspace`, absolute and
+    /// symlink-resolved, `$workspace_mode`, `$machine`, and `$binds`, one
+    /// `PATH:ro` or `PATH:rw` per line. Judge those rather than re-deriving a directory from `$PWD`
     /// -- they are exactly what will be bound, where anything a guard
     /// works out for itself agrees with the mounts only by coincidence.
     ///
@@ -524,7 +549,7 @@ pub const Declaration = struct {
 
     /// Directories put in front of `PATH`, in this order, for the commands
     /// the launch runs as the invoking user before the container exists --
-    /// `workspace`, `binds`, `guard`, `seccompPolicy` -- and in the
+    /// `workspace`, `approve`, `binds`, `guard`, `seccompPolicy` -- and in the
     /// environment the launch goes on with, which the hooks start from.
     /// Under NixOS, the `bin` directories of `flong.<name>.path`. Empty,
     /// the default, leaves `PATH` as the invoking user's.
@@ -565,6 +590,7 @@ pub const Declaration = struct {
         .command = .host,
         .exec = .host,
         .workspace = .host,
+        .approve = .host,
         .binds = .host,
         .guard = .host,
         .postStart = .host,
@@ -1401,6 +1427,7 @@ const full =
     \\  "user": "alice",
     \\  "command": ["/nix/store/x-hello/bin/hello", "--greeting=hi there"],
     \\  "workspace": ["/nix/store/x-root/bin/root", "--git"],
+    \\  "approve": [["/nix/store/x-a/bin/a", "stage"]],
     \\  "binds": [["/nix/store/x-b1/bin/b1"], ["/nix/store/x-b2/bin/b2", "a"]],
     \\  "guard": [["/nix/store/x-g/bin/g"]],
     \\  "postStart": [["/nix/store/x-s/bin/s"]],
@@ -1491,6 +1518,7 @@ test "a full declaration parses, every field as written" {
     try testing.expectEqual(0, d.command.?[1][d.command.?[1].len]);
     try testing.expectEqual(null, d.exec);
     try testing.expectEqualStrings("--git", d.workspace.?[1]);
+    try testing.expectEqualStrings("stage", d.approve[0][1]);
     try testing.expectEqual(2, d.binds.len);
     try testing.expectEqualStrings("a", d.binds[1][1]);
     try testing.expectEqualStrings("/nix/store/x-g/bin/g", d.guard[0][0]);
@@ -1558,7 +1586,7 @@ test "a minimal declaration takes module.nix's defaults" {
     try testing.expectEqual(null, d.exec);
     try testing.expectEqual(0, d.environment.len);
     try testing.expectEqual(null, d.workspace);
-    try testing.expectEqual(0, d.binds.len + d.guard.len + d.postStart.len + d.postStop.len + d.seccompPolicy.len);
+    try testing.expectEqual(0, d.approve.len + d.binds.len + d.guard.len + d.postStart.len + d.postStop.len + d.seccompPolicy.len);
     try testing.expectEqual(null, d.network);
     try testing.expectEqual(0, d.overlays.len + d.masks.len + d.protect.len + d.containerMounts.len);
     try testing.expectEqual(Limits{}, d.limits);

@@ -176,6 +176,7 @@ shell. In launch order:
 | hook | runs | a non-zero exit |
 |---|---|---|
 | `workspace` | first; prints the working directory (default: where you ran it) | refuses the launch |
+| `approve` | once the session is named, before anything is bound; approves and stages what the launch may be given | refuses the launch |
 | `binds` | prints more directories to bind-mount | refuses the launch |
 | `guard` | checks the launch is one you meant | refuses the launch |
 | `seccompPolicy` | prints per-project seccomp rules | refuses the launch |

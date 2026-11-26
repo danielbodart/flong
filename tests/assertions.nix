@@ -280,6 +280,10 @@ let
         || throw "assertions: a guard as a shell string was accepted")
       (untyped { flong.box.guard = [ [ ] ]; } [ "flong" "box" "guard" ]
         || throw "assertions: an empty guard command was accepted")
+      (untyped { flong.box.approve = "true"; } [ "flong" "box" "approve" ]
+        || throw "assertions: an approve as a shell string was accepted")
+      (untyped { flong.box.approve = [ [ ] ]; } [ "flong" "box" "approve" ]
+        || throw "assertions: an empty approve command was accepted")
       (untyped { flong.box.binds = [ "printf" "/srv" ]; } [ "flong" "box" "binds" ]
         || throw "assertions: binds as one command rather than a list of them was accepted")
       (untyped { flong.box.postStart = "true"; } [ "flong" "box" "postStart" ]
@@ -302,6 +306,14 @@ let
           ];
         }).flong.box.guard == [ [ "a" ] [ "b" "x" ] [ "c" ] ]
         || throw "assertions: guard's commands did not merge in mkOrder order")
+      ((configWith {
+          flong.box.approve = lib.mkMerge [
+            (lib.mkAfter [ [ "c" ] ])
+            [ [ "b" "x" ] ]
+            (lib.mkBefore [ [ "a" ] ])
+          ];
+        }).flong.box.approve == [ [ "a" ] [ "b" "x" ] [ "c" ] ]
+        || throw "assertions: approve's commands did not merge in mkOrder order")
       # The generated options keep the types they had where the
       # declaration did not change them.
       (untyped { flong.box.limits.CPUWeight = 0; } [ "flong" "box" "limits" "CPUWeight" ]

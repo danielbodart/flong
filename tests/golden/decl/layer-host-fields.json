@@ -1,6 +1,7 @@
 {
   "user": "root",
   "exec": ["/bin/sh"],
+  "approve": [],
   "seccompPolicy": [],
   "overlays": { "/home/u/.ssh": "/root/.ssh" },
   "seccomp": { "nestedSandbox": true, "errno": "ENOSYS", "syscalls": { "ptrace": "allow" } },

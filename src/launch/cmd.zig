@@ -1,6 +1,6 @@
 //! launch/cmd.zig: a declaration's command, run as the caller, for
 //! `flong launch DECL.json`'s prologue (DESIGN.md, "Data is data; shell
-//! is for what only launch knows"): the workspace, binds, guard,
+//! is for what only launch knows"): the workspace, approve, binds, guard,
 //! seccompPolicy and exec commands, and what exec prints read as its
 //! protocol of tagged fields (`parseExec`).
 //!
@@ -125,8 +125,8 @@ pub fn run(gpa: Allocator, command: Command, args: []const [*:0]const u8, envp: 
     };
 }
 
-/// Each of `commands` in order, as `run`, until one fails: the guard
-/// (:186-188), each of which must pass. A status other than 0 is
+/// Each of `commands` in order, as `run`, until one fails: approve and the
+/// guard (:186-188), each of which must pass. A status other than 0 is
 /// error.Reported, the command having said why.
 pub fn pass(gpa: Allocator, commands: []const Command, args: []const [*:0]const u8, envp: Envp) sig.Error!void {
     for (commands) |c| {

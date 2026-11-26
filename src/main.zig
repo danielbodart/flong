@@ -142,10 +142,11 @@ const help_text = usage ++
     \\    Start a session from the declaration in the file DECL.json (a word
     \\    with a '/' in it, or ending in .json), run its command inside with
     \\    the ARGUMENTs after its own, and wait for it. The declaration's
-    \\    workspace, binds, guard, seccompPolicy and postStart commands get
-    \\    the ARGUMENTs after their own too. Run it as yourself: it refuses
-    \\    root, and needs a subordinate id range in /etc/subuid and
-    \\    /etc/subgid, newuidmap and newgidmap, and a systemd user manager.
+    \\    workspace, approve, binds, guard, seccompPolicy and postStart
+    \\    commands get the ARGUMENTs after their own too. Run it as
+    \\    yourself: it refuses root, and needs a subordinate id range in
+    \\    /etc/subuid and /etc/subgid, newuidmap and newgidmap, and a
+    \\    systemd user manager.
     \\    When its prepared root is swept before it holds it, it relaunches
     \\    itself.
     \\
@@ -155,8 +156,8 @@ const help_text = usage ++
     \\    could not be attached); 1 when the declaration cannot be read or
     \\    flong check refuses it (`flong launch: ...`), when the launch is
     \\    refused before the session (`NAME: ...`, NAME the declaration's),
-    \\    or when a workspace, binds, guard or seccompPolicy command fails;
-    \\    2 on a usage error. stderr says which.
+    \\    or when a workspace, approve, binds, guard or seccompPolicy command
+    \\    fails; 2 on a usage error. stderr says which.
     \\
     \\flong launch NAME [-- ARGUMENT...]
     \\    The same, for the declaration called NAME: NAME.json in the first

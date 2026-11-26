@@ -2,6 +2,7 @@
   "user": "alice",
   "command": ["/nix/store/x-hello/bin/hello", "--greeting=hi there"],
   "workspace": ["/nix/store/x-root/bin/root", "--git"],
+  "approve": [["/nix/store/x-a/bin/a"]],
   "binds": [["/nix/store/x-b1/bin/b1"], ["/nix/store/x-b2/bin/b2", "a"]],
   "guard": [["/nix/store/x-g/bin/g"]],
   "postStart": [["/nix/store/x-s/bin/s"]],

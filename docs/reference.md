@@ -12,8 +12,8 @@ rule. `flong launch <name> -- ARGS` does the same from
 
 The launcher has your privilege and no more. You can enter, change or read
 any of your containers from the host, as you can any process you run, so
-its checks (`workspace`, `binds`, `guard`) are consistency checks, not a
-security boundary. The boundary is between the entrypoint and you.
+its checks (`workspace`, `approve`, `binds`, `guard`) are consistency checks,
+not a security boundary. The boundary is between the entrypoint and you.
 
 Exit codes:
 
@@ -22,7 +22,7 @@ Exit codes:
 | the entrypoint's | it ran and exited |
 | 128+n | a signal killed it |
 | 125 | it never ran: `postStart` failed, the network could not be attached, or the spec was refused |
-| 1 | refused before launch: the declaration, the user, the working directory, the id maps, or a failing `workspace`, `binds`, `guard`, `seccompPolicy` or `exec` |
+| 1 | refused before launch: the declaration, the user, the working directory, the id maps, or a failing `workspace`, `approve`, `binds`, `guard`, `seccompPolicy` or `exec` |
 | 2 | usage error, or no such declaration |
 
 If the cached rootfs is removed during a launch, the launcher starts again
@@ -38,9 +38,10 @@ so several modules' lists concatenate (`mkBefore`, `mkAfter`).
 | hook | sees |
 |---|---|
 | `workspace` | `"$@"` |
-| `binds` | `"$@"`, `$workspace`, `$workspace_mode` (`ro` or `rw`) |
+| `approve` | `"$@"`, `$workspace`, `$workspace_mode` (`ro` or `rw`), `$machine` |
+| `binds` | the same |
 | `guard` | the above and `$binds` (one `PATH:ro` or `PATH:rw` per line) |
-| `seccompPolicy` | the above and `$machine` |
+| `seccompPolicy` | the same |
 | `exec` | the same |
 | `postStart` | the above, `$leader` (the container's pid 1 on the host), `$userns` and `$netns` (its namespaces, as descriptors), `$uid`, `$gid`, `$home` |
 | `postStop` | `$machine` only |
@@ -56,7 +57,9 @@ so several modules' lists concatenate (`mkBefore`, `mkAfter`).
   cgroup and killed with it.
 - `postStop` must depend on `$machine` alone and succeed when what it
   releases is already gone. It runs once for every `$machine` that
-  `seccompPolicy` or `exec` saw, whether the container ran or not.
+  `approve` saw, whether the container ran or not.
+- `approve` runs before `binds`: what it stages under `$machine`, such as a
+  project's verified file, is what `binds` and every later hook read.
 
 ## `exec`
 

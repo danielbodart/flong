@@ -913,7 +913,7 @@ test "x-scope: host for what a project may never set, tighten for the tier" {
         "cgid",                   "steps8",                   "containerMounts",               "containerMounts.*.kind",
         "name",                   "environment",              "environment.*.value",           "seccompTierFilter",
         "seccompFixedFilters",    "seccompProject",           "seccompProject.logged",         "commandPath",
-        "postStartProgram",       "postStopProgram",
+        "postStartProgram",       "postStopProgram",          "approve",
     };
     for (host) |p| {
         const x = find(top, p) orelse return error.NoSuchPath;
@@ -1006,6 +1006,7 @@ test "the reference spells each type and default as JSON does" {
         .{ .path = "environment", .type = "list of struct", .default = "[]" },
         .{ .path = "environment.*.name", .type = "string", .default = null },
         .{ .path = "workspace", .type = "command, or null", .default = "null" },
+        .{ .path = "approve", .type = "list of command", .default = "[]" },
         .{ .path = "guard", .type = "list of command", .default = "[]" },
         .{ .path = "masks", .type = "list of string matching /.*", .default = "[]" },
         .{ .path = "network", .type = "struct, or null", .default = "null" },

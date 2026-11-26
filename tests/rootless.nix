@@ -363,8 +363,20 @@ in
           masks = [ "/rw/secret" ];
           protect = [ "/srv/protected" ];
           workspace = [ (script "workspace" "echo /srv/work:ro") ];
-          # The caller's bind, and one more the caller's environment names.
+          # Stages its approval under $machine, which binds reads, or
+          # refuses when the caller's environment says to; postStop
+          # releases what it staged.
+          approve = hook "approve" ''
+            [ -z "''${binds+set}" ] || { echo "approve saw \$binds" >&2; exit 1; }
+            [ -z "''${FLONG_TEST_UNAPPROVED:-}" ] || { echo "approve refuses $machine" >&2; exit 1; }
+            echo "$workspace" > "/tmp/approved-$machine"
+          '';
+          postStop = hook "poststop" postStop;
+          # The caller's bind, and one more the caller's environment names,
+          # only once approve has staged this launch's approval.
           binds = hook "binds" ''
+            [ -e "/tmp/approved-$machine" ] || { echo "binds ran before approve" >&2; exit 1; }
+            echo "$machine" >> /tmp/binds-ran
             printf '%s:rw\n' /srv/companion
             if [ -n "''${FLONG_TEST_BIND:-}" ]; then printf '%s\n' "$FLONG_TEST_BIND"; fi
           '';
@@ -958,6 +970,26 @@ in
 
         out = machine.succeed(as_user("FLONG_TEST_DENY=1 mounts true 2>&1; echo rc=$?"))
         assert "the guard refuses" in out and out.split()[-1] == "rc=1", out
+
+    @test("approve runs once the session is named and before binds, and its refusal runs postStop", part="b")
+    def _():
+        machine.succeed("rm -f /tmp/approved-* /tmp/poststop-* /tmp/binds-ran")
+        # Approved: binds found the stage approve made under the same name.
+        machine.succeed(as_user("mounts true"))
+        ran = machine.succeed("cat /tmp/binds-ran").split()
+        assert len(ran) == 1 and ran[0].startswith("mnt-"), ran
+        name = ran[0]
+        assert machine.succeed(f"cat /tmp/approved-{name}").strip() == "/srv/work", name
+        machine.wait_until_succeeds(f"test -s /tmp/poststop-{name}")
+
+        # Refused: no bind ran, and postStop ran for the name approve saw.
+        machine.succeed("rm -f /tmp/poststop-* /tmp/binds-ran")
+        out = machine.succeed(as_user("FLONG_TEST_UNAPPROVED=1 mounts true 2>&1; echo rc=$?"))
+        assert out.split()[-1] == "rc=1", out
+        refused = [w for w in out.split() if w.startswith("mnt-")]
+        assert refused, out
+        machine.fail("test -e /tmp/binds-ran")
+        assert machine.succeed(f"cat /tmp/poststop-{refused[0]}").split() == [refused[0]]
 
     @test("a mask one level below a writable bind holds against a rename", part="b")
     def _():

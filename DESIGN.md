@@ -30,19 +30,20 @@ manager").
 
 1. Refuse a user of uid 0 or of primary group 0. Use `/run/user/$UID`, which
    must exist and be yours.
-2. `workspace`, then `binds`, then `guard`, each as you.
+2. `workspace`, as you.
 3. Block the launch's signals and read them from a signalfd. Name the
    container `<name>-<launcher pid>-<64 random bits, in hex>`, a name no other
-   container has had; this is `$machine`. Run `seccompPolicy` and compile what
-   it prints; then `exec`, when the declaration has it, and read the
-   entrypoint it prints. From here, a prologue or launch that fails before the
-   container's record exists runs `postStop` for the name itself
-   ([Teardown](#teardown)).
-4. Check the depth rule against your writable binds.
-5. Build the id maps from `/etc/subuid` and `/etc/subgid`.
-6. Build the rootfs if this closure, build program and map have none cached.
-7. Read `user`'s uid, gid, home and groups from the rootfs.
-8. Build the spec, the value that describes one container, and hand it to the
+   container has had; this is `$machine`. From here, a prologue or launch that
+   fails before the container's record exists runs `postStop` for the name
+   itself ([Teardown](#teardown)). Run `approve`, as you.
+4. `binds`, then `guard`, each as you. Run `seccompPolicy` and compile what it
+   prints; then `exec`, when the declaration has it, and read the entrypoint
+   it prints.
+5. Check the depth rule against your writable binds.
+6. Build the id maps from `/etc/subuid` and `/etc/subgid`.
+7. Build the rootfs if this closure, build program and map have none cached.
+8. Read `user`'s uid, gid, home and groups from the rootfs.
+9. Build the spec, the value that describes one container, and hand it to the
    launch.
 
 The launch then runs the container, in this order (the full table is in
@@ -91,11 +92,12 @@ So nothing is declared by running a command:
   records they are. There is no hook before the container starts, because
   nothing a container is given at start is unknown at evaluation except your
   directories, which `workspace` and `binds` compute.
-- **The hooks are commands, never shell.** `workspace`, `binds`, `guard`,
-  `seccompPolicy` and `exec` run at launch because what they answer is known
-  only then (the repository around your working directory, what travels with
-  it, a project's own syscall policy, the entrypoint a project asks for) or is
-  a judgement on this launch; `postStart` and `postStop` because they act on
+- **The hooks are commands, never shell.** `workspace`, `approve`, `binds`,
+  `guard`, `seccompPolicy` and `exec` run at launch because what they answer
+  is known only then (the repository around your working directory, what a
+  project's signed file approves, what travels with it, a project's own
+  syscall policy, the entrypoint a project asks for) or is a judgement on this
+  launch; `postStart` and `postStop` because they act on
   the container. Each is an argument list run as it is, with the launcher's
   arguments after its own, and all but `workspace` and `exec` are lists of
   them, which a module such as frisket's adapter adds to: several modules'
@@ -112,7 +114,8 @@ declaration's hook program, `flong-poststart-<name>` or
 `flong-poststop-<name>` (the declaration's `postStartProgram` and
 `postStopProgram`), which puts `path` on `PATH`, drops the machine name the
 record appends to a `postStop` command, and execs the command. The
-launch-time hooks (`workspace`, `binds`, `guard`, `seccompPolicy`, `exec`) get
+launch-time hooks (`workspace`, `approve`, `binds`, `guard`, `seccompPolicy`,
+`exec`) get
 `path` as the declaration's `commandPath`, in front of `PATH`. The prologue
 exports nothing of its own but what the hooks are documented to see, so your
 variables reach them and the launch as they came.
@@ -398,8 +401,9 @@ entries; the runtime directory is a tmpfs of 10% of RAM.
   link's name is looked up again), which builds afresh or waits on the
   builder's lock; so do the three points of the prologue that find the cache
   swept before they hold it. There is no count: each turn follows a sweep's
-  rename, an event. A relaunch runs `guard`, `seccompPolicy` and `exec` again,
-  under a new `$machine`, after `postStop` has run for the old one.
+  rename, an event. A relaunch runs `approve`, `binds`, `guard`,
+  `seccompPolicy` and `exec` again, under a new `$machine`, after `postStop`
+  has run for the old one.
 
 **Integrity is yours.** Anything running as you can edit the cache, and
 nothing stored in space you can write could stop that. There is a sanity
@@ -452,18 +456,30 @@ so there is no other to choose.
 
 ## Every hook runs as the invoking user
 
-`workspace`, `binds`, `guard`, `seccompPolicy`, `exec`, `postStart` and
-`postStop` all run as you, with your privilege and no more. A hook that
-configures the container enters its namespaces (see
+`workspace`, `approve`, `binds`, `guard`, `seccompPolicy`, `exec`,
+`postStart` and `postStop` all run as you, with your privilege and no more. A
+hook that configures the container enters its namespaces (see
 [postStart](#poststart-the-gate-and-readiness)); nothing is done as host root.
 
 `workspace` runs first, in the directory you chose. A project's command
 commonly runs `git` there, which reads configuration from the repository it is
 pointed at; as you, that grants nothing you lacked. The default, `null`, is
 taken without a fork. The printed path is resolved to its physical path before
-it is checked, so what is checked is what is mounted. `binds` runs next, the
-same way, with `$workspace` exported so it can name what travels with that
-directory.
+it is checked, so what is checked is what is mounted.
+
+**`approve` runs next, once the container is named and before anything is
+bound**, with `$workspace`, `$workspace_mode` and `$machine`, and no `$binds`,
+since there are none yet. It approves what the launch may be given -- a
+project's signed file, say, which it verifies, or puts to a person -- and
+stages it under `$machine`. Every hook after it then reads what was approved
+for this launch, never the workspace's file as it stands by then, which a
+session of the same checkout could have changed. Each command must exit 0, as
+a guard's must. It decides nothing flong enforces: it orders a consumer's own
+approval ahead of what depends on it, `binds` included.
+
+`binds` runs after it, the same way as `workspace`, with `$workspace` and
+`$machine` exported so it can name what travels with that directory and read
+what `approve` staged.
 
 Your paths travel as `PATH:MODE`, one per line: in what the hooks print, in
 `$binds` for the guard, and in `FLONG_BINDS` for the entrypoint. So `:` and
@@ -480,7 +496,7 @@ to `true` in the declaration: a directory is writable because a line says
 `FLONG_BINDS` spell the mode out on every entry, so neither the guard nor the
 entrypoint has to know the default.
 
-**`guard` is a consistency check, not a gate.** It runs third, with
+**`guard` is a consistency check, not a gate.** It runs after `binds`, with
 `$workspace`, `$workspace_mode` and `$binds` as they will be mounted, and
 judges those rather than re-deriving a directory from `$PWD`. A non-zero exit
 refuses the launch. Without root it cannot refuse you anything: you can run
@@ -490,23 +506,24 @@ checks do, and like them it is not warned about. It runs in a process of its
 own, so `exit 0` allows the launch rather than ending the launcher, and
 nothing it assigns reaches the launcher.
 
-**`seccompPolicy` runs after the guard**, with what the guard sees and with
-`$machine`, the name `postStart` and `postStop` will see: what it approves for
-them can be staged per launch rather than per checkout, where two launches of
-one checkout at once would each apply the other's approval. See
+**`seccompPolicy` runs after the guard**, with what the guard sees,
+`$machine` among it, the name `postStart` and `postStop` will see: what
+`approve` and it stage for them is staged per launch rather than per
+checkout, where two launches of one checkout at once would each apply the
+other's approval. See
 [Seccomp](#seccomp). **`exec` runs after it**, with the same, and prints the
 entrypoint ([`exec`](#exec-an-entrypoint-only-the-launch-can-decide)).
 
-**What those two stage, `postStop` releases, whichever way the launcher ends
-the launch.** From the moment the container is named, before `seccompPolicy`,
+**What the hooks stage, `postStop` releases, whichever way the launcher ends
+the launch.** From the moment the container is named, before `approve`,
 every end the launcher sees runs `postStop` for `$machine` exactly once: the
 container's teardown or the sweep, from its record, once the record exists;
 before that, the launch itself (`assemble.Early`), whether the prologue
 refuses, the spec is refused, the cache is swept and flong relaunches under a
 new name, or the launch fails before its record (the holder cannot start,
 say). The prologue blocks the launch's signals and opens its signalfd just
-before it names the container, so a terminating signal while `seccompPolicy`
-or `exec` runs, or the rootfs is built, ends that wait as an event, kills the
+before it names the container, so a terminating signal while `approve`,
+`binds`, `guard`, `seccompPolicy` or `exec` runs, or the rootfs is built, ends that wait as an event, kills the
 command and runs `postStop`. One that is queued, unread, when the cache is
 found swept ends the launch there, 128+n, after `postStop`, rather than being
 taken off the signalfd and lost to a relaunch that would run every command
@@ -517,8 +534,8 @@ have one: the pid tells it from every live launcher's, the bits from every
 ended container's record a sweep has yet to release. So a launch that fails
 before its record never finds its name another's, and runs `postStop` for it
 whatever the failure. With 15 random bits a reused pid would meet an ended
-container's name once in 32768, and what `seccompPolicy` and `exec` staged
-would overwrite that container's before the record's refusal could say so.
+container's name once in 32768, and what `approve`, `seccompPolicy` and
+`exec` staged would overwrite that container's before the record's refusal could say so.
 
 What the launcher cannot see end it -- a SIGKILL, the OOM killer, a crash --
 before the record exists leaves nothing that knows the name, and what was
@@ -541,7 +558,7 @@ otherwise. What differs is who fills the record in, and when:
 | source | filled in by | when | shape |
 |---|---|---|---|
 | `containers.<name>.bindMounts` | the admin, in Nix | evaluation | any file, at any mount point |
-| `workspace`, `binds` | you, through the hooks | launch, before `guard` | a directory, at its own path |
+| `workspace`, `binds` | you, through the hooks | launch, after `approve` and before `guard` | a directory, at its own path |
 
 The rest follows from who fills it in:
 
@@ -1893,7 +1910,7 @@ map keyed by identity, `seccomp.syscalls` first.
 host may, `host`, and so is everything below it; or a project may only
 tighten it, `tighten`. Host fields are the ones that decide what a session
 can reach rather than how it behaves: `user`, every hook (`command`,
-`exec`, `workspace`, `binds`, `guard`, `postStart`, `postStop`,
+`exec`, `workspace`, `approve`, `binds`, `guard`, `postStart`, `postStop`,
 `seccompPolicy`), `overlays`, `masks`, `protect`,
 `network.forwardAddress`, `network.forwardInterface`,
 `network.hostLoopbackToSession`, `seccomp.nestedSandbox`, `seccomp.errno`,
@@ -2462,7 +2479,7 @@ the exec, since the relaunch names another container.
 | 125 | the entrypoint never ran: a refusal of the spec, a failed step, a failing hook, pasta failing (a host port in use), bwrap failing, flong init's gate EOF, a relaunch that could not exec. stderr says which |
 | 1 | the prologue refused, before the spec: the declaration, the user, the working directory, a hook, `exec`'s output, the maps, the rootfs |
 | 2 | a usage error, or a name with no declaration |
-| 128+n | a terminating signal n reached the launcher before the gate, from the moment the prologue names the container: the launch was aborted, `postStop` run and the rest torn down. Before then, while `workspace`, `binds` and `guard` run, a signal ends the launcher as its default action |
+| 128+n | a terminating signal n reached the launcher before the gate, from the moment the prologue names the container: the launch was aborted, `postStop` run and the rest torn down. Before then, while `workspace` runs, a signal ends the launcher as its default action |
 
 After the gate a signal is forwarded, not acted on, so the entrypoint's status
 tells what happened: `^C` is 130 under a pty and in a pipeline, `^]^]^]` is
